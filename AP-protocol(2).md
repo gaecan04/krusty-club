@@ -374,7 +374,7 @@ When a drone receives a packet, it **must** perform the following steps:
 
 Consider the following simplified network topology:
 
-![constellation](assets/costellation.png)
+![constellation](costellation.png)
 
 Suppose that client A wants to send a message to server D.
 
