@@ -102,7 +102,7 @@ Note: it is not mandatory to follow this precise order.
 
 Consider the following simplified network topology:
 
-![constellation](assets/costellation.png)
+![constellation](costellation.png)
 
 Suppose that client A wants to send a message to server D.
 
