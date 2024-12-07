@@ -1,1 +1,1 @@
-mod tests;
+pub(crate) mod tests;
