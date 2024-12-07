@@ -18,26 +18,9 @@ pub struct MyDrone {
     pub sim_contr_send: Sender<DroneEvent>, // Sends events to Simulation Controller
     pub sim_contr_recv: Receiver<DroneCommand>, // Receives commands from Simulation Controller
 }
-/*
-pub trait Drone {
-    /// The list packet_send would be crated empty inside new.
-    /// Other nodes are added by sending command
-    /// using the simulation control channel to send 'Command(AddChannel(...))'.
-    fn new(
-        id: NodeId,
-        controller_send: Sender<DroneEvent>,
-        controller_recv: Receiver<DroneCommand>,
-        packet_recv: Receiver<Packet>,
-        packet_send: HashMap<NodeId, Sender<Packet>>,
-        pdr: f32,
-    ) -> Self;
-
-    fn run(&mut self);
-}*/
-
 
 impl Drone for MyDrone {
-    fn new(id: NodeId, sim_contr_send: Sender<DroneEvent>, sim_contr_recv: Receiver<DroneCommand>,packet_recv:Receiver<Packet>,packet_send:HashMap<NodeId,Sender<Packet>>,pdr: f32) -> Self {
+    fn new(id: NodeId, sim_contr_send: Sender<DroneEvent>, sim_contr_recv: Receiver<DroneCommand>, packet_recv: Receiver<Packet>, packet_send: HashMap<NodeId, Sender<Packet>>, pdr: f32) -> Self {
         Self {
             id,
             sim_contr_send,
@@ -48,27 +31,34 @@ impl Drone for MyDrone {
         }
     }
 
-
     fn run(&mut self) {
         let mut seen_flood_ids: HashSet<u64> = HashSet::new(); // Track seen flood IDs locally
-
         loop {
             select_biased! {
                 recv(self.sim_contr_recv) -> command => {
                     if let Ok(command) = command {
+                        println!("command received");
                         self.handle_command(command);
+                    }else{
+                        println!("Simulation Controller channel closed. Exiting loop.");
+                        break;
                     }
                 }
                 recv(self.packet_recv) -> packet => {
+                    println!("Checking for received packet...");
                     if let Ok(packet) = packet {
-                        self.fucking_handle_packet(packet, &mut seen_flood_ids); // Pass the HashSet to handle_packet
+                        println!("Packet received by drone: {:?}", packet);
+                        self.fucking_handle_packet(packet, &mut seen_flood_ids);
+                    } else {
+                        println!("No packet received or channel closed.");
                     }
-                },
+                 },
             }
         }
     }
-}
 
+
+}
 impl MyDrone {
     fn fucking_handle_packet(&mut self, mut packet: Packet, seen_flood_ids: &mut HashSet<u64>) {
         //1 if yes
@@ -84,6 +74,7 @@ impl MyDrone {
                 let next_hop = packet.routing_header.hops[packet.routing_header.hop_index].clone();
                 if let Some(sender) = self.packet_send.get(&next_hop).cloned() {
                     //5
+
                     self.process_packet(packet, seen_flood_ids, &sender);
                 } else {
                     //if not neighbor
@@ -109,21 +100,25 @@ impl MyDrone {
             },
 
             PacketType::MsgFragment(ref fragment) => {
+
                 if self.should_drop_packet() {
                     //send to sim a NodeEvent:: Dropped
                     self.sim_contr_send
                         .send(DroneEvent::PacketDropped(packet.clone()))
-                        .unwrap_or_else(|err| eprintln!("Packet has been dropped, sending to sim_controller now... : {}", err));
+                        .unwrap_or_else(|err| eprintln!("Packet has been dropped but sending to sim_controller failed... : {}", err));
+
                     //manipulate test cases inside send_nack
                     self.send_nack(packet.clone(), NackType::Dropped);
                 } else {
+
                     sender.send(packet.clone()).unwrap_or_else(|err| {
                         eprintln!("Failed to forward packet: {}", err);
                     });
-                    self.send_ack(packet.clone()); //each time a msg fragment is sent, send also an ack backward.
+                    //self.send_ack(packet.clone()); //each time a msg fragment is sent, send also an ack backward.
                     self.sim_contr_send
                         .send(DroneEvent::PacketSent(packet.clone()))
                         .unwrap_or_else(|err| eprintln!("Packet has been sent correctly, sending to sim_controller now... : {}", err));
+
                 }
             },
 
@@ -133,7 +128,7 @@ impl MyDrone {
                     routing_header: packet.routing_header.clone(),
                     session_id: packet.session_id,
                 };
-                self.forward_back(ack_packet); //through sim controller!!
+                self.forward_back(ack_packet);
             },
             PacketType::Nack(nack) => {
                 let nack_packet = Packet {
@@ -141,7 +136,7 @@ impl MyDrone {
                     routing_header: packet.routing_header.clone(),
                     session_id: packet.session_id,
                 };
-                self.forward_back(nack_packet); //through sim controller!!
+                self.forward_back(nack_packet);
             },
             _ => {}
         }
@@ -195,51 +190,49 @@ impl MyDrone {
     }
 
     fn should_drop_packet(&self) -> bool {
-        let mut rng = rand::thread_rng();
-        rng.gen::<f32>() < self.pdr
+        let mut rng = rand::thread_rng(); // Create a random number generator
+        rng.gen_range(0.0..1.0) < self.pdr // Generate a random f32 in [0.0, 1.0)
     }
 
     fn send_nack(&self, packet: Packet, nack_type: NackType) {
-        let fragmentIndex = match &packet.pack_type {
-            MsgFragment(fragment) => fragment.fragment_index,
-            _ => 0,
+        let fragmentIndex = if let MsgFragment(fragment) = &packet.pack_type {
+            fragment.fragment_index
+        } else {
+            0
         };
-        let mut nack_packet = Packet {
+        let  nack_packet = Packet {
             pack_type: PacketType::Nack(Nack {
                 fragment_index: fragmentIndex,
                 nack_type,
             }),
-            routing_header: SourceRoutingHeader {
-                hop_index: 0, // Start from the source of the packet
-                hops: packet.routing_header.hops.clone(), // Use the original path to reach the source
-            },
+            routing_header: SourceRoutingHeader{hop_index:1,hops: packet.routing_header.hops[0..packet.routing_header.hop_index].to_owned().iter().rev().copied().collect() },
             session_id: packet.session_id, // Increment session ID if needed
         };
-        self.forward_back(nack_packet.clone());
+        self.forward_back(nack_packet);
     }
 
-    fn send_ack(&self, packet: Packet) {
+    /*fn send_ack(&self, packet: Packet) {
         let fragmentIndex = match &packet.pack_type {
             MsgFragment(fragment) => fragment.fragment_index,
             _ => 0,
         };
 
-        let mut ack = Packet {
+        let ack = Packet {
             pack_type: PacketType::Ack(Ack {
                 fragment_index: fragmentIndex,
             }),
-            routing_header: packet.routing_header.clone(),
+            routing_header: SourceRoutingHeader{hop_index:1,hops: packet.routing_header.hops[0..packet.routing_header.hop_index].to_owned().iter().rev().copied().collect() },
             session_id: packet.session_id,
         };
+
         self.forward_back(ack);
-    }
+    }*/
 
     fn forward_back(&self, mut packet: Packet) {
-        packet.routing_header.hop_index -= 1;
 
+        //packet.routing_header.hop_index += 1;
         // Get the previous hop
-        let prev_hop = packet.routing_header.hops.get(packet.routing_header.hop_index).unwrap();
-
+        if let Some(prev_hop) = packet.routing_header.hops.get(packet.routing_header.hop_index) {
         if let Some(sender) = self.packet_send.get(&prev_hop) {
             match sender.try_send(packet.clone()) {
                 Ok(()) => {
@@ -247,17 +240,18 @@ impl MyDrone {
                     sender.send(packet.clone()).unwrap();
                 }
                 Err(e) => {
-                    eprintln!("Failed to forward packet: {}", e);
+                    eprintln!("Failed to forward_back packet: {}", e);
                     // Clone again for sending via ControllerShortcut
                     self.sim_contr_send
                         .send(DroneEvent::ControllerShortcut(packet.clone()))
                         .unwrap_or_else(|err| {
-                            eprintln!("Failed to send NACK via ControllerShortcut: {}", err);
+                            eprintln!("Failed to send Ack/NACK via ControllerShortcut: {}", err);
                         });
                 }
             }
         }
     }
+}
 
     fn process_flood_request(&mut self, request: FloodRequest, seen_flood_ids: &mut HashSet<u64>) {
         let mut updated_request = request.clone();
@@ -349,32 +343,38 @@ impl MyDrone {
 
 #[cfg(test)]
 mod tests {
-    use wg_2024::tests::{generic_chain_fragment_ack, generic_chain_fragment_drop, generic_fragment_drop, generic_fragment_forward};
+   use crate::tests::tests::{generic_chain_fragment_ack, generic_chain_fragment_drop, generic_fragment_drop, generic_fragment_forward, test_drone_crash, test_flood_request};
     //use crate::droneK::drone::MyDrone;
     use crate::droneK::drone::*;
-
 
     #[test]
     fn test_fragment_forward() {
         generic_fragment_forward::<MyDrone>();
     }
 
+
     #[test]
     fn test_fragment_drop() {
         generic_fragment_drop::<MyDrone>();
     }
-
-
 
     #[test]
     fn test_chain_fragment_drop() {
         generic_chain_fragment_drop::<MyDrone>();
     }
 
+
     #[test]
     fn test_chain_fragment_ack() {
         generic_chain_fragment_ack::<MyDrone>();
     }
+
+    #[test]
+    fn test_of_flood_request(){test_flood_request::<MyDrone>();}
+
+
+    #[test]
+    fn test_of_drone_crash(){test_drone_crash::<MyDrone>();}
 
 }
 
