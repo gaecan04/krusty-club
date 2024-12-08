@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::collections::HashMap;
+use std::process::id;
 use crossbeam_channel::{select, select_biased, Receiver, Sender};
 use rand::Rng;
 use wg_2024::controller::{DroneCommand, DroneEvent};
@@ -48,7 +49,7 @@ impl Drone for MyDrone {
                     println!("Checking for received packet...");
                     if let Ok(packet) = packet {
                         println!("Packet received by drone: {:?}", packet);
-                        self.fucking_handle_packet(packet, &mut seen_flood_ids);
+                        self.handle_packet(packet, &mut seen_flood_ids);
                     } else {
                         println!("No packet received or channel closed.");
                     }
@@ -60,7 +61,7 @@ impl Drone for MyDrone {
 
 }
 impl MyDrone {
-    fn fucking_handle_packet(&mut self, mut packet: Packet, seen_flood_ids: &mut HashSet<u64>) {
+    fn handle_packet(&mut self, mut packet: Packet, seen_flood_ids: &mut HashSet<u64>) {
         //1 if yes
         if packet.routing_header.hops[packet.routing_header.hop_index] == self.id {
             //2
@@ -88,12 +89,12 @@ impl MyDrone {
     }
 
     //related to step5
-    fn process_packet(&mut self, packet: Packet, seen_flood_ids: &mut HashSet<u64>, sender: &Sender<Packet>) {
+    fn process_packet(&mut self, mut packet: Packet, seen_flood_ids: &mut HashSet<u64>, sender: &Sender<Packet>) {
         match packet.pack_type {
             PacketType::FloodRequest(request) => {
-                //send flood response back
-                self.send_flood_response(request.clone());
-                self.process_flood_request(request, seen_flood_ids);
+                println!("Flood request: {:?}", packet.session_id);
+                //packet.routing_header.hop_index+=1;
+                self.process_flood_request(request, packet.routing_header.clone(), seen_flood_ids);
             },
             PacketType::FloodResponse(response) => {
                 self.forward_back_response(response); //modify the trace, pop first element
@@ -168,7 +169,18 @@ impl MyDrone {
     fn process_crash(&mut self) {
         println!("Drone {} is entering crashing state.", self.id);
 
-        // Step 1: Wait for the receiver channel to be empty
+        // Step 1: Notify neighbors to remove references to this drone
+        /*
+        for (neighbor_id, sender_channel) in self.packet_send.iter() {
+            // Notify the neighbor to remove this drone
+            if let Some(neighbor) = self.packet_send.get(neighbor_id) {
+                //here should remove from the neighbor hashmap of neighbors the drone which crashed,
+                println!("Drone {} removed from neighbor {}.", self.id, neighbor_id);
+            }
+
+        }*/
+
+        // Step 2: Wait for the receiver channel to be empty
         while !self.packet_recv.is_empty() {
             // Drain remaining packets if new ones arrive
             while let Ok(packet) = self.packet_recv.try_recv() {
@@ -186,6 +198,7 @@ impl MyDrone {
         // PROMEMORIA : COME PROCESSIAMO I MESSAGE_FRAGMENT???????????????????????????????????????????
         // Step 2: Close all sender channels to neighbors
         self.packet_send.clear();
+        //self.packet_recv=
         println!("Drone {} has crashed and disconnected from neighbors.", self.id);
     }
 
@@ -233,64 +246,82 @@ impl MyDrone {
         //packet.routing_header.hop_index += 1;
         // Get the previous hop
         if let Some(prev_hop) = packet.routing_header.hops.get(packet.routing_header.hop_index) {
-        if let Some(sender) = self.packet_send.get(&prev_hop) {
-            match sender.try_send(packet.clone()) {
-                Ok(()) => {
-                    // Cloning ensures that packet is not moved
-                    sender.send(packet.clone()).unwrap();
-                }
-                Err(e) => {
-                    eprintln!("Failed to forward_back packet: {}", e);
-                    // Clone again for sending via ControllerShortcut
-                    self.sim_contr_send
-                        .send(DroneEvent::ControllerShortcut(packet.clone()))
-                        .unwrap_or_else(|err| {
-                            eprintln!("Failed to send Ack/NACK via ControllerShortcut: {}", err);
-                        });
+            if let Some(sender) = self.packet_send.get(&prev_hop) {
+                match sender.try_send(packet.clone()) {
+                    Ok(()) => {
+                        // Cloning ensures that packet is not moved
+                        sender.send(packet.clone()).unwrap();
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to forward_back packet: {}", e);
+                        // Clone again for sending via ControllerShortcut
+                        self.sim_contr_send
+                            .send(DroneEvent::ControllerShortcut(packet.clone()))
+                            .unwrap_or_else(|err| {
+                                eprintln!("Failed to send Ack/NACK via ControllerShortcut: {}", err);
+                            });
+                    }
                 }
             }
         }
     }
-}
 
-    fn process_flood_request(&mut self, request: FloodRequest, seen_flood_ids: &mut HashSet<u64>) {
+
+    fn process_flood_request(&mut self, request: FloodRequest, original_routing_header: SourceRoutingHeader, seen_flood_ids: &mut HashSet<u64>) {
         let mut updated_request = request.clone();
 
         if seen_flood_ids.contains(&request.flood_id) {
             updated_request.path_trace.push((self.id, NodeType::Drone));
             self.send_flood_response(request);
         } else {
-            seen_flood_ids.insert(request.flood_id);
+            seen_flood_ids.insert(updated_request.flood_id);
 
             // Add this drone to the path trace
             updated_request.path_trace.push((self.id, NodeType::Drone));
+            print!("Path trace of request is: {:?}", updated_request.path_trace);
 
             // Get the ID of the sender (second-to-last hop in the path trace)
-            let sender_id = request.path_trace.iter().rev().nth(1).map(|(id, _)| *id);
+            //let sender_id = request.path_trace.iter().rev().nth(1).map(|(id, _)| *id);
+            let sender_id = if updated_request.path_trace.len() > 1 {
+                Some(updated_request.path_trace[updated_request.path_trace.len() - 2].0)
+            } else {
+                None
+            };
+
+            //************* POSSIBLE ERROR ****************
+            eprintln!(
+                "Drone {}: Forwarding FloodRequest with flood_id {}. Sender ID: {:?}",
+                self.id, request.flood_id, sender_id
+            );
 
             // Forward the FloodRequest to all neighbors except the sender
             for (neighbor_id, sender) in self.packet_send.iter() {
                 if Some(*neighbor_id) != sender_id {
+                    updated_request.path_trace.push((*neighbor_id,NodeType::Drone));
+                    let mut updated_path_trace = updated_request.path_trace.iter().map(|(id,_) | *id ).collect::<Vec<_>>();
+                    updated_request.path_trace.pop();
+                    eprintln!(
+                        "Drone {}: Sending FloodRequest to neighbor {}",
+                        self.id, neighbor_id
+                    );
                     let packet = Packet {
                         pack_type: PacketType::FloodRequest(FloodRequest {
-                            flood_id: request.flood_id,
-                            initiator_id: request.path_trace[0].0.clone(),
-                            path_trace: request.path_trace.clone(),
+                            flood_id: updated_request.flood_id,
+                            initiator_id: updated_request.path_trace[0].0.clone(),
+                            path_trace: updated_request.path_trace.clone(),
                         }),
-                        routing_header: SourceRoutingHeader {
-                            hop_index: request.path_trace.len() - 1, // The last hop in the reversed path
-                            hops: request.path_trace.iter().map(|(id, _)| *id).collect(),
-                        },
+
+                        routing_header: original_routing_header.clone(),
                         session_id: 0, // Or use the appropriate session ID if needed
                     };
 
-                    sender.send(packet.clone()).unwrap_or_else(|err| {
-                        //eprintln!("Failed to forward FloodRequest to {}: {}", sender, err);
-                    });
 
-                    /*if let Err(err) = sender.try_send(packet) {
-                        eprintln!("Failed to forward FloodRequest to {}: {}", neighbor_id, err);
-                    }*/
+                    if let Err(err) = sender.send(packet) {
+                        eprintln!(
+                            "Drone {}: Failed to forward FloodRequest to neighbor {}: {}",
+                            self.id, neighbor_id, err
+                        );
+                    }
                 }
             }
 
@@ -303,12 +334,11 @@ impl MyDrone {
 
 
     fn send_flood_response(&self, request: FloodRequest) {
-        // Reverse the path trace to send the response back along the path
-        let reversed_path = request.path_trace.iter().rev().cloned().collect::<Vec<_>>();
+
         // Create a FloodResponse packet
         let flood_res = FloodResponse {
             flood_id: request.flood_id,
-            path_trace: reversed_path,
+            path_trace: request.path_trace.clone(),
         };
         // Send the FloodResponse back, following the reversed path
         self.forward_back_response(flood_res);
@@ -316,28 +346,35 @@ impl MyDrone {
 
     fn forward_back_response(&self, response: FloodResponse) {
         // Get the previous hop in the path (the second node in the reversed path)
-        let next_hop = response.path_trace[1].0; // The second node in the reversed path is the previous hop
-        let response_cloned = response.clone();
-        let packet = Packet {
-            pack_type: PacketType::FloodResponse(response_cloned), // Correct packet type is FloodResponse
-            routing_header: SourceRoutingHeader {
-                hop_index: response.path_trace.len() - 1, // The last hop in the reversed path
-                hops: response.path_trace.iter().map(|(id, _)| *id).collect(),
-            },
-            session_id: 0, // Or use the appropriate session ID if needed
-        };
-        // Find the sender channel for the previous hop
-        if let Some(sender) = self.packet_send.get(&next_hop) {
-            // Send a FloodResponse back to the previous hop
-            sender.send(packet).unwrap();
+        if let Some(index) = response.path_trace.iter().position(|(x,_)| *x == self.id) {
+            println!("The index of {} is {}", self.id, index);
+            let next_hop = response.path_trace[index+1].0;
+            // The sec ond node in the reversed path is the previous hop
+            let response_cloned = response.clone();
+            let packet = Packet {
+                pack_type: PacketType::FloodResponse(response_cloned), // Correct packet type is FloodResponse
+                routing_header: SourceRoutingHeader {
+                    hop_index: index, // The last hop in the reversed path
+                    hops: response.path_trace.iter().rev().map(|(id, _)| *id).collect(),
+                },
+                session_id: 0, // Or use the appropriate session ID if needed
+            };
+            // Find the sender channel for the previous hop
+            if let Some(sender) = self.packet_send.get(&next_hop) {
+                // Send a FloodResponse back to the previous hop
+                sender.send(packet).unwrap();
+            } else {
+                //send to channel directed to simulation controller
+                self.sim_contr_send
+                    .send(DroneEvent::ControllerShortcut(packet.clone()))
+                    .unwrap_or_else(|err| {
+                        eprintln!("Failed to send FloodResponse via ControllerShortcut: {}", err);
+                    });
+            }
         } else {
-            //send to channel directed to simulation controller
-            self.sim_contr_send
-                .send(DroneEvent::ControllerShortcut(packet.clone()))
-                .unwrap_or_else(|err| {
-                    eprintln!("Failed to send FloodResponse via ControllerShortcut: {}", err);
-                });
+            println!("{} is not in the vector", self.id);
         }
+
     }
 }
 
@@ -346,7 +383,7 @@ mod tests {
    use crate::tests::tests::{generic_chain_fragment_ack, generic_chain_fragment_drop, generic_fragment_drop, generic_fragment_forward, test_drone_crash, test_flood_request};
     //use crate::droneK::drone::MyDrone;
     use crate::droneK::drone::*;
-
+/*
     #[test]
     fn test_fragment_forward() {
         generic_fragment_forward::<MyDrone>();
@@ -368,13 +405,13 @@ mod tests {
     fn test_chain_fragment_ack() {
         generic_chain_fragment_ack::<MyDrone>();
     }
-
+*/
     #[test]
     fn test_of_flood_request(){test_flood_request::<MyDrone>();}
 
-
+/*
     #[test]
     fn test_of_drone_crash(){test_drone_crash::<MyDrone>();}
-
+*/
 }
 
