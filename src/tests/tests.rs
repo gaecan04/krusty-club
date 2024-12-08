@@ -226,7 +226,7 @@ pub fn generic_chain_fragment_ack<T: Drone + Send + 'static>() {
     assert_eq!(s_recv.recv().unwrap(), msg);
 }
 
-pub fn test_flood_request<T: Drone + Send + 'static>() {
+/*pub fn test_flood_request<T: Drone + Send + 'static>() {
     use crossbeam_channel::unbounded;
 
     // Create channels
@@ -337,6 +337,109 @@ pub fn test_flood_request<T: Drone + Send + 'static>() {
     // Clean up by sending crash commands
     cmd_send.send(DroneCommand::Crash).unwrap(); // Send crash command to Drone 11
     cmd_send12.send(DroneCommand::Crash).unwrap(); // Send crash command to Drone 12
+    drone11_thread.join().expect("Drone 11 thread panicked");
+    drone12_thread.join().expect("Drone 12 thread panicked");
+}
+*/
+pub fn test_flood_request<T: Drone + Send + 'static>() {
+    use crossbeam_channel::{unbounded, Receiver, Sender};
+
+    // Create channels
+    let (client_send_11,drone_11_recv ) = unbounded(); // Client to Drone 11
+    let (drone_11_send_1, client_recv)= unbounded();
+    let (drone_11_send_12, drone_12_recv) = unbounded(); // Drone 11
+    let (drone_12_send_11, drone_11_recv_unused) = unbounded(); // Drone 12
+    let (drone_12_send_13, drone_13_recv) = unbounded();
+    let (sim_ctrl_send, sim_ctrl_recv) = unbounded::<DroneEvent>(); // Drone 11 to Simulation Controller
+    let (cmd_send, cmd_recv) = unbounded(); // Simulation Controller to Drone 11
+    let (drone_13_send_12 , drone_12_recv_unused) = unbounded(); // Drone 13
+    // Set up neighbors for Drone 11
+    let neighbors11 = HashMap::from([(1, drone_11_send_1.clone()), (12, drone_11_send_12.clone())]);
+    let mut drone11 = T::new(
+        11,                // Drone 11 ID
+        sim_ctrl_send.clone(), // Event channel
+        cmd_recv.clone(),         // Command channel
+        drone_11_recv.clone(), // Packet receive channel
+        neighbors11,       // Neighbor connections
+        0.0,              // PDR
+    );
+
+    // Set up neighbors for Drone 12
+    let neighbors12 = HashMap::from([(11, drone_12_send_11.clone()),(13, drone_12_send_13.clone())]);
+    let mut drone12 = T::new(
+        12,                // Drone 12 ID
+        sim_ctrl_send.clone(), // Event channel
+        cmd_recv.clone(), // Command channel
+        drone_12_recv.clone(), // Packet receive channel
+        neighbors12,       // Neighbor connections
+        0.0,              // PDR
+    );
+
+    let neighbors13 = HashMap::from([(12, drone_13_send_12.clone())]);
+    let mut drone13 = T::new(
+        13,                // Drone 12 ID
+        sim_ctrl_send.clone(), // Event channel
+        cmd_recv.clone(), // Command channel
+        drone_13_recv.clone(), // Packet receive channel
+        neighbors13,       // Neighbor connections
+        0.0,              // PDR
+    );
+
+    // Spawn the drones in separate threads
+    let drone11_thread = thread::spawn(move || {
+        drone11.run();
+    });
+    let drone12_thread = thread::spawn(move || {
+        drone12.run();
+    });
+    let drone13_thread = thread::spawn(move || {
+        drone13.run();
+    });
+
+    // Create a FloodRequest packet
+    let flood_request = Packet {
+        pack_type: PacketType::FloodRequest(FloodRequest {
+            flood_id: 1234,
+            initiator_id: 1,
+            path_trace: vec![(1, NodeType::Client)],
+
+        }),
+        routing_header: SourceRoutingHeader {
+            hop_index: 1,
+            hops: vec![1, 11, 12 , 13],
+        },
+        session_id: 42,
+    };
+    eprintln!("Client sending to drone ......");
+    // Send the FloodRequest packet to Drone 11
+    if client_send_11.send(flood_request.clone()).is_ok() {
+        println!("FloodRequest successfully sent to Drone 11.");
+    } else {
+        eprintln!("Failed to send FloodRequest to Drone 11.");
+    }
+
+    eprintln!("{:?}",drone_11_recv.recv());
+
+
+    // Wait for the forwarded FloodRequest from Drone 11 to Drone 12
+    let forwarded_flood_request = drone_12_recv.recv_timeout(std::time::Duration::from_secs(10))
+        .expect("Drone 12 did not receive the FloodRequest");
+
+    // Check if the forwarded FloodRequest is correct
+    if let PacketType::FloodRequest(flood_request) = &forwarded_flood_request.pack_type {
+        print!("Fine 1");
+        assert_eq!(flood_request.flood_id, 1234, "Flood ID mismatch");
+        print!("Fine 2");
+        assert!(flood_request.path_trace.contains(&(11, NodeType::Drone)), "Drone 11 did not add itself to the path trace");
+        print!("Fine 3");
+    } else {
+        print!("Panic");
+        panic!("Drone 12 received an unexpected packet type");
+    }
+    print!("Fine test");
+    // Ensure Simulation Controller received a FloodResponse if appropriate
+    // Clean up by sending crash commands
+    //cmd_send.send(DroneCommand::Crash).unwrap(); // Send crash command to Drone 11
     drone11_thread.join().expect("Drone 11 thread panicked");
     drone12_thread.join().expect("Drone 12 thread panicked");
 }
