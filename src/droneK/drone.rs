@@ -169,18 +169,7 @@ impl MyDrone {
     fn process_crash(&mut self) {
         println!("Drone {} is entering crashing state.", self.id);
 
-        // Step 1: Notify neighbors to remove references to this drone
-        /*
-        for (neighbor_id, sender_channel) in self.packet_send.iter() {
-            // Notify the neighbor to remove this drone
-            if let Some(neighbor) = self.packet_send.get(neighbor_id) {
-                //here should remove from the neighbor hashmap of neighbors the drone which crashed,
-                println!("Drone {} removed from neighbor {}.", self.id, neighbor_id);
-            }
-
-        }*/
-
-        // Step 2: Wait for the receiver channel to be empty
+        // Step 1: Wait for the receiver channel to be empty
         while !self.packet_recv.is_empty() {
             // Drain remaining packets if new ones arrive
             while let Ok(packet) = self.packet_recv.try_recv() {
@@ -223,23 +212,6 @@ impl MyDrone {
         };
         self.forward_back(nack_packet);
     }
-
-    /*fn send_ack(&self, packet: Packet) {
-        let fragmentIndex = match &packet.pack_type {
-            MsgFragment(fragment) => fragment.fragment_index,
-            _ => 0,
-        };
-
-        let ack = Packet {
-            pack_type: PacketType::Ack(Ack {
-                fragment_index: fragmentIndex,
-            }),
-            routing_header: SourceRoutingHeader{hop_index:1,hops: packet.routing_header.hops[0..packet.routing_header.hop_index].to_owned().iter().rev().copied().collect() },
-            session_id: packet.session_id,
-        };
-
-        self.forward_back(ack);
-    }*/
 
     fn forward_back(&self, mut packet: Packet) {
 
@@ -383,7 +355,6 @@ mod tests {
    use crate::tests::tests::{generic_chain_fragment_ack, generic_chain_fragment_drop, generic_fragment_drop, generic_fragment_forward, test_drone_crash, test_flood_request};
     //use crate::droneK::drone::MyDrone;
     use crate::droneK::drone::*;
-/*
     #[test]
     fn test_fragment_forward() {
         generic_fragment_forward::<MyDrone>();
@@ -405,13 +376,13 @@ mod tests {
     fn test_chain_fragment_ack() {
         generic_chain_fragment_ack::<MyDrone>();
     }
-*/
+
     #[test]
     fn test_of_flood_request(){test_flood_request::<MyDrone>();}
 
-/*
+
     #[test]
     fn test_of_drone_crash(){test_drone_crash::<MyDrone>();}
-*/
+
 }
 
