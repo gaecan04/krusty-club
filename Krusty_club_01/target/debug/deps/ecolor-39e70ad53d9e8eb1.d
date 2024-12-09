@@ -1,0 +1,11 @@
+C:\Users\leona\OneDrive\Desktop\AP\krusty-club\Krusty_club_01\target\debug\deps\libecolor-39e70ad53d9e8eb1.rmeta: C:\Users\leona\.cargo\registry\src\index.crates.io-6f17d22bba15001f\ecolor-0.22.0\src\lib.rs C:\Users\leona\.cargo\registry\src\index.crates.io-6f17d22bba15001f\ecolor-0.22.0\src\color32.rs C:\Users\leona\.cargo\registry\src\index.crates.io-6f17d22bba15001f\ecolor-0.22.0\src\hsva_gamma.rs C:\Users\leona\.cargo\registry\src\index.crates.io-6f17d22bba15001f\ecolor-0.22.0\src\hsva.rs C:\Users\leona\.cargo\registry\src\index.crates.io-6f17d22bba15001f\ecolor-0.22.0\src\rgba.rs
+
+C:\Users\leona\OneDrive\Desktop\AP\krusty-club\Krusty_club_01\target\debug\deps\libecolor-39e70ad53d9e8eb1.rlib: C:\Users\leona\.cargo\registry\src\index.crates.io-6f17d22bba15001f\ecolor-0.22.0\src\lib.rs C:\Users\leona\.cargo\registry\src\index.crates.io-6f17d22bba15001f\ecolor-0.22.0\src\color32.rs C:\Users\leona\.cargo\registry\src\index.crates.io-6f17d22bba15001f\ecolor-0.22.0\src\hsva_gamma.rs C:\Users\leona\.cargo\registry\src\index.crates.io-6f17d22bba15001f\ecolor-0.22.0\src\hsva.rs C:\Users\leona\.cargo\registry\src\index.crates.io-6f17d22bba15001f\ecolor-0.22.0\src\rgba.rs
+
+C:\Users\leona\OneDrive\Desktop\AP\krusty-club\Krusty_club_01\target\debug\deps\ecolor-39e70ad53d9e8eb1.d: C:\Users\leona\.cargo\registry\src\index.crates.io-6f17d22bba15001f\ecolor-0.22.0\src\lib.rs C:\Users\leona\.cargo\registry\src\index.crates.io-6f17d22bba15001f\ecolor-0.22.0\src\color32.rs C:\Users\leona\.cargo\registry\src\index.crates.io-6f17d22bba15001f\ecolor-0.22.0\src\hsva_gamma.rs C:\Users\leona\.cargo\registry\src\index.crates.io-6f17d22bba15001f\ecolor-0.22.0\src\hsva.rs C:\Users\leona\.cargo\registry\src\index.crates.io-6f17d22bba15001f\ecolor-0.22.0\src\rgba.rs
+
+C:\Users\leona\.cargo\registry\src\index.crates.io-6f17d22bba15001f\ecolor-0.22.0\src\lib.rs:
+C:\Users\leona\.cargo\registry\src\index.crates.io-6f17d22bba15001f\ecolor-0.22.0\src\color32.rs:
+C:\Users\leona\.cargo\registry\src\index.crates.io-6f17d22bba15001f\ecolor-0.22.0\src\hsva_gamma.rs:
+C:\Users\leona\.cargo\registry\src\index.crates.io-6f17d22bba15001f\ecolor-0.22.0\src\hsva.rs:
+C:\Users\leona\.cargo\registry\src\index.crates.io-6f17d22bba15001f\ecolor-0.22.0\src\rgba.rs:
