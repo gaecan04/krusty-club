@@ -38,7 +38,7 @@ copy the data of the fragment in the vector.
 
 Once that the client or server has received all fragments (that is, fragment_index 0 to total_n_fragments - 1),
  then it has reassembled the whole message and sends back an Ack.
-
+*/
 
 use std::collections::HashMap;
 use crossbeam_channel::{Receiver, Sender};
@@ -160,4 +160,3 @@ impl Server {
     }
 }
 
- */
