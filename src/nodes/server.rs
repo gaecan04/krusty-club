@@ -47,7 +47,7 @@ use wg_2024::network::{NodeId, SourceRoutingHeader};
 use log::{info, error, warn, debug};
 
 #[derive(Debug, Clone)]
-pub struct Server {
+pub struct server {
     pub id: u64, // Server ID
     pub received_fragments: HashMap<(u64, NodeId), Vec<Option<[u8; 128]>>>, // Maps (session_id, src_id) to fragment data
     pub fragment_lengths: HashMap<(u64, NodeId), u8>, // Maps (session_id, src_id) to length of the last fragment
@@ -55,7 +55,7 @@ pub struct Server {
     pub packet_receiver: Receiver<Packet>, // Channel to receive packets from clients/drones
 }
 
-impl Server {
+impl server {
     pub fn new(id: u64, packet_sender: Sender<Packet>, packet_receiver: Receiver<Packet>) -> Self {
         // Log server creation
         info!("Server {} created.", id);

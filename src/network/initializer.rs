@@ -1,4 +1,4 @@
-/*
+
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -9,11 +9,12 @@ use serde::Deserialize;
 use wg_2024::controller::{DroneCommand, DroneEvent};
 use wg_2024::packet::Packet;
 use wg_2024::drone::Drone;
-use crate::droneK::drone::MyDrone;
+use crate::nodes::server::server;
 
 #[cfg(feature = "serialize")]
 use serde::Deserialize;
 use wg_2024::network::NodeId;
+
 
 #[derive(Debug, Clone,Deserialize)]
 #[cfg_attr(feature = "serialize", derive(Deserialize))]
@@ -164,19 +165,19 @@ fn initialize_network(topology: Topology) {
             client_node.run();
         });
     }
-
-    // Spawn server threads
+    */
     for server in topology.server {
         let id = server.id;
         let connected_drones = server.connected_drone_ids.clone();
-        let packet_channel = packet_channels.get(&id).unwrap().1.clone();
+        let packet_channel = packet_channels.get(&id).unwrap().1.clone(); // Packet receiver for the server
 
+        // Spawn a thread for the server
         thread::spawn(move || {
-            let mut server_node = ServerImpl::new(id, connected_drones, packet_channel);
+            let mut server_node = server::new(id, connected_drones, packet_channel);
             server_node.run();
         });
     }
-
+    /*
     // Create and run the simulation controller
     let simulation_controller = SimulationControllerImpl {
         nodes_and_neighbors: node_neighbors,
@@ -220,9 +221,3 @@ pub fn run() {
     //validate_topology(&topology);
     //initialize_network(topology);
 }
-
-
-
-
-
- */
