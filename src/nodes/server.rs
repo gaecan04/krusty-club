@@ -55,8 +55,10 @@ pub struct server {
     pub packet_receiver: Receiver<Packet>, // Channel to receive packets from clients/drones
 }
 
+
+
 impl server {
-    pub fn new(id: u8, packet_sender: Sender<Packet>, packet_receiver: Receiver<Packet>) -> Self {
+    pub(crate) fn new(id: u8, packet_sender: Sender<Packet>, packet_receiver: Receiver<Packet>) -> Self {
         // Log server creation
         info!("Server {} created.", id);
 
@@ -84,12 +86,15 @@ impl server {
                     PacketType::MsgFragment(fragment) => {
                         self.handle_fragment(packet.session_id, fragment, packet.routing_header);
                     }
+                    // aggiungere nack per packet fragment loss --> il nack che riceve dovrebbe contenere fragment index e nacktype.
+                    // il server deve flooddare in caso il nacktype sia tutto tranne Dropped  --> perche devo modificare la route.
+                    // Nel caso dropped --> mi rifaccio la path, come? Possible solution : Dijkstra.
                     _ => {
                         warn!("Server {} received unexpected packet type.", self.id);
                     }
                 }
             } else {
-                error!("No packet received or channel closed.");
+                warn!("No packet received or channel closed.");
                 break;
             }
         }
@@ -118,10 +123,53 @@ impl server {
         }
 
         // Check if all fragments have been received
+        ///probably need to skip the check to see if all are some, just iterate through the recieved fragments and see the fragment indexes missing.
         if entry.iter().all(Option::is_some) {
             self.handle_complete_message(key, routing_header.clone());
         }
+        //PROBLEM IN CONNECTING THE RECOVER_LOST_FRAGMENTS FUNCTION TO THIS FUNCTION.
+        /*else {
+            //check for the missing fragment indexes and attempt recovery:
+            self.recover_lost_fragments(session_id, routing_header);
+        }*/
     }
+    ///Function to recover the missing fragments:
+    fn recover_lost_fragments(&mut self, session_id: u64, routing_header: SourceRoutingHeader) {
+        let key = (session_id, routing_header.hops[0]);
+
+        if let Some(fragments) = self.received_fragments.get(&key) {
+            let mut missing_indexes = Vec::new();
+
+            for (index, fragment) in fragments.iter().enumerate() {
+                if fragment.is_none() {
+                    missing_indexes.push(index as u64);
+                }
+            }
+
+            if !missing_indexes.is_empty() {
+                warn!("Detected missing fragments {:?} for session {:?}", missing_indexes, key);
+
+                for missing_index in missing_indexes {
+                    let nack_packet = Packet {
+                        pack_type: PacketType::Nack(Nack {
+                            fragment_index: missing_index,
+                            nack_type: NackType::Dropped, // Assuming Dropped requires route recalculation
+                        }),
+                        routing_header: routing_header.clone(),
+                        session_id: session_id,
+                    };
+
+                    if let Err(err) = self.packet_sender.send(nack_packet) {
+                        error!("Failed to send Nack for missing fragment {}: {}", missing_index, err);
+                    } else {
+                        info!("Sent Nack for missing fragment {} in session {:?}", missing_index, key);
+                    }
+                }
+            }
+        }
+    }
+
+
 
     fn handle_complete_message(&mut self, key: (u64, NodeId), routing_header: SourceRoutingHeader) {
         let fragments = self.received_fragments.remove(&key).unwrap();
