@@ -1,0 +1,11 @@
+C:\Users\oussk\RustroverProjects\AP Project _ouss\Krusty_Club_Project\target\debug\deps\libjson5-3347935e52a36013.rmeta: C:\Users\oussk\.cargo\registry\src\index.crates.io-6f17d22bba15001f\json5-0.4.1\src\lib.rs C:\Users\oussk\.cargo\registry\src\index.crates.io-6f17d22bba15001f\json5-0.4.1\src\de.rs C:\Users\oussk\.cargo\registry\src\index.crates.io-6f17d22bba15001f\json5-0.4.1\src\error.rs C:\Users\oussk\.cargo\registry\src\index.crates.io-6f17d22bba15001f\json5-0.4.1\src\ser.rs C:\Users\oussk\.cargo\registry\src\index.crates.io-6f17d22bba15001f\json5-0.4.1\src/json5.pest
+
+C:\Users\oussk\RustroverProjects\AP Project _ouss\Krusty_Club_Project\target\debug\deps\libjson5-3347935e52a36013.rlib: C:\Users\oussk\.cargo\registry\src\index.crates.io-6f17d22bba15001f\json5-0.4.1\src\lib.rs C:\Users\oussk\.cargo\registry\src\index.crates.io-6f17d22bba15001f\json5-0.4.1\src\de.rs C:\Users\oussk\.cargo\registry\src\index.crates.io-6f17d22bba15001f\json5-0.4.1\src\error.rs C:\Users\oussk\.cargo\registry\src\index.crates.io-6f17d22bba15001f\json5-0.4.1\src\ser.rs C:\Users\oussk\.cargo\registry\src\index.crates.io-6f17d22bba15001f\json5-0.4.1\src/json5.pest
+
+C:\Users\oussk\RustroverProjects\AP Project _ouss\Krusty_Club_Project\target\debug\deps\json5-3347935e52a36013.d: C:\Users\oussk\.cargo\registry\src\index.crates.io-6f17d22bba15001f\json5-0.4.1\src\lib.rs C:\Users\oussk\.cargo\registry\src\index.crates.io-6f17d22bba15001f\json5-0.4.1\src\de.rs C:\Users\oussk\.cargo\registry\src\index.crates.io-6f17d22bba15001f\json5-0.4.1\src\error.rs C:\Users\oussk\.cargo\registry\src\index.crates.io-6f17d22bba15001f\json5-0.4.1\src\ser.rs C:\Users\oussk\.cargo\registry\src\index.crates.io-6f17d22bba15001f\json5-0.4.1\src/json5.pest
+
+C:\Users\oussk\.cargo\registry\src\index.crates.io-6f17d22bba15001f\json5-0.4.1\src\lib.rs:
+C:\Users\oussk\.cargo\registry\src\index.crates.io-6f17d22bba15001f\json5-0.4.1\src\de.rs:
+C:\Users\oussk\.cargo\registry\src\index.crates.io-6f17d22bba15001f\json5-0.4.1\src\error.rs:
+C:\Users\oussk\.cargo\registry\src\index.crates.io-6f17d22bba15001f\json5-0.4.1\src\ser.rs:
+C:\Users\oussk\.cargo\registry\src\index.crates.io-6f17d22bba15001f\json5-0.4.1\src/json5.pest:
