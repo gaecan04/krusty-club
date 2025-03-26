@@ -1,0 +1,65 @@
+[[drone]]
+id = 1
+pdr = 0.1
+connected_node_ids = [100, 2, 3]
+
+[[drone]]
+id = 2
+pdr = 0.25
+connected_node_ids = [101, 1, 4]
+
+[[drone]]
+id = 3
+pdr = 0.14
+connected_node_ids = [1, 4, 5]
+
+[[drone]]
+id = 4
+pdr = 0.03
+connected_node_ids = [2, 3, 6]
+
+[[drone]]
+id = 5
+pdr = 0.05
+connected_node_ids = [3, 6, 7]
+
+[[drone]]
+id = 6
+pdr = 0.03
+connected_node_ids = [4, 5, 8]
+
+[[drone]]
+id = 7
+pdr = 0.05
+connected_node_ids = [5, 8, 9]
+
+[[drone]]
+id = 8
+pdr = 0.03
+connected_node_ids = [6, 7, 10]
+
+[[drone]]
+id = 9
+pdr = 0.14
+connected_node_ids = [7, 10, 102, 103]
+
+[[drone]]
+id = 10
+pdr = 0.1
+connected_node_ids = [8, 9, 102, 103]
+
+[[client]]
+id = 100
+connected_drone_ids = [1]
+
+[[client]]
+id = 101
+connected_drone_ids = [2]
+
+[[server]]
+id = 102
+connected_drone_ids = [9, 10]
+
+[[server]]
+id = 103
+connected_drone_ids = [9, 10]
