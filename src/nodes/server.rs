@@ -42,7 +42,7 @@ Once that the client or server has received all fragments (that is, fragment_ind
 
 use std::collections::HashMap;
 use crossbeam_channel::{Receiver, Sender};
-use wg_2024::packet::{Ack, Fragment, Nack, NackType, Packet, PacketType};
+use wg_2024::packet::{Ack, FloodRequest, FloodResponse, Fragment, Nack, NackType, NodeType, Packet, PacketType};
 use wg_2024::network::{NodeId, SourceRoutingHeader};
 use log::{info, error, warn, debug};
 
@@ -54,9 +54,8 @@ pub struct server {
     pub packet_sender: Sender<Packet>, // Channel to send packets to clients
     pub packet_receiver: Receiver<Packet>, // Channel to receive packets from clients/drones
     recovery_in_progress:  HashMap<(u64, NodeId), bool>, // Tracks if recovery is already in progress for a session
+    drop_counts: HashMap<(u64, NodeId), usize>, // Track number of drops per session
 }
-
-
 
 impl server {
     pub(crate) fn new(id: u8, packet_sender: Sender<Packet>, packet_receiver: Receiver<Packet>) -> Self {
@@ -70,6 +69,7 @@ impl server {
             packet_sender,
             packet_receiver,
             recovery_in_progress: HashMap::new(),
+            drop_counts: HashMap::new(),
         }
     }
 
@@ -91,6 +91,21 @@ impl server {
                     PacketType::Nack(nack) => {
                         self.handle_nack(packet.session_id, nack, packet.routing_header);
                     }
+                    /*
+                    PacketType::Ack(ack) => {
+                        //processa gli ack, serve per far sapere al simulation controller quando stampare il messaggio
+                    }
+                    PacketType::FloodRequest(flood_request) => {
+                        //processa le flood request, il client manda le flood request per conoscere il network
+                        // come server io devo rimandargli indietro la flood response
+                    }
+                    */
+                    PacketType::FloodResponse(flood_response) => {
+                        //processa le flood response, il client risponde alla flood request che precedentemente
+                        //gli viene mandata, la flood response contiene le informazioni per conoscere il network.
+                        self.handle_flood_response(packet.session_id, flood_response, packet.routing_header);
+                    }
+
                     // aggiungere nack per packet fragment loss --> il nack che riceve dovrebbe contenere fragment index e nacktype.
                     // il server deve flooddare in caso il nacktype sia tutto tranne Dropped  --> perche devo modificare la route.
                     // Nel caso dropped --> mi rifaccio la path, come? Possible solution : Dijkstra.
@@ -149,19 +164,66 @@ impl server {
         }
     }
     fn handle_nack(&mut self, session_id: u64, nack: Nack, routing_header: SourceRoutingHeader) {
-        info!("Recieved NACK for fragment {} with type {:?} in session {}",
-        nack.fragment_index, nack.nack_type, session_id);
+        info!("Recieved NACK for fragment {} with type {:?} in session {}", nack.fragment_index, nack.nack_type, session_id);
+        let key = (session_id, routing_header.hops[0]);
+        let drop_count= self.drop_counts.entry(key).or_insert(0);
+        *drop_count += 1;
 
         match nack.nack_type {
-            NackType::Dropped => {
-                // For dropped packets, recalculate path using Dijkstra's algorithm
-                //let new_routing_header = self.recalculate_path(routing_header);
-                //self.resend_fragment(session_id, nack.fragment_index, new_routing_header);
-            },
+            NackType::Dropped => { // the only case i recieve nack Dropped is when i am forwarding the fragments to the second client
+                // Nacktype: ErrorInRouting ---> floodRequest --> find crashed drone --> remove from graph --> calculate path to dijstra and keep sending
+                //put a limit of 5 dropped fragments, at the 6th the server will flood the network sending a floodrequest
+                // to the drone to whom it is connected.
+                if *drop_count > 5 {
+                    info!("Drop threshold exceeded for session {:?}, initiating flood", key);
+                    // Generate a unique flood ID (can use a counter or session_id)
+                    let flood_id = session_id;
+
+                    let flood_request = FloodRequest {
+                        flood_id: flood_id,
+                        initiator_id: self.id as NodeId,
+                        path_trace: vec![(self.id as NodeId, NodeType::Server)], //contains my id,
+                    };
+                    // Create the flood packet to send to all connected drones
+                    let flood_packet = Packet::new_flood_request(
+                        // Route to first drone in original path
+                        SourceRoutingHeader {
+                            hop_index: 0,
+                            hops: vec![routing_header.hops[routing_header.hops.len() - 1]],
+                        },
+                        session_id,
+                        flood_request
+                    );
+
+                    if let Err(err) = self.packet_sender.send(flood_packet) {
+                        error!("Failed to send FloodRequest for session {:?}: {}", key, err);
+                    } else {
+                        info!("FloodRequest sent for session {:?}", key);
+                        // Reset drop count after successfully sending flood request
+                        self.drop_counts.insert(key, 0);
+                    }
+                } else {
+                    // Normal NACK handling for under-threshold drops
+                    info!("Drop count for session {:?}: {}/5", key, *drop_count);
+                    // Send NACK back along the original path
+                    let nack_packet = Packet::new_nack(
+                        SourceRoutingHeader {
+                            hop_index: 0,
+                            hops: vec![routing_header.hops[routing_header.hops.len() - 1]],
+                        },
+                        session_id,
+                        nack.clone()
+                    );
+                    if let Err(err) = self.packet_sender.send(nack_packet) {
+                        error!("Failed to resend Nack for fragment {}: {}", nack.fragment_index, err);
+                    }
+                }
+            }
             _ => {
+                    warn!("Received non-dropped NACK type, flooding mechanism not implemented yet");
+                }
                 // For other NackTypes (like routing issues), use flooding approach
                 //self.flood(session_id, nack.fragment_index, routing_header); -------------> NOT WORKING: TO SEE HOW FLOODING IS IMPLEMENTED, WHO CAN FLOOD, MAYBE CONSIDER TRAIT?????
-            }
         }
     }
     ///Function to recover the missing fragments:
@@ -242,6 +304,27 @@ impl server {
         } else {
             info!("Acknowledgment sent for session {:?}", key);
         }
+    }
+
+    //handle_flood_response is still to be checked properly and tested.
+    fn handle_flood_response(&mut self, session_id: u64, flood_response: FloodResponse, routing_header: SourceRoutingHeader) {
+        info!("Received FloodResponse for flood_id {} in session {}", flood_response.flood_id, session_id);
+
+        // Extract the path from the response
+        let path = flood_response.path_trace
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<NodeId>>();
+
+        info!("New path discovered: {:?}", path);
+        //integrare tutti i collegamenti e nodi del path dentro il grado
+
+        // TODO: Use this path for future communications with this client
+        // You might want to store this path in a new field in your server struct
+
+        // Reset drop count for this session since we've now established a new path
+        let key = (session_id, path[0]); // First node should be the client
+        self.drop_counts.insert(key, 0);
     }
 }
 
@@ -578,7 +661,7 @@ mod tests {
             panic!("Expected a NACK packet");
         }
     }
-
+*/
     #[test]
     fn test_handle_nack_dropped_fragment() {
         // Create channels for sending/receiving packets
@@ -668,6 +751,6 @@ mod tests {
             .collect();
 
         assert!(!resent_fragments.is_empty(), "Server should have resent the fragment");
-    }*/
+    }
 
 }

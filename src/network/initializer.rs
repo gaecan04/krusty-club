@@ -1,4 +1,4 @@
-
+/*
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -43,7 +43,7 @@ pub struct Server {
 pub struct Topology {
     pub drone: Vec<dyn Drone>,
     pub client: Vec<Client>,
-    pub server: Vec<Server>,
+    pub server_topology: Vec<Server>,
 }
 
 // Helper function to read and parse the TOML file
@@ -59,7 +59,7 @@ fn parse_topology(file_path: &str) -> Topology {
 fn validate_topology(topology: &Topology) {
     // Check for unique node IDs
     let mut all_ids: HashSet<u8> = HashSet::new();
-    for drone in &topology.drone {
+    for drone in topology.drone {
         if !all_ids.insert(drone.id) {
             panic!("Duplicate ID found: {}", drone.id);
         }
@@ -79,7 +79,7 @@ fn validate_topology(topology: &Topology) {
         }
     }
 
-    for server in &topology.server {
+    for server in &topology.server_topology {
         if !all_ids.insert(server.id) {
             panic!("Duplicate ID found: {}", server.id);
         }
@@ -95,9 +95,10 @@ fn initialize_network(topology: Topology) {
     // Maps to store channels and node configurations
     let mut node_event_channels: HashMap<u8, Sender<DroneEvent>> = HashMap::new(); //each drone sender of event
     let mut node_command_channels: HashMap<u8, Sender<DroneCommand>> = HashMap::new(); //here there will be the various senders from the simulation controller
+    //the channels used by the simulation controller to launch commands on drones.
     let mut node_neighbors: HashMap<u8, HashMap<u8, Sender<Packet>>> = HashMap::new(); //hashmap of neighbors of each drone with every sender to neighbors
     let mut packet_channels: HashMap<u8, (Sender<Packet>, Receiver<Packet>)> = HashMap::new();// ????
-
+    //creating channels for each node in the network -----------------------------------------------------
     // Create channels for drones
     for drone in &topology.drone {
         let (packet_sender, packet_receiver) = unbounded::<Packet>(); //drone <--> drone/ client / server
@@ -125,12 +126,12 @@ fn initialize_network(topology: Topology) {
         //we can add here the channel with SC
         packet_channels.insert(client.id, (client_send.clone(), client_recv));
     }
-    for server in &topology.server {
+    for server in &topology.server_topology {
         let (server_send, server_recv) = unbounded::<Packet>();
         //we can add here the channel with SC
         packet_channels.insert(server.id, (server_send.clone(), server_recv));
     }
-
+    //----------------------------------------------------------------------------------------------
     // Spawn drone threads
     for drone in topology.drone {
         let id = drone.id;
@@ -166,7 +167,8 @@ fn initialize_network(topology: Topology) {
         });
     }
     */
-    for server in topology.server {
+
+    for server in topology.server_topology {
         let id = server.id;
         let connected_drones = server.connected_drone_ids.clone();
         let packet_channel = packet_channels.get(&id).unwrap().1.clone(); // Packet receiver for the server
@@ -221,3 +223,4 @@ pub fn run() {
     //validate_topology(&topology);
     //initialize_network(topology);
 }
+*/
