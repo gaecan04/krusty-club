@@ -1,10 +1,4 @@
-mod utils;
-mod network;
-mod nodes;
-mod gui;
 
-use std::thread;
-use crate::gui::MyApp;
 /*
 fn main() {
     // Load the network configuration from the `.toml` file
@@ -64,6 +58,23 @@ fn main() {
  */
 
 
-fn main() {
+mod network;
+mod nodes;
+mod utils;
+mod simulation_controller;
 
+use simulation_controller::app::NetworkApp;
+
+fn main() -> Result<(), eframe::Error> {
+    // Initialize network topology
+    /*let network_initializer = NetworkInitializer::new("topologies/star.toml")
+        .expect("Failed to initialize network");
+*/
+    // Launch GUI with network configuration
+    let options = eframe::NativeOptions::default();
+    eframe::run_native(
+        "Network Topology Simulator",
+        options,
+        Box::new(|_cc| Ok(Box::new(NetworkApp::default())))
+    )
 }
