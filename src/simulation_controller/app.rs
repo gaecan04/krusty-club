@@ -1,5 +1,8 @@
-use eframe::{egui, App};
+use eframe::{egui, App, CreationContext};
+use eframe::egui::{Stroke, StrokeKind};
 use egui::{Color32, RichText, Vec2, Rect, Sense, Shape};
+use crate::network::initializer::ParsedConfig;
+use crate::network::TOML_parser::Config;
 use crate::simulation_controller::network_designer::NetworkRenderer;
 //hello
 // Existing enums remain the same
@@ -26,20 +29,72 @@ pub struct NetworkApp {
     is_simulation_running: bool,
     zoom_level: f32,
     pan_offset: Vec2,
+    available_topologies: Vec<String>,
+    network_config: Option<ParsedConfig>,
 }
 
 impl NetworkApp {
+    // Add new constructor to accept creation context
+    pub fn new(cc: &CreationContext) -> Self {
+        // You can access persistent state or other context info here if needed
+        let mut app = Self::default();
+
+        // Scan the topologies directory to find available configuration files
+        if let Ok(entries) = std::fs::read_dir("topologies") {
+            for entry in entries.flatten() {
+                if let Some(file_name) = entry.file_name().to_str() {
+                    if file_name.ends_with(".toml") {
+                        let topology_name = file_name.trim_end_matches(".toml").to_string();
+                        app.available_topologies.push(topology_name);
+                    }
+                }
+            }
+        }
+
+        // Log available topologies
+        app.simulation_log.push("Application started".to_string());
+        app.simulation_log.push(format!("Found {} topology configurations", app.available_topologies.len()));
+
+        app
+    }
     fn set_topology(&mut self, topology: &str) {
-        self.network_renderer = Some(NetworkRenderer::new(topology, 50.0, 50.0));
-        self.selected_topology = Some(topology.to_string());
-        self.topology_selected = true;
-        self.state = AppState::Simulation;
+        // Attempt to load and parse the network configuration
+        let config_path = format!("topologies/{}.toml", topology);
+
+        match crate::network::TOML_parser::parse_config(&config_path) {
+            Ok(config) => {
+                // Log success and network stats
+                self.simulation_log.push(format!("Loaded topology '{}'", topology));
+                self.simulation_log.push(format!("Network has {} drones, {} clients, {} servers",
+                                                 config.drone.len(), config.client.len(), config.server.len()));
+
+                // Initialize the network renderer with the config
+                self.network_renderer = Some(NetworkRenderer::new(topology, 50.0, 50.0));
+                self.selected_topology = Some(topology.to_string());
+                self.network_config = Some(config);
+                self.topology_selected = true;
+                self.state = AppState::Simulation;
+            },
+            Err(e) => {
+                // Log error
+                self.simulation_log.push(format!("Failed to load topology '{}': {}", topology, e));
+            }
+        }
     }
 
     fn flood_network(&mut self) {
         // TODO: Implement actual flood network logic
         self.simulation_log.push("Flood Network initiated".to_string());
         self.simulation_log.push("Simulating network flood...".to_string());
+
+        // If you have the network initialized, you could send commands here
+        if let Some(config) = &self.network_config {
+            self.simulation_log.push(format!("Sending flood message to {} nodes",
+                                             config.drone.len() + config.client.len() + config.server.len()));
+
+            // Here you would connect to your actual network simulation
+            // and trigger the flood command
+        }
     }
 
 
@@ -112,12 +167,7 @@ impl NetworkApp {
                     );
 
                     // Draw a border around the network view
-                    painter.add(Shape::rect_stroke(
-                        response.rect,
-                        2.0,
-                        egui::Stroke::new(1.0, Color32::DARK_GRAY)
-                    ));
-
+                    painter.add(Shape::rect_stroke(response.rect, 2.0, Stroke::new(1.0, Color32::DARK_GRAY), StrokeKind::Inside));
                     // Handle panning
                     if response.dragged() {
                         self.pan_offset += response.drag_delta();
@@ -263,6 +313,8 @@ impl Default for NetworkApp {
             is_simulation_running: false,
             zoom_level: 1.0,
             pan_offset: Vec2::ZERO,
+            available_topologies: Vec::new(),
+            network_config: None,
         }
     }
 }

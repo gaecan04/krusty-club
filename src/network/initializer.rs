@@ -1,29 +1,31 @@
-/*
-
-use std::collections::{HashMap, HashSet};
-use std::fs;
 use toml;
-use std::thread;
 use crossbeam_channel::{unbounded, select_biased, select, Receiver, Sender};
 use serde::Deserialize;
 use wg_2024::controller::{DroneCommand, DroneEvent};
 use wg_2024::packet::Packet;
-use wg_2024::drone::Drone;
-use crate::droneK::drone::MyDrone;
+//use wg_2024::drone::Drone;
 
+use std::collections::{HashMap, HashSet};
+use std::error::Error;
+use std::fs;
+use std::thread;
+use crossbeam::channel;
+
+// Assuming these are defined elsewhere or imported
+use wg_2024::network::NodeId;
 #[cfg(feature = "serialize")]
 use serde::Deserialize;
-use wg_2024::network::NodeId;
 
-#[derive(Debug, Clone,Deserialize)]
+// These struct definitions were provided in your paste
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serialize", derive(Deserialize))]
-pub struct DroneNetIn {
+pub struct Drone {
     pub id: NodeId,
     pub connected_node_ids: Vec<NodeId>,
     pub pdr: f32,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone,Deserialize)]
 #[cfg_attr(feature = "serialize", derive(Deserialize))]
 pub struct Client {
     pub id: NodeId,
@@ -37,192 +39,467 @@ pub struct Server {
     pub connected_drone_ids: Vec<NodeId>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serialize", derive(Deserialize))]
-pub struct Topology {
-    pub drone: Vec<dyn Drone>,
+pub struct Config {
+    pub drone: Vec<Drone>,
     pub client: Vec<Client>,
     pub server: Vec<Server>,
 }
 
-// Helper function to read and parse the TOML file
-fn parse_topology(file_path: &str) -> Topology {
-    let file_content = fs::read_to_string(file_path)
-        .expect("Failed to read topology file");
-    let topology: Topology= toml::from_str(&file_content)
-        .expect("Failed to parse topology file");
-    topology
+// Type aliases for clarity
+pub type DroneImpl = Box<dyn DroneImplementation>;
+type NodeChannels = HashMap<NodeId, channel::Sender<Message>>;
+
+// Message type for inter-node communication
+#[derive(Debug, Clone)]
+enum Message {
+    // Define your message types here
+    Data(Vec<u8>),
+    Control(ControlMessage),
 }
 
-// Validate the network initialization file
-fn validate_topology(topology: &Topology) {
-    // Check for unique node IDs
-    let mut all_ids: HashSet<u8> = HashSet::new();
-    for drone in &topology.drone {
-        if !all_ids.insert(drone.id) {
-            panic!("Duplicate ID found: {}", drone.id);
-        }
-        for conn_id in &drone.connected_node_ids {
-            if *conn_id == drone.id {
-                panic!("Drone {} cannot connect to itself", drone.id);
+#[derive(Debug, Clone)]
+enum ControlMessage {
+    // Define control messages here
+    Start,
+    Stop,
+    Status,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct ParsedConfig {
+    pub drone: Vec<DroneConfig>, // Assume this contains information about each drone
+    pub client: Vec<Client>,
+    pub server: Vec<Server>,
+}
+
+#[derive(Deserialize,Debug)]
+pub struct DroneConfig {
+    pub id: NodeId,  // Example ID
+    pub pdr: f32, // Example PDR
+    pub connected_node_ids: Vec<NodeId>,
+}
+
+
+// Trait for drone implementations
+trait DroneImplementation: Send + 'static {
+    fn process_message(&mut self, msg: Message) -> Vec<Message>;
+    fn get_id(&self) -> NodeId;
+}
+
+pub(crate) struct NetworkInitializer {
+    config: Config,
+    drone_impls: Vec<DroneImpl>,
+    channels: NodeChannels,
+    controller_tx: channel::Sender<Message>,
+}
+
+impl NetworkInitializer {
+    pub fn new(config_path: &str, drone_impls: Vec<DroneImpl>) -> Result<Self, Box<dyn Error>> {
+        // Read config file
+        let config_str = fs::read_to_string(config_path)?;
+
+        // Parse the TOML config
+        #[cfg(feature = "serialize")]
+        let config: Config = toml::from_str(&config_str)?;
+
+        #[cfg(not(feature = "serialize"))]
+        let config = panic!("The 'serialize' feature must be enabled to parse TOML");
+
+        // Create controller channel (unbounded)
+        let (controller_tx, _) = channel::unbounded();
+
+        Ok(NetworkInitializer {
+            config,
+            drone_impls,
+            channels: HashMap::new(),
+            controller_tx,
+        })
+    }
+
+    pub fn initialize(&mut self) -> Result<(), Box<dyn Error>> {
+        // Validate the network configuration
+        self.validate_config()?;
+
+        // Create channels for all nodes
+        self.setup_channels();
+
+        // Distribute drone implementations and spawn drone threads
+        self.initialize_drones();
+
+        // Spawn client threads
+        self.initialize_clients();
+
+        // Spawn server threads
+        self.initialize_servers();
+
+        // Spawn simulation controller thread
+        self.spawn_controller();
+
+        Ok(())
+    }
+
+    fn validate_config(&self) -> Result<(), Box<dyn Error>> {
+        // Check for duplicate node IDs
+        let mut all_ids = HashSet::new();
+
+        for drone in &self.config.drone {
+            if !all_ids.insert(drone.id) {
+                return Err("Duplicate node ID found".into());
             }
         }
-    }
 
-    for client in &topology.client {
-        if !all_ids.insert(client.id) {
-            panic!("Duplicate ID found: {}", client.id);
+        for client in &self.config.client {
+            if !all_ids.insert(client.id) {
+                return Err("Duplicate node ID found".into());
+            }
+
+            // Check client constraints
+            if client.connected_drone_ids.len() > 2 {
+                return Err("Client cannot connect to more than 2 drones".into());
+            }
+
+            if client.connected_drone_ids.is_empty() {
+                return Err("Client must connect to at least 1 drone".into());
+            }
+
+            // Check for repetitions in connected_drone_ids
+            let mut client_connections = HashSet::new();
+            for &drone_id in &client.connected_drone_ids {
+                if !client_connections.insert(drone_id) {
+                    return Err("Duplicate connection in client.connected_drone_ids".into());
+                }
+            }
+
+            // Check that client is not connecting to itself
+            if client.connected_drone_ids.contains(&client.id) {
+                return Err("Client cannot connect to itself".into());
+            }
         }
-        if client.connected_drone_ids.len() > 2 {
-            panic!("Client {} cannot be connected to more than 2 drones", client.id);
+
+        for server in &self.config.server {
+            if !all_ids.insert(server.id) {
+                return Err("Duplicate node ID found".into());
+            }
+
+            // Check server constraints
+            if server.connected_drone_ids.len() < 2 {
+                return Err("Server must connect to at least 2 drones".into());
+            }
+
+            // Check for repetitions in connected_drone_ids
+            let mut server_connections = HashSet::new();
+            for &drone_id in &server.connected_drone_ids {
+                if !server_connections.insert(drone_id) {
+                    return Err("Duplicate connection in server.connected_drone_ids".into());
+                }
+            }
+
+            // Check that server is not connecting to itself
+            if server.connected_drone_ids.contains(&server.id) {
+                return Err("Server cannot connect to itself".into());
+            }
+        }
+
+        // Check bidirectional graph property
+        self.check_bidirectional_connections()?;
+
+        // Check connected graph property
+        self.check_connected_graph()?;
+
+        // Check that clients and servers are at the edges
+        self.check_edges_property()?;
+
+        Ok(())
+    }
+
+    fn check_bidirectional_connections(&self) -> Result<(), Box<dyn Error>> {
+        // Create a map of all nodes and their connections
+        let mut node_connections: HashMap<NodeId, HashSet<NodeId>> = HashMap::new();
+
+        // Add drone connections
+        for drone in &self.config.drone {
+            let entry = node_connections.entry(drone.id).or_insert_with(HashSet::new);
+            for &connected_id in &drone.connected_node_ids {
+                entry.insert(connected_id);
+            }
+        }
+
+        // Add client connections
+        for client in &self.config.client {
+            let entry = node_connections.entry(client.id).or_insert_with(HashSet::new);
+            for &drone_id in &client.connected_drone_ids {
+                entry.insert(drone_id);
+
+                // Check bidirectional connection
+                if let Some(drone_connections) = node_connections.get(&drone_id) {
+                    if !drone_connections.contains(&client.id) {
+                        return Err(format!("Connection between client {} and drone {} is not bidirectional", client.id, drone_id).into());
+                    }
+                } else {
+                    return Err(format!("Client {} connects to non-existent drone {}", client.id, drone_id).into());
+                }
+            }
+        }
+
+        // Add server connections
+        for server in &self.config.server {
+            let entry = node_connections.entry(server.id).or_insert_with(HashSet::new);
+            for &drone_id in &server.connected_drone_ids {
+                entry.insert(drone_id);
+
+                // Check bidirectional connection
+                if let Some(drone_connections) = node_connections.get(&drone_id) {
+                    if !drone_connections.contains(&server.id) {
+                        return Err(format!("Connection between server {} and drone {} is not bidirectional", server.id, drone_id).into());
+                    }
+                } else {
+                    return Err(format!("Server {} connects to non-existent drone {}", server.id, drone_id).into());
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn check_connected_graph(&self) -> Result<(), Box<dyn Error>> {
+        // Build adjacency list
+        let mut adj_list: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+
+        // Add all nodes
+        for drone in &self.config.drone {
+            adj_list.insert(drone.id, drone.connected_node_ids.clone());
+        }
+
+        for client in &self.config.client {
+            adj_list.insert(client.id, client.connected_drone_ids.clone());
+        }
+
+        for server in &self.config.server {
+            adj_list.insert(server.id, server.connected_drone_ids.clone());
+        }
+
+        // BFS to check connectivity
+        if adj_list.is_empty() {
+            return Ok(());
+        }
+
+        let start_node = *adj_list.keys().next().unwrap();
+        let mut visited = HashSet::new();
+        let mut queue = vec![start_node];
+
+        while let Some(node) = queue.pop() {
+            if visited.insert(node) {
+                if let Some(neighbors) = adj_list.get(&node) {
+                    for &neighbor in neighbors {
+                        if !visited.contains(&neighbor) {
+                            queue.push(neighbor);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check if all nodes were visited
+        if visited.len() != adj_list.len() {
+            return Err("Graph is not connected".into());
+        }
+
+        Ok(())
+    }
+
+    fn check_edges_property(&self) -> Result<(), Box<dyn Error>> {
+        // Build a graph without clients and servers
+        let mut drone_adj_list: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+
+        // Extract drone-to-drone connections
+        for drone in &self.config.drone {
+            let drone_connections: Vec<NodeId> = drone
+                .connected_node_ids
+                .iter()
+                .filter(|&&id| {
+                    // Check if id belongs to a drone (not a client or server)
+                    self.config.drone.iter().any(|d| d.id == id)
+                })
+                .cloned()
+                .collect();
+
+            drone_adj_list.insert(drone.id, drone_connections);
+        }
+
+        // Check if the drone-only graph is connected using BFS
+        if drone_adj_list.is_empty() {
+            return Ok(());
+        }
+
+        let start_node = *drone_adj_list.keys().next().unwrap();
+        let mut visited = HashSet::new();
+        let mut queue = vec![start_node];
+
+        while let Some(node) = queue.pop() {
+            if visited.insert(node) {
+                if let Some(neighbors) = drone_adj_list.get(&node) {
+                    for &neighbor in neighbors {
+                        if !visited.contains(&neighbor) {
+                            queue.push(neighbor);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check if all drones were visited
+        if visited.len() != drone_adj_list.len() {
+            return Err("Drone-only graph is not connected (clients and servers must be at edges)".into());
+        }
+
+        Ok(())
+    }
+
+    fn setup_channels(&mut self) {
+        // Create unbounded channels for all nodes
+        for drone in &self.config.drone {
+            let (tx, _) = channel::unbounded();
+            self.channels.insert(drone.id, tx);
+        }
+
+        for client in &self.config.client {
+            let (tx, _) = channel::unbounded();
+            self.channels.insert(client.id, tx);
+        }
+
+        for server in &self.config.server {
+            let (tx, _) = channel::unbounded();
+            self.channels.insert(server.id, tx);
         }
     }
 
-    for server in &topology.server {
-        if !all_ids.insert(server.id) {
-            panic!("Duplicate ID found: {}", server.id);
+    fn initialize_drones(&mut self) {
+        let num_drones = self.config.drone.len();
+        let num_impls = self.drone_impls.len();
+
+        // Distribute implementations evenly
+        let mut impl_counts = vec![0; num_impls];
+        let min_count = num_drones / num_impls;
+        let remainder = num_drones % num_impls;
+
+        // Each implementation should be used at least min_count times
+        for i in 0..num_impls {
+            impl_counts[i] = min_count;
+            if i < remainder {
+                impl_counts[i] += 1;
+            }
         }
-        if server.connected_drone_ids.len() < 2 {
-            panic!("Server {} must be connected to at least 2 drones", server.id);
+
+        // Assign implementations to drones and spawn threads
+        let mut impl_index = 0;
+        let mut count = 0;
+
+        for drone in &self.config.drone {
+            if count >= impl_counts[impl_index] {
+                impl_index = (impl_index + 1) % num_impls;
+                count = 0;
+            }
+
+            // Clone the channels that this drone needs
+            let mut channels_for_drone = HashMap::new();
+            for &connected_id in &drone.connected_node_ids {
+                if let Some(tx) = self.channels.get(&connected_id) {
+                    channels_for_drone.insert(connected_id, tx.clone());
+                }
+            }
+
+            // Add controller channel
+            let controller_tx = self.controller_tx.clone();
+
+            // Get a drone implementation
+            let drone_impl = &self.drone_impls[impl_index];
+            let drone_id = drone.id;
+            let drone_pdr = drone.pdr;
+
+            // Spawn drone thread
+            thread::spawn(move || {
+                // Drone logic here
+                // You would use drone_impl, channels_for_drone, controller_tx, etc.
+                println!("Drone {} started with PDR {}", drone_id, drone_pdr);
+            });
+
+            count += 1;
         }
     }
 
-    // Additional validations can be added here (e.g., bidirectional graph check)
-}
+    fn initialize_clients(&self) {
+        for client in &self.config.client {
+            // Clone the channels this client needs
+            let mut channels_for_client = HashMap::new();
+            for &drone_id in &client.connected_drone_ids {
+                if let Some(tx) = self.channels.get(&drone_id) {
+                    channels_for_client.insert(drone_id, tx.clone());
+                }
+            }
 
-fn initialize_network(topology: Topology) {
-    // Maps to store channels and node configurations
-    let mut node_event_channels: HashMap<u8, Sender<DroneEvent>> = HashMap::new(); //each drone sender of event
-    let mut node_command_channels: HashMap<u8, Sender<DroneCommand>> = HashMap::new(); //here there will be the various senders from the simulation controller
-    let mut node_neighbors: HashMap<u8, HashMap<u8, Sender<Packet>>> = HashMap::new(); //hashmap of neighbors of each drone with every sender to neighbors
-    let mut packet_channels: HashMap<u8, (Sender<Packet>, Receiver<Packet>)> = HashMap::new();// ????
+            // Add controller channel
+            let controller_tx = self.controller_tx.clone();
+            let client_id = client.id;
 
-    // Create channels for drones
-    for drone in &topology.drone {
-        let (packet_sender, packet_receiver) = unbounded::<Packet>(); //drone <--> drone/ client / server
-        let (event_send, _) = unbounded::<DroneEvent>(); //drone --> Sim Contr
-        let (command_send, command_recv) = unbounded::<DroneCommand>(); //Sim Contr <--> drone
-
-        packet_channels.insert(drone.id, (packet_sender.clone(), packet_receiver));
-        node_event_channels.insert(drone.id, event_send.clone());
-        node_command_channels.insert(drone.id, command_send.clone());
-
-        let neighbors = drone
-            .connected_node_ids
-            .iter()
-            .map(|&neighbor_id| {
-                let (send, recv) = unbounded();
-                (neighbor_id, send.clone())
-            })
-            .collect::<HashMap<u8, Sender<Packet>>>();
-        node_neighbors.insert(drone.id, neighbors);
+            // Spawn client thread
+            thread::spawn(move || {
+                // Client logic here
+                println!("Client {} started", client_id);
+            });
+        }
     }
 
-    // Create channels for clients and servers
-    for client in &topology.client {
-        let (client_send, client_recv) = unbounded::<Packet>();
-        //we can add here the channel with SC
-        packet_channels.insert(client.id, (client_send.clone(), client_recv));
-    }
-    for server in &topology.server {
-        let (server_send, server_recv) = unbounded::<Packet>();
-        //we can add here the channel with SC
-        packet_channels.insert(server.id, (server_send.clone(), server_recv));
+    fn initialize_servers(&self) {
+        for server in &self.config.server {
+            // Clone the channels this server needs
+            let mut channels_for_server = HashMap::new();
+            for &drone_id in &server.connected_drone_ids {
+                if let Some(tx) = self.channels.get(&drone_id) {
+                    channels_for_server.insert(drone_id, tx.clone());
+                }
+            }
+
+            // Add controller channel
+            let controller_tx = self.controller_tx.clone();
+            let server_id = server.id;
+
+            // Spawn server thread
+            thread::spawn(move || {
+                // Server logic here
+                println!("Server {} started", server_id);
+            });
+        }
     }
 
-    // Spawn drone threads
-    for drone in topology.drone {
-        let id = drone.id;
-        let pdr = drone.pdr;
-        let packet_send = node_neighbors.get(&id).unwrap().clone();
-        let sim_contr_send = node_event_channels.get(&id).unwrap().clone();
-        let sim_contr_recv = node_command_channels.get(&id).unwrap().clone();
-        let packet_recv = packet_channels.get(&id).unwrap().1.clone();
+    fn spawn_controller(&self) {
+        // Clone necessary data for the controller
+        let nodes = self.channels.keys().cloned().collect::<Vec<_>>();
+        let controller_tx = self.controller_tx.clone();
 
         thread::spawn(move || {
-            let mut drone_node = Drone::new(
-                id,
-                sim_contr_send,
-                sim_contr_recv,
-                packet_recv,
-                packet_send,
-                pdr,
-            );
-            drone_node.run();
+            // Controller logic here
+            println!("Controller started, managing {} nodes", nodes.len());
         });
     }
+}
 
-    /*
-    // Spawn client threads
-    for client in topology.client {
-        let id = client.id;
-        let connected_drones = client.connected_drone_ids.clone();
-        let packet_channel = packet_channels.get(&id).unwrap().1.clone();
 
-        thread::spawn(move || {
-            let mut client_node = ClientImpl::new(id, connected_drones, packet_channel);
-            client_node.run();
-        });
+// Usage example
+fn main() -> Result<(), Box<dyn Error>> {
+    // Sample drone implementations
+    let drone_impls: Vec<DroneImpl> = vec![
+        // Your actual drone implementations would go here
+    ];
+
+    let mut initializer = NetworkInitializer::new("network_config.toml", drone_impls)?;
+    initializer.initialize()?;
+
+    println!("Network initialized successfully!");
+
+    // Keep the main thread alive
+    loop {
+        thread::sleep(std::time::Duration::from_secs(1));
     }
-
-    // Spawn server threads
-    for server in topology.server {
-        let id = server.id;
-        let connected_drones = server.connected_drone_ids.clone();
-        let packet_channel = packet_channels.get(&id).unwrap().1.clone();
-
-        thread::spawn(move || {
-            let mut server_node = ServerImpl::new(id, connected_drones, packet_channel);
-            server_node.run();
-        });
-    }
-
-    // Create and run the simulation controller
-    let simulation_controller = SimulationControllerImpl {
-        nodes_and_neighbors: node_neighbors,
-        drone_channels_command: node_command_channels,
-        drone_channels_packet: packet_channels,
-        drone_receiver_event: unbounded().1,
-    };
-
-    thread::spawn(move || {
-        simulation_controller.run();
-    });
-
-     */
 }
-
-
-// Function to run a drone node
-/*
-fn run_drone(id: u8, pdr: f32, connected_nodes: Vec<u8>, tx: Sender<_>, rx: Receiver<_>) {
-    println!("Drone {} running with PDR {}", id, pdr);
-    // Implement drone behavior (message processing, PDR handling, etc.)
-}
-
-// Function to run a client node
-
-fn run_client(id: u8, connected_drones: Vec<u8>) {
-    println!("Client {} running, connected to drones {:?}", id, connected_drones);
-    // Implement client behavior
-}
-
-// Function to run a server node
-fn run_server(id: u8, connected_drones: Vec<u8>) {
-    println!("Server {} running, connected to drones {:?}", id, connected_drones);
-    // Implement server behavior
-}*/
-
-
-pub fn run() {
-    let topology = parse_topology("topologies/butterfly.toml");
-    println!("{:?}", topology);
-    //validate_topology(&topology);
-    //initialize_network(topology);
-}
-
-
-
-
-
- */
