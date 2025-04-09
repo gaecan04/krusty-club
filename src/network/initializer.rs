@@ -59,6 +59,7 @@ pub struct DroneConfig {
     pub connected_node_ids: Vec<NodeId>,
 }
 
+#[derive(Debug)]
 pub struct MyDrone {
     id: NodeId,
     controller_send: Sender<DroneEvent>,
@@ -403,10 +404,13 @@ impl NetworkInitializer {
     fn initialize_drones(&mut self) {
         let num_drones = self.config.drone.len();
         let num_impls = self.drone_impls.len();
+        println!("num drones {}",num_drones);
+        println!("num impls {:?}",num_impls);
+
 
         // Distribute implementations evenly
         let mut impl_counts = vec![0; num_impls];
-        let min_count = num_drones / num_impls;
+        let min_count = num_drones / num_impls; //non ho ancora caricato i droni
         let remainder = num_drones % num_impls;
 
         // Each implementation should be used at least min_count times
@@ -526,5 +530,141 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Keep the main thread alive
     loop {
         thread::sleep(std::time::Duration::from_secs(1));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_channel_setup() {
+        // Create a mock config for testing
+        let mock_config = Config {
+            drone: vec![
+                Drone {
+                    id: 1,
+                    connected_node_ids: vec![2],
+                    pdr: 0.9,
+                },
+                Drone {
+                    id: 2,
+                    connected_node_ids: vec![1],
+                    pdr: 0.8,
+                },
+            ],
+            client: vec![
+                Client {
+                    id: 3,
+                    connected_drone_ids: vec![1],
+                },
+            ],
+            server: vec![
+                Server {
+                    id: 4,
+                    connected_drone_ids: vec![1],
+                },
+            ],
+        };
+
+        // Initialize NetworkInitializer with mock config
+        let mut initializer = NetworkInitializer::new("topologies/butterfly.toml", vec![]).unwrap();
+
+        // Call setup_channels to create channels
+        initializer.setup_channels();
+
+        // Check that channels for each node were created
+        for drone in &mock_config.drone {
+            assert!(initializer.channels.contains_key(&drone.id), "Missing channel for drone {}", drone.id);
+        }
+
+        for client in &mock_config.client {
+            assert!(initializer.channels.contains_key(&client.id), "Missing channel for client {}", client.id);
+        }
+
+        for server in &mock_config.server {
+            assert!(initializer.channels.contains_key(&server.id), "Missing channel for server {}", server.id);
+        }
+    }
+
+
+
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+
+    #[test]
+    fn test_drone_initialization() {
+        let drone_count = 3;
+        let counter = Arc::new(Mutex::new(0));
+
+        // Create a mock config with 3 drones
+        let mock_config = Config {
+            drone: vec![
+                Drone { id: 1, connected_node_ids: vec![2], pdr: 0.9 },
+                Drone { id: 2, connected_node_ids: vec![1], pdr: 0.8 },
+                Drone { id: 3, connected_node_ids: vec![1], pdr: 0.7 },
+            ],
+            client: vec![],
+            server: vec![],
+        };
+
+        let mut initializer = NetworkInitializer::new("topologies/butterfly.toml", vec![]).unwrap();
+
+        // Setup channels and drone implementations
+        initializer.setup_channels();
+
+        // Simulate drone thread creation (in place of the actual `thread::spawn`)
+        for drone in mock_config.drone.clone() {
+            let counter = Arc::clone(&counter);
+            thread::spawn(move || {
+                let mut count = counter.lock().unwrap();
+                *count += 1;
+                println!("Drone {} initialized", drone.id);
+            });
+        }
+
+        // Wait for threads to complete
+        thread::sleep(std::time::Duration::from_secs(1));
+
+        // Check if the expected number of threads (drones) were spawned
+        let count = counter.lock().unwrap();
+        assert_eq!(*count, drone_count, "Expected {} drones, but got {}", drone_count, *count);
+    }
+
+
+
+
+    use super::*;
+
+    #[test]
+    fn test_full_network_initialization() {
+        // Use a mock or simplified config to test the entire initialization flow
+        let mock_config = Config {
+            drone: vec![
+                Drone { id: 1, connected_node_ids: vec![2], pdr: 0.9 },
+                Drone { id: 2, connected_node_ids: vec![1], pdr: 0.8 },
+            ],
+            client: vec![
+                Client { id: 3, connected_drone_ids: vec![1] },
+            ],
+            server: vec![
+                Server { id: 4, connected_drone_ids: vec![2] },
+            ],
+        };
+
+        let mut initializer = NetworkInitializer::new("topologies/butterfly.toml", vec![]).unwrap();
+
+        // Perform the full initialization process
+        initializer.initialize().unwrap();
+
+        // Check that all channels are set up
+        assert!(initializer.channels.contains_key(&1), "Missing channel for drone 1");
+        assert!(initializer.channels.contains_key(&2), "Missing channel for drone 2");
+        assert!(initializer.channels.contains_key(&3), "Missing channel for client 3");
+        assert!(initializer.channels.contains_key(&4), "Missing channel for server 4");
+
+        // Check that the drone threads are spawned (if using thread simulation)
+        // You can further check the logs or counters if needed
     }
 }

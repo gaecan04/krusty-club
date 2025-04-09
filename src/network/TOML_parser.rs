@@ -60,3 +60,29 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use toml;
+
+    #[test]
+    fn test_config_parsing() {
+        // Path to a test TOML file
+        let config_path = "topologies/tree.toml";
+
+        // Read the file content
+        let config_str = fs::read_to_string(config_path).expect("Failed to read config file");
+
+        // Parse the TOML content
+        let config: Config = toml::from_str(&config_str).expect("Failed to parse config");
+
+        // Check if the config has the expected structure
+        assert!(config.drone.len() > 0, "Expected drones in the config");
+        assert!(config.client.len() > 0, "Expected clients in the config");
+        assert!(config.server.len() > 0, "Expected servers in the config");
+
+        // Add more specific assertions based on your test configuration
+    }
+}
