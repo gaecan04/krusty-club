@@ -1,30 +1,26 @@
 use std::fs;
 use std::error::Error;
-
-// Import necessary dependencies
-#[cfg(feature = "serialize")]
-use serde::Deserialize;
+use serde::{ Serialize,Deserialize};
 use wg_2024::network::NodeId;
 use crate::network::initializer::ParsedConfig;
 
-// These struct definitions were provided in your paste
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serialize", derive(Deserialize))]
+#[derive(Debug, Clone,Serialize,Deserialize)]
+//#[cfg_attr(feature = "serialize", derive(Deserialize))]
 pub struct Drone {
     pub id: NodeId,
     pub connected_node_ids: Vec<NodeId>,
     pub pdr: f32,
 }
 
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serialize", derive(Deserialize))]
+#[derive(Debug, Clone,Serialize,Deserialize)]
+//#[cfg_attr(feature = "serialize", derive(Deserialize))]
 pub struct Client {
     pub id: NodeId,
     pub connected_drone_ids: Vec<NodeId>,
 }
 
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serialize", derive(Deserialize))]
+#[derive(Debug, Clone,Serialize,Deserialize)]
+//#[cfg_attr(feature = "serialize", derive(Deserialize))]
 pub struct Server {
     pub id: NodeId,
     pub connected_drone_ids: Vec<NodeId>,

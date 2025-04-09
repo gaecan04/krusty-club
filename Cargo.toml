@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 wg_2024 = { git = "https://github.com/WGL-2024/WGL_repo_2024.git", features = ["serialize", "debug"]}
-toml = "0.8.19"
+toml = { version = "0.8.19"}
 serde = { version = "1.0.215", features = ["derive"] }
 serde_derive = "1.0"
 crossbeam-channel = "0.5.13"
@@ -16,3 +16,10 @@ config = "0.15.6"
 eframe = "0.31.1"
 egui = "0.31.1"
 crossbeam = "0.8.4"
+
+#eg of drones import
+#group_a = { git = "https://github.com/groupA/drone" }
+#group_b = { git = "https://github.com/groupB/drone" }
+
+[features]
+serialize = []

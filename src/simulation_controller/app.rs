@@ -1,6 +1,8 @@
+use crossbeam_channel::Sender;
 use eframe::{egui, App, CreationContext};
 use eframe::egui::{Stroke, StrokeKind};
 use egui::{Color32, RichText, Vec2, Rect, Sense, Shape};
+use wg_2024::controller::DroneEvent;
 use crate::network::initializer::ParsedConfig;
 use crate::network::TOML_parser::Config;
 use crate::simulation_controller::network_designer::NetworkRenderer;
@@ -296,6 +298,18 @@ impl NetworkApp {
                 }
             });
         });
+    }
+    pub fn new_with_network(
+        cc: &eframe::CreationContext<'_>,
+        controller_send: Sender<DroneEvent>,
+        config: ParsedConfig,
+    ) -> Self {
+        // Store controller_send + config in your GUI state
+        Self {
+            network_config: Some(config),
+            // If you want to use `controller_send`, add the field first (see below)
+            ..Default::default()
+        }
     }
 }
 

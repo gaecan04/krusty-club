@@ -1,3 +1,10 @@
+use crate::TOML_parser::Client;
+use crate::TOML_parser::Drone;
+use crate::TOML_parser::Server;
+use crate::TOML_parser::Config;
+
+
+use crate::Drone as OrigDrone;
 use toml;
 use crossbeam_channel::{unbounded, select_biased, select, Receiver, Sender};
 use serde::Deserialize;
@@ -14,38 +21,9 @@ use crossbeam::channel;
 // Assuming these are defined elsewhere or imported
 use wg_2024::network::NodeId;
 #[cfg(feature = "serialize")]
-use serde::Deserialize;
 
 // These struct definitions were provided in your paste
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serialize", derive(Deserialize))]
-pub struct Drone {
-    pub id: NodeId,
-    pub connected_node_ids: Vec<NodeId>,
-    pub pdr: f32,
-}
 
-#[derive(Debug, Clone,Deserialize)]
-#[cfg_attr(feature = "serialize", derive(Deserialize))]
-pub struct Client {
-    pub id: NodeId,
-    pub connected_drone_ids: Vec<NodeId>,
-}
-
-#[derive(Debug, Clone,Deserialize)]
-#[cfg_attr(feature = "serialize", derive(Deserialize))]
-pub struct Server {
-    pub id: NodeId,
-    pub connected_drone_ids: Vec<NodeId>,
-}
-
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serialize", derive(Deserialize))]
-pub struct Config {
-    pub drone: Vec<Drone>,
-    pub client: Vec<Client>,
-    pub server: Vec<Server>,
-}
 
 // Type aliases for clarity
 pub type DroneImpl = Box<dyn DroneImplementation>;
@@ -53,7 +31,7 @@ type NodeChannels = HashMap<NodeId, channel::Sender<Message>>;
 
 // Message type for inter-node communication
 #[derive(Debug, Clone)]
-enum Message {
+pub(crate) enum Message {
     // Define your message types here
     Data(Vec<u8>),
     Control(ControlMessage),
@@ -81,22 +59,65 @@ pub struct DroneConfig {
     pub connected_node_ids: Vec<NodeId>,
 }
 
+pub struct MyDrone {
+    id: NodeId,
+    controller_send: Sender<DroneEvent>,
+    controller_recv: Receiver<DroneCommand>,
+    packet_recv: Receiver<Packet>,
+    packet_send: HashMap<NodeId, Sender<Packet>>,
+    pdr: f32,
+}
+
+impl DroneImplementation for MyDrone {
+    fn process_message(&mut self, msg: Message) -> Vec<Message> {
+        // Process the message (This is just a placeholder, modify as needed)
+        println!("Processing message for drone {}: {:?}", self.id, msg);
+        vec![msg] // Returning the message for now, adjust this to your needs
+    }
+
+    fn get_id(&self) -> NodeId {
+        self.id
+    }
+}
+
+impl wg_2024::drone::Drone for MyDrone {
+    fn new(
+        id: NodeId,
+        controller_send: Sender<DroneEvent>,
+        controller_recv: Receiver<DroneCommand>,
+        packet_recv: Receiver<Packet>,
+        packet_send: HashMap<NodeId, Sender<Packet>>,
+        pdr: f32,
+    ) -> Self {
+        MyDrone {
+            id,
+            controller_send,
+            controller_recv,
+            packet_recv,
+            packet_send,
+            pdr,
+        }
+    }
+
+    fn run(&mut self) {
+        println!("Running drone {} with PDR {}", self.id, self.pdr);    }
+}
 
 // Trait for drone implementations
-trait DroneImplementation: Send + 'static {
+pub(crate) trait DroneImplementation: Send + 'static {
     fn process_message(&mut self, msg: Message) -> Vec<Message>;
     fn get_id(&self) -> NodeId;
 }
 
 pub(crate) struct NetworkInitializer {
     config: Config,
-    drone_impls: Vec<DroneImpl>,
+    drone_impls: Vec<MyDrone>,
     channels: NodeChannels,
-    controller_tx: channel::Sender<Message>,
+    controller_tx: Sender<Message>,
 }
 
 impl NetworkInitializer {
-    pub fn new(config_path: &str, drone_impls: Vec<DroneImpl>) -> Result<Self, Box<dyn Error>> {
+    pub fn new(config_path: &str, drone_impls: Vec<MyDrone>) -> Result<Self, Box<dyn Error>> {
         // Read config file
         let config_str = fs::read_to_string(config_path)?;
 
@@ -120,7 +141,7 @@ impl NetworkInitializer {
 
     pub fn initialize(&mut self) -> Result<(), Box<dyn Error>> {
         // Validate the network configuration
-        self.validate_config()?;
+       // self.validate_config()?;
 
         // Create channels for all nodes
         self.setup_channels();
@@ -231,7 +252,8 @@ impl NetworkInitializer {
             let entry = node_connections.entry(client.id).or_insert_with(HashSet::new);
             for &drone_id in &client.connected_drone_ids {
                 entry.insert(drone_id);
-
+            }
+            for &drone_id in &client.connected_drone_ids {
                 // Check bidirectional connection
                 if let Some(drone_connections) = node_connections.get(&drone_id) {
                     if !drone_connections.contains(&client.id) {
@@ -243,12 +265,15 @@ impl NetworkInitializer {
             }
         }
 
+
         // Add server connections
         for server in &self.config.server {
             let entry = node_connections.entry(server.id).or_insert_with(HashSet::new);
             for &drone_id in &server.connected_drone_ids {
                 entry.insert(drone_id);
-
+            }
+            //2 loops to avoid the mut/ immutable borrow simultan
+            for &drone_id in &server.connected_drone_ids {
                 // Check bidirectional connection
                 if let Some(drone_connections) = node_connections.get(&drone_id) {
                     if !drone_connections.contains(&server.id) {
@@ -489,7 +514,7 @@ impl NetworkInitializer {
 // Usage example
 fn main() -> Result<(), Box<dyn Error>> {
     // Sample drone implementations
-    let drone_impls: Vec<DroneImpl> = vec![
+    let drone_impls: Vec<MyDrone> = vec![
         // Your actual drone implementations would go here
     ];
 
