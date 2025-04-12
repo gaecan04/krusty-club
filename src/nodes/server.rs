@@ -54,8 +54,8 @@ pub struct server {
     pub fragment_lengths: HashMap<(u64, NodeId), u8>, // Maps (session_id, src_id) to length of the last fragment
     pub packet_sender: HashMap<NodeId, Sender<Packet>>, // Hashmap containing each sender channel to the neighbors (channels to send packets to clients)
     pub packet_receiver: Receiver<Packet>, // Channel to receive packets from clients/drones
-    recovery_in_progress:  HashMap<(u64, NodeId), bool>, // Tracks if recovery is already in progress for a session
-    drop_counts: HashMap<(u64, NodeId), usize>, // Track number of drops per session
+    //recovery_in_progress:  HashMap<(u64, NodeId), bool>, // Tracks if recovery is already in progress for a session
+    //drop_counts: HashMap<(u64, NodeId), usize>, // Track number of drops per session
 }
 
 impl server {
@@ -69,8 +69,8 @@ impl server {
             fragment_lengths: HashMap::new(),
             packet_sender: HashMap::new(),
             packet_receiver,
-            recovery_in_progress: HashMap::new(),
-            drop_counts: HashMap::new(),
+            //recovery_in_progress: HashMap::new(),
+            //drop_counts: HashMap::new(),
         }
     }
 
@@ -128,9 +128,6 @@ impl server {
         // Initialize storage for fragments if not already present
         let entry = self.received_fragments.entry(key).or_insert_with(|| vec![None; fragment.total_n_fragments as usize]);
 
-        // If this is the first fragment, also initialize the recovery tracker
-        self.recovery_in_progress.entry(key).or_insert(false);
-
         // Check if the fragment is already received
         if entry[fragment.fragment_index as usize].is_some() {
             warn!("Duplicate fragment {} received for session {:?}", fragment.fragment_index, key);
@@ -150,19 +147,24 @@ impl server {
         if entry.iter().all(Option::is_some) {
             // All fragments received, handle complete message
             self.handle_complete_message(key, routing_header.clone());
-            // Clear recovery status since message is complete
-            self.recovery_in_progress.remove(&key);
-        } else {
-            // Only start recovery if we've received a significant portion but not all fragments
-            let received_count = entry.iter().filter(|f| f.is_some()).count();
-            let total_count = fragment.total_n_fragments as usize; //--> this should introduce a delay???
-
-            // Only trigger recovery if we've received more than half the fragments but not all
-            if received_count > total_count / 2 && received_count < total_count && !self.recovery_in_progress[&key] {
-                self.recovery_in_progress.insert(key, true);
-                self.recover_lost_fragments(session_id, routing_header);
-            }
         }
+    }
+    fn handle_complete_message(&mut self, key: (u64, NodeId), routing_header: SourceRoutingHeader) {
+        let fragments = self.received_fragments.remove(&key).unwrap();
+        let total_length = fragments.len() * 128 - 128 + self.fragment_lengths.remove(&key).unwrap_or(128) as usize;
+
+        // Reassemble the message
+        let mut message = Vec::with_capacity(total_length);
+        if fragments.iter().any(|f| f.is_none()) {
+            error!("Missing fragments detected for session {:?}", key);
+            return; // Handle incomplete fragments gracefully
+        }
+        for fragment in fragments {
+            message.extend_from_slice(&fragment.unwrap());
+        }
+        message.truncate(total_length);
+        info!("Server reassembled message for session {:?}: {:?}", key, message);
+
     }
     //fn process_nack(&mut self, nack: &Nack, packet: &mut Packet)
     fn handle_nack(&mut self, session_id: u64, nack: &Nack, routing_header: SourceRoutingHeader) {
@@ -264,86 +266,6 @@ impl server {
                 //self.flood(session_id, nack.fragment_index, routing_header); -------------> NOT WORKING: TO SEE HOW FLOODING IS IMPLEMENTED, WHO CAN FLOOD, MAYBE CONSIDER TRAIT?????
         }
     }
-    ///Function to recover the missing fragments:
-    fn recover_lost_fragments(&mut self, session_id: u64, routing_header: SourceRoutingHeader) {
-        let key = (session_id, routing_header.hops[0]);
-        if let Some(fragments) = self.received_fragments.get(&key) {
-            let mut missing_indexes = Vec::new();
-            for (index, fragment) in fragments.iter().enumerate() {
-                if fragment.is_none() {
-                    missing_indexes.push(index as u64);
-                }
-            }
-
-            if !missing_indexes.is_empty() {
-                warn!("Detected missing fragments {:?} for session {:?}", missing_indexes, key);
-                for missing_index in missing_indexes {
-                    // Create NACK packet for each missing fragment
-                    let nack = Nack {
-                        fragment_index: missing_index,
-                        nack_type: NackType::Dropped,
-                    };
-
-                    // Create reversed routing header to send back to source
-                    let reverse_routing_header = SourceRoutingHeader {
-                        hop_index: 0, // Start at first hop when sending back
-                        hops: routing_header.hops.iter().rev().copied().collect(),
-                    };
-
-                    // Create NACK packet
-                    let nack_packet = Packet::new_nack(
-                        reverse_routing_header,
-                        session_id,
-                        nack
-                    );
-
-                    // Send the NACK packet to the first hop in the reversed path
-                    if let Some(&first_hop) = nack_packet.routing_header.hops.first() {
-                        if let Some(sender) = self.packet_sender.get(&first_hop) {
-                            match sender.try_send(nack_packet) {
-                                Ok(()) => {
-                                    info!("Sent NACK for missing fragment {} in session {}", missing_index, session_id);
-                                }
-                                Err(e) => {
-                                    error!("Failed to send NACK for missing fragment {}: {:?}", missing_index, e);
-                                }
-                            }
-                        } else {
-                            error!("No sender found for node {}", first_hop);
-                        }
-                    } else {
-                        error!("No route available to send NACK for fragment {}", missing_index);
-                    }
-                }
-            } else {
-                info!("All fragments received for session {:?}", key);
-            }
-        } else {
-            warn!("No fragment record found for session {:?}", key);
-        }
-    }
-
-
-
-    fn handle_complete_message(&mut self, key: (u64, NodeId), routing_header: SourceRoutingHeader) {
-        let fragments = self.received_fragments.remove(&key).unwrap();
-        let total_length = fragments.len() * 128 - 128 + self.fragment_lengths.remove(&key).unwrap_or(128) as usize;
-
-        // Reassemble the message
-        let mut message = Vec::with_capacity(total_length);
-        if fragments.iter().any(|f| f.is_none()) {
-            error!("Missing fragments detected for session {:?}", key);
-            return; // Handle incomplete fragments gracefully
-        }
-        for fragment in fragments {
-            message.extend_from_slice(&fragment.unwrap());
-        }
-        message.truncate(total_length);
-        info!("Server reassembled message for session {:?}: {:?}", key, message);
-
-        // Send an acknowledgment
-        //self.send_ack(key, routing_header);
-    }
 
     // modifica cosi che ogni volta che ricevo un frammento mando un ack, con il proprio index number.
     fn send_ack(&mut self, packet: &mut Packet, fragment: &Fragment) {
@@ -352,12 +274,12 @@ impl server {
                 fragment_index: fragment.fragment_index,
             }),
             routing_header: SourceRoutingHeader {
-                hop_index: packet.routing_header.hops.len() - 1,
+                hop_index: 0, //---> start at the beginning of the reversed path
                 hops: packet.routing_header.hops.iter().rev().copied().collect(),
             },
             session_id: packet.session_id,
         };
-        if let Some(next_hop) = packet.routing_header.hops.get(packet.routing_header.hop_index){
+        if let Some(next_hop) = ack_packet.routing_header.hops.get(0){
             if let Some(sender) = self.packet_sender.get(&next_hop){
                 match sender.try_send(ack_packet.clone()) {
                     Ok(()) => {
@@ -367,6 +289,8 @@ impl server {
                         println!("Error sending packet: {:?}", e);
                     }
                 }
+            } else {
+                println!("No sender found for {:?}", next_hop);
             }
         }
 
