@@ -45,6 +45,7 @@ use crossbeam_channel::{Receiver, RecvError, Sender};
 use wg_2024::packet::{Ack, FloodRequest, FloodResponse, Fragment, Nack, NackType, NodeType, Packet, PacketType};
 use wg_2024::network::{NodeId, SourceRoutingHeader};
 use log::{info, error, warn, debug};
+use wg_2024::packet::PacketType::FloodResponse;
 
 #[derive(Debug, Clone)]
 pub struct server {
@@ -176,6 +177,22 @@ impl server {
                 // Nacktype: ErrorInRouting ---> floodRequest --> find crashed drone --> remove from graph --> calculate path to dijstra and keep sending
                 //put a limit of 5 dropped fragments, at the 6th the server will flood the network sending a floodrequest
                 // to the drone to whom it is connected.
+
+                //Modus Operandi client/server:
+                // prima operazione generale: floodRequest.
+                /* Riceverò delle flood_response e da queste mi costruisco il grafo.
+                    Una volta costruito il grafo ad ogni nack::Dropped che ricevo vado a modificare il peso di tutti i
+                    collegamenti relativi a quel drone. Gli altri nack implicano che c'è qualche problema del tipo crashed Drone.
+                    Come gestisco? Mando floodRequest, riceveroò floodResponse che mi indicheranno il drone problematico, carpita
+                    questa informazione lo vado a rimuovere dal grafo.
+                 */
+                //quando ricevo un nack::ErrorInRouting ... faccio un flooding normale (creo una flood_request normale),
+                //poi riceverò flood_response e agisco sul grafo come al solito.
+
+                // grafo fatto con pet_graph.
+
+
+
                 if *drop_count > 5 {
                     info!("Drop threshold exceeded for session {:?}, initiating flood", key);
                     // Generate a unique flood ID (can use a counter or session_id)
@@ -361,13 +378,37 @@ impl server {
         pub length: u8,
         pub data: [u8; FRAGMENT_DSIZE],
     }
-     */
+     //creo la flood_response e la reinvio ai vicini
 
+     */
+    fn handle_flood_request(&mut self, session_id:u64, flood_request: &FloodRequest, source_routing_header: SourceRoutingHeader) {
+        info!("Received Flood request for session {} with flood id {}", session_id, flood_request.flood_id);
+
+        let flood_response= PacketType::FloodResponse(
+            FloodResponse {
+                flood_id: session_id,
+                path_trace: vec![(self.id,NodeType::Server)],
+            }
+        );
+        let packet_flood_response= Packet{
+            routing_header: SourceRoutingHeader{
+                hop_index: 0,
+                hops: source_routing_header.hops.iter().rev().copied().collect(),
+            },
+            session_id,
+            pack_type: flood_response,
+        };
+        self.packet_sender.iter().for_each(|(_, sender)| {
+            sender.try_send(packet_flood_response).unwrap()
+        })
+
+    }
 
     //handle_flood_response is still to be checked properly and tested.
-    fn handle_flood_response(&mut self, session_id: u64, flood_response: FloodResponse, routing_header: SourceRoutingHeader) {
+    fn handle_flood_response(&mut self, session_id: u64, flood_response: &FloodResponse, routing_header: SourceRoutingHeader) {
         info!("Received FloodResponse for flood_id {} in session {}", flood_response.flood_id, session_id);
-
+        //obiettivo: fare tutta quella roba strana con il grafo.
+        // il
         // Extract the path from the response
         let path = flood_response.path_trace
             .iter()
@@ -384,6 +425,7 @@ impl server {
         let key = (session_id, path[0]); // First node should be the client
         self.drop_counts.insert(key, 0);
     }
+
 }
 
 #[cfg(test)]
