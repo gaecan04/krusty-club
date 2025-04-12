@@ -45,7 +45,7 @@ use crossbeam_channel::{Receiver, RecvError, Sender};
 use wg_2024::packet::{Ack, FloodRequest, FloodResponse, Fragment, Nack, NackType, NodeType, Packet, PacketType};
 use wg_2024::network::{NodeId, SourceRoutingHeader};
 use log::{info, error, warn, debug};
-use wg_2024::packet::PacketType::FloodResponse;
+
 
 #[derive(Debug, Clone)]
 pub struct server {
@@ -170,9 +170,6 @@ impl server {
     fn handle_nack(&mut self, session_id: u64, nack: &Nack, routing_header: SourceRoutingHeader) {
 
         info!("Recieved NACK for fragment {} with type {:?} in session {}", nack.fragment_index, nack.nack_type, session_id);
-        let key = (session_id, routing_header.hops[0]);
-        let drop_count= self.drop_counts.entry(key).or_insert(0);
-        *drop_count += 1;
 
         match nack.nack_type {
             NackType::Dropped => { // the only case i recieve nack Dropped is when i am forwarding the fragments to the second client
@@ -185,7 +182,7 @@ impl server {
                 /* Riceverò delle flood_response e da queste mi costruisco il grafo.
                     Una volta costruito il grafo ad ogni nack::Dropped che ricevo vado a modificare il peso di tutti i
                     collegamenti relativi a quel drone. Gli altri nack implicano che c'è qualche problema del tipo crashed Drone.
-                    Come gestisco? Mando floodRequest, riceveroò floodResponse che mi indicheranno il drone problematico, carpita
+                    Come gestisco? Mando floodRequest, riceverò floodResponse che mi indicheranno il drone problematico, carpita
                     questa informazione lo vado a rimuovere dal grafo.
                  */
                 //quando ricevo un nack::ErrorInRouting ... faccio un flooding normale (creo una flood_request normale),
@@ -193,17 +190,15 @@ impl server {
 
                 // grafo fatto con pet_graph.
 
+                warn!("Received Nack::Dropped, modifying the costs in the graph")
 
-
-                if *drop_count > 5 {
-                    info!("Drop threshold exceeded for session {:?}, initiating flood", key);
-                    // Generate a unique flood ID (can use a counter or session_id)
-                    let flood_id = session_id;
-
+            }
+            _ => {
+                    warn!("Received ErrorInRouting/DestinationIsDrone/UnexpectedRecipient NACK type, sending flood request");
                     let flood_request = FloodRequest {
-                        flood_id: flood_id,
+                        flood_id: session_id,
                         initiator_id: self.id as NodeId,
-                        path_trace: vec![(self.id as NodeId, NodeType::Server)], //contains my id,
+                        path_trace: vec![(self.id as NodeId, NodeType::Server)], //starting from server ID.,
                     };
                     // Create the flood packet to send to all connected drones
                     let flood_packet = Packet::new_flood_request(
@@ -216,13 +211,11 @@ impl server {
                         flood_request
                     );
 
-                    if let Some(next_hop) = flood_packet.routing_header.hops.get(flood_packet.routing_header.hop_index) {
+                    if let Some(next_hop) = flood_packet.routing_header.hops.get(1) {
                         if let Some(sender) = self.packet_sender.get(next_hop) {
                             match sender.try_send(flood_packet.clone()) {
                                 Ok(()) => {
                                     info!("FloodRequest sent to node {} for session {}", next_hop, session_id);
-                                    // Reset drop count after successfully sending flood request
-                                    self.drop_counts.insert(key, 0);
                                 }
                                 Err(e) => {
                                     error!("Error sending flood packet: {:?}", e);
@@ -234,36 +227,9 @@ impl server {
                     } else {
                         error!("No next hop available in routing header");
                     }
-
-                } else {
-                    // Normal NACK handling for under-threshold drops
-                    info!("Drop count for session {:?}: {}/5", key, *drop_count);
-                    // Send NACK back along the original path
-                    let nack_packet = Packet::new_nack(
-                        SourceRoutingHeader {
-                            hop_index: 0,
-                            hops: vec![routing_header.hops[routing_header.hops.len() - 1]],
-                        },
-                        session_id,
-                        nack.clone()
-                    );
-                    let destination = routing_header.hops[routing_header.hops.len() - 1];
-                    if let Some(sender) = self.packet_sender.get(&destination) {
-                        if let Err(err) = sender.try_send(nack_packet) {
-                            error!("Failed to resend Nack for fragment {}: {}", nack.fragment_index, err);
-                        } else {
-                            info!("Sent NACK for fragment {} back to node {}", nack.fragment_index, destination);
-                        }
-                    } else {
-                        error!("No sender found for destination node {}", destination);
-                    }
-                }
             }
-            _ => {
-                    warn!("Received non-dropped NACK type, flooding mechanism not implemented yet");
-            }
-                // For other NackTypes (like routing issues), use flooding approach
-                //self.flood(session_id, nack.fragment_index, routing_header); -------------> NOT WORKING: TO SEE HOW FLOODING IS IMPLEMENTED, WHO CAN FLOOD, MAYBE CONSIDER TRAIT?????
+            //di conseguenza successivamente il server riceverà delle floodResponse. Queste dovranno essere analizzate
+            //ed interpretate per poi andare a modificare il grafo.
         }
     }
 
@@ -274,12 +240,12 @@ impl server {
                 fragment_index: fragment.fragment_index,
             }),
             routing_header: SourceRoutingHeader {
-                hop_index: 0, //---> start at the beginning of the reversed path
+                hop_index: 1, //---> start at the beginning of the reversed path
                 hops: packet.routing_header.hops.iter().rev().copied().collect(),
             },
             session_id: packet.session_id,
         };
-        if let Some(next_hop) = ack_packet.routing_header.hops.get(0){
+        if let Some(next_hop) = ack_packet.routing_header.hops.get(1){
             if let Some(sender) = self.packet_sender.get(&next_hop){
                 match sender.try_send(ack_packet.clone()) {
                     Ok(()) => {
@@ -295,16 +261,7 @@ impl server {
         }
 
     }
-    /*
-    pub struct Fragment {
-        pub fragment_index: u64,
-        pub total_n_fragments: u64,
-        pub length: u8,
-        pub data: [u8; FRAGMENT_DSIZE],
-    }
-     //creo la flood_response e la reinvio ai vicini
 
-     */
     fn handle_flood_request(&mut self, session_id:u64, flood_request: &FloodRequest, source_routing_header: SourceRoutingHeader) {
         info!("Received Flood request for session {} with flood id {}", session_id, flood_request.flood_id);
 
@@ -332,7 +289,7 @@ impl server {
     fn handle_flood_response(&mut self, session_id: u64, flood_response: &FloodResponse, routing_header: SourceRoutingHeader) {
         info!("Received FloodResponse for flood_id {} in session {}", flood_response.flood_id, session_id);
         //obiettivo: fare tutta quella roba strana con il grafo.
-        // il
+
         // Extract the path from the response
         let path = flood_response.path_trace
             .iter()
@@ -345,9 +302,6 @@ impl server {
         // TODO: Use this path for future communications with this client
         // You might want to store this path in a new field in your server struct
 
-        // Reset drop count for this session since we've now established a new path
-        let key = (session_id, path[0]); // First node should be the client
-        self.drop_counts.insert(key, 0);
     }
 
 }
@@ -560,132 +514,6 @@ mod tests {
         let key = (session_id, src_node);
         assert!(srv.recovery_in_progress[&key], "Recovery in progress flag should be set");
     }
-    /*
-    #[test]
-    fn test_recovery_missing_fragment() {
-        // Create channels for sending/receiving packets
-        let (server_tx, server_rx) = unbounded(); // Packets sent by server
-        let (packet_tx, packet_rx) = unbounded(); // Packets received by server
-
-        // Instantiate the server
-        let mut srv = server::new(1, server_tx, packet_rx);
-
-        // Test setup
-        let session_id: u64 = 43;
-        let src_node: NodeId = 10;
-        let dst_node: NodeId = 20;
-        let intermediate_node: NodeId = 15;
-
-        // Create a routing header with multiple hops to test recovery with route changes
-        let routing_header = SourceRoutingHeader {
-            hop_index: 0,
-            hops: vec![src_node, intermediate_node, dst_node],
-        };
-
-        // Create a message that will be split into 3 fragments
-        // Prepare fragment 0
-        let mut data0 = [0u8; 128];
-        for i in 0..128 {
-            data0[i] = i as u8;
-        }
-        let fragment0 = Fragment {
-            fragment_index: 0,
-            total_n_fragments: 3,
-            length: 128,
-            data: data0,
-        };
-
-        // Prepare fragment 1
-        let mut data1 = [0u8; 128];
-        for i in 0..128 {
-            data1[i] = (i + 128) as u8;
-        }
-        let fragment1 = Fragment {
-            fragment_index: 1,
-            total_n_fragments: 3,
-            length: 128,
-            data: data1,
-        };
-
-        // Prepare fragment 2 (last fragment)
-        let mut data2 = [0u8; 128];
-        let last_msg = b"final fragment";
-        data2[..last_msg.len()].copy_from_slice(last_msg);
-        let fragment2 = Fragment {
-            fragment_index: 2,
-            total_n_fragments: 3,
-            length: last_msg.len() as u8,
-            data: data2,
-        };
-
-        // Create packet wrappers
-        let packet0 = Packet {
-            pack_type: PacketType::MsgFragment(fragment0),
-            routing_header: routing_header.clone(),
-            session_id,
-        };
-
-        let packet2 = Packet {
-            pack_type: PacketType::MsgFragment(fragment2),
-            routing_header: routing_header.clone(),
-            session_id,
-        };
-
-        // Send fragments 0 and 2 (skip 1 to simulate packet loss)
-        println!("Sending fragment 0 and 2 (skipping 1 to test recovery)");
-        packet_tx.send(packet0).unwrap();
-        packet_tx.send(packet2).unwrap();
-
-        // Process these packets with a separate thread to allow testing the response
-        std::thread::spawn(move || {
-            // Process incoming packets in a separate thread
-            for _ in 0..2 {
-                if let Ok(packet) = packet_rx.recv() {
-                    match &packet.pack_type {
-                        PacketType::MsgFragment(fragment) => {
-                            srv.handle_fragment(packet.session_id, fragment.clone(), packet.routing_header.clone());
-                        },
-                        _ => {}
-                    }
-                }
-            }
-        });
-
-        // Wait for the server to process and detect missing fragment
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
-        // Check if the server sent a NACK for the missing fragment
-        let sent_packets: Vec<Packet> = server_rx.try_iter().collect();
-        println!("Server sent {} packets", sent_packets.len());
-
-        // Verify at least one packet was sent and it was a NACK
-        assert!(!sent_packets.is_empty(), "Server should have sent at least one packet");
-
-        // Find NACKs for fragment 1
-        let nacks: Vec<&Packet> = sent_packets.iter()
-            .filter(|p| {
-                if let PacketType::Nack(nack) = &p.pack_type {
-                    nack.fragment_index == 1 && p.session_id == session_id
-                } else {
-                    false
-                }
-            })
-            .collect();
-
-        assert!(!nacks.is_empty(), "Server should have sent a NACK for missing fragment 1");
-
-        // Verify the NACK has the correct details
-        let nack_packet = nacks[0];
-        if let PacketType::Nack(nack) = &nack_packet.pack_type {
-            assert_eq!(nack.fragment_index, 1, "NACK should be for fragment 1");
-            // Verify routing header is reversed (destination becomes source)
-            assert_eq!(nack_packet.routing_header.hops[0], dst_node,
-                       "NACK should be routed back to destination");
-        } else {
-            panic!("Expected a NACK packet");
-        }
-    }
-*/
     #[test]
     fn test_handle_nack_dropped_fragment() {
         // Create channels for sending/receiving packets
