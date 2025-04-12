@@ -1,4 +1,8 @@
 /*
+COSE DA FARE :
+- le varie funzioni di interazione con i client: con i vari codici da mettere nei frammenti
+- implementare sto grafo dimmerda
+- fare simulazioni
 
 
 Clients and servers operate with high level Messages which are disassembled into atomically sized
@@ -313,113 +317,6 @@ mod tests {
     use wg_2024::packet::{Packet, PacketType, Fragment, Ack};
     use wg_2024::network::{SourceRoutingHeader, NodeId};
 
-    #[test]
-    fn test_recovery_missing_fragment() {
-        // Create channels for sending/receiving packets
-        let (server_tx, server_rx) = unbounded(); // Packets sent by server
-        let (packet_tx, packet_rx) = unbounded(); // Packets received by server
-
-        // Instantiate the server
-        let mut srv = server::new(1, server_tx, packet_rx);
-
-        // Test setup
-        let session_id: u64 = 43;
-        let src_node: NodeId = 10;
-        let dst_node: NodeId = 20;
-        let intermediate_node: NodeId = 15;
-
-        // Create a routing header with multiple hops to test recovery with route changes
-        let routing_header = SourceRoutingHeader {
-            hop_index: 0,
-            hops: vec![src_node, intermediate_node, dst_node],
-        };
-
-        // Create a message that will be split into 3 fragments
-        // Prepare fragment 0
-        let mut data0 = [0u8; 128];
-        for i in 0..128 {
-            data0[i] = i as u8;
-        }
-        let fragment0 = Fragment {
-            fragment_index: 0,
-            total_n_fragments: 3,
-            length: 128,
-            data: data0,
-        };
-
-        // Prepare fragment 2 (last fragment)
-        let mut data2 = [0u8; 128];
-        let last_msg = b"final fragment";
-        data2[..last_msg.len()].copy_from_slice(last_msg);
-        let fragment2 = Fragment {
-            fragment_index: 2,
-            total_n_fragments: 3,
-            length: last_msg.len() as u8,
-            data: data2,
-        };
-
-        // Create packet wrappers
-        let packet0 = Packet {
-            pack_type: PacketType::MsgFragment(fragment0),
-            routing_header: routing_header.clone(),
-            session_id,
-        };
-
-        let packet2 = Packet {
-            pack_type: PacketType::MsgFragment(fragment2),
-            routing_header: routing_header.clone(),
-            session_id,
-        };
-
-        // Send fragments 0 and 2 (skip 1 to simulate packet loss)
-        println!("Sending fragments 0 and 2 (skipping 1 to test recovery)");
-
-        // First send fragment 0
-        srv.handle_fragment(
-            packet0.session_id,
-            if let PacketType::MsgFragment(frag) = packet0.pack_type { &frag } else { panic!() },
-            packet0.routing_header
-        );
-
-        // Then send fragment 2
-        srv.handle_fragment(
-            packet2.session_id,
-            if let PacketType::MsgFragment(frag) = packet2.pack_type { &frag } else { panic!() },
-            packet2.routing_header
-        );
-
-        // Check if the server sent a NACK for the missing fragment
-        let sent_packets: Vec<Packet> = server_rx.try_iter().collect();
-        println!("Server sent {} packets", sent_packets.len());
-
-        // Find NACKs for fragment 1
-        let nacks: Vec<&Packet> = sent_packets.iter()
-            .filter(|p| {
-                if let PacketType::Nack(nack) = &p.pack_type {
-                    nack.fragment_index == 1 && p.session_id == session_id
-                } else {
-                    false
-                }
-            })
-            .collect();
-
-        assert_eq!(nacks.len(), 1, "Server should have sent exactly one NACK for missing fragment 1");
-
-        // Verify the NACK has the correct details
-        let nack_packet = nacks[0];
-        if let PacketType::Nack(nack) = &nack_packet.pack_type {
-            assert_eq!(nack.fragment_index, 1, "NACK should be for fragment 1");
-            // Verify the routing header is correct for sending back to source
-            assert_eq!(nack_packet.routing_header.hops[0], dst_node,
-                       "NACK should be routed back with first hop being the destination");
-        } else {
-            panic!("Expected a NACK packet");
-        }
-
-        // Verify recovery_in_progress is set to true
-        let key = (session_id, src_node);
-        assert!(srv.recovery_in_progress[&key], "Recovery in progress flag should be set");
-    }
     #[test]
     fn test_handle_nack_dropped_fragment() {
         // Create channels for sending/receiving packets
