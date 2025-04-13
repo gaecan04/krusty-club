@@ -3,7 +3,6 @@ use crate::TOML_parser::Drone;
 use crate::TOML_parser::Server;
 use crate::TOML_parser::Config;
 
-
 use crate::Drone as OrigDrone;
 use toml;
 use crossbeam_channel::{unbounded, select_biased, select, Receiver, Sender};
@@ -18,32 +17,20 @@ use std::fs;
 use std::thread;
 use crossbeam::channel;
 
+//for testing
+use Krusty_Club::Krusty_C;
 // Assuming these are defined elsewhere or imported
 use wg_2024::network::NodeId;
+
+
 #[cfg(feature = "serialize")]
-
-// These struct definitions were provided in your paste
-
 
 // Type aliases for clarity
 pub type DroneImpl = Box<dyn DroneImplementation>;
-type NodeChannels = HashMap<NodeId, channel::Sender<Message>>;
-
-// Message type for inter-node communication
-#[derive(Debug, Clone)]
-pub(crate) enum Message {
-    // Define your message types here
-    Data(Vec<u8>),
-    Control(ControlMessage),
-}
-
-#[derive(Debug, Clone)]
-enum ControlMessage {
-    // Define control messages here
-    Start,
-    Stop,
-    Status,
-}
+// This should be defined somewhere in your code
+type GroupImplFactory = Box<dyn Fn(NodeId, Sender<DroneEvent>, Receiver<DroneCommand>,
+    Receiver<Packet>, HashMap<NodeId, Sender<Packet>>, f32)
+    -> Box<dyn DroneImplementation> + Send + 'static>;
 
 #[derive(Deserialize, Debug)]
 pub struct ParsedConfig {
@@ -61,7 +48,7 @@ pub struct DroneConfig {
 
 #[derive(Debug)]
 pub struct MyDrone {
-    id: NodeId,
+    pub id: NodeId,
     controller_send: Sender<DroneEvent>,
     controller_recv: Receiver<DroneCommand>,
     packet_recv: Receiver<Packet>,
@@ -70,14 +57,26 @@ pub struct MyDrone {
 }
 
 impl DroneImplementation for MyDrone {
-    fn process_message(&mut self, msg: Message) -> Vec<Message> {
-        // Process the message (This is just a placeholder, modify as needed)
-        println!("Processing message for drone {}: {:?}", self.id, msg);
-        vec![msg] // Returning the message for now, adjust this to your needs
+    fn process_packet(&mut self, packet: Packet) -> Vec<Packet> {
+        // Process the packet (This is just a placeholder, modify as needed)
+        println!("Processing packet for drone {}: {:?}", self.id, packet);
+        vec![packet] // Returning the packet for now, adjust this to your needs
     }
 
     fn get_id(&self) -> NodeId {
         self.id
+    }
+}
+
+impl DroneImplementation for Krusty_C {
+    fn process_packet(&mut self, packet: Packet) -> Vec<Packet> {
+        // Real implementation here
+        println!("Krusty_C processing packet: {:?}", packet);
+        vec![packet]
+    }
+
+    fn get_id(&self) -> NodeId {
+        self.id // or wherever the ID is stored
     }
 }
 
@@ -101,24 +100,44 @@ impl wg_2024::drone::Drone for MyDrone {
     }
 
     fn run(&mut self) {
-        println!("Running drone {} with PDR {}", self.id, self.pdr);    }
+        println!("Running drone {} with PDR {}", self.id, self.pdr);
+
+        // Real implementation would handle packets and controller commands
+        loop {
+            select! {
+                recv(self.packet_recv) -> packet => {
+                    if let Ok(packet) = packet {
+                        println!("Drone {} received packet", self.id);
+                        // Process packet logic here
+                    }
+                }
+                recv(self.controller_recv) -> command => {
+                    if let Ok(command) = command {
+                        println!("Drone {} received command", self.id);
+                        // Process command logic here
+                    }
+                }
+            }
+        }
+    }
 }
 
 // Trait for drone implementations
-pub(crate) trait DroneImplementation: Send + 'static {
-    fn process_message(&mut self, msg: Message) -> Vec<Message>;
+pub trait DroneImplementation: Send + 'static {
+    fn process_packet(&mut self, packet: Packet) -> Vec<Packet>;
     fn get_id(&self) -> NodeId;
 }
 
-pub(crate) struct NetworkInitializer {
+pub struct NetworkInitializer {
     config: Config,
-    drone_impls: Vec<MyDrone>,
-    channels: NodeChannels,
-    controller_tx: Sender<Message>,
+    drone_impls: Vec<Box<dyn DroneImplementation>>,
+    channels: HashMap<NodeId, Sender<Packet>>,
+    controller_tx: Sender<DroneEvent>,
+    controller_rx: Receiver<DroneCommand>,
 }
 
 impl NetworkInitializer {
-    pub fn new(config_path: &str, drone_impls: Vec<MyDrone>) -> Result<Self, Box<dyn Error>> {
+    pub fn new(config_path: &str, drone_impls: Vec<Box<dyn DroneImplementation>>) -> Result<Self, Box<dyn Error>> {
         // Read config file
         let config_str = fs::read_to_string(config_path)?;
 
@@ -129,20 +148,22 @@ impl NetworkInitializer {
         #[cfg(not(feature = "serialize"))]
         let config = panic!("The 'serialize' feature must be enabled to parse TOML");
 
-        // Create controller channel (unbounded)
+        // Create controller channels
         let (controller_tx, _) = channel::unbounded();
+        let (_, controller_rx) = channel::unbounded();
 
         Ok(NetworkInitializer {
             config,
             drone_impls,
             channels: HashMap::new(),
             controller_tx,
+            controller_rx,
         })
     }
 
     pub fn initialize(&mut self) -> Result<(), Box<dyn Error>> {
         // Validate the network configuration
-       // self.validate_config()?;
+        self.validate_config()?;
 
         // Create channels for all nodes
         self.setup_channels();
@@ -266,14 +287,13 @@ impl NetworkInitializer {
             }
         }
 
-
         // Add server connections
         for server in &self.config.server {
             let entry = node_connections.entry(server.id).or_insert_with(HashSet::new);
             for &drone_id in &server.connected_drone_ids {
                 entry.insert(drone_id);
             }
-            //2 loops to avoid the mut/ immutable borrow simultan
+            //2 loops to avoid the mut/immutable borrow simultaneous
             for &drone_id in &server.connected_drone_ids {
                 // Check bidirectional connection
                 if let Some(drone_connections) = node_connections.get(&drone_id) {
@@ -290,20 +310,31 @@ impl NetworkInitializer {
     }
 
     fn check_connected_graph(&self) -> Result<(), Box<dyn Error>> {
-        // Build adjacency list
+        // Build undirected adjacency list
         let mut adj_list: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
 
-        // Add all nodes
+        // Add drone connections
         for drone in &self.config.drone {
-            adj_list.insert(drone.id, drone.connected_node_ids.clone());
+            adj_list.entry(drone.id).or_default().extend(&drone.connected_node_ids);
+            for &neighbor in &drone.connected_node_ids {
+                adj_list.entry(neighbor).or_default().push(drone.id);
+            }
         }
 
+        // Add client connections
         for client in &self.config.client {
-            adj_list.insert(client.id, client.connected_drone_ids.clone());
+            adj_list.entry(client.id).or_default().extend(&client.connected_drone_ids);
+            for &neighbor in &client.connected_drone_ids {
+                adj_list.entry(neighbor).or_default().push(client.id);
+            }
         }
 
+        // Add server connections
         for server in &self.config.server {
-            adj_list.insert(server.id, server.connected_drone_ids.clone());
+            adj_list.entry(server.id).or_default().extend(&server.connected_drone_ids);
+            for &neighbor in &server.connected_drone_ids {
+                adj_list.entry(neighbor).or_default().push(server.id);
+            }
         }
 
         // BFS to check connectivity
@@ -327,7 +358,6 @@ impl NetworkInitializer {
             }
         }
 
-        // Check if all nodes were visited
         if visited.len() != adj_list.len() {
             return Err("Graph is not connected".into());
         }
@@ -404,13 +434,12 @@ impl NetworkInitializer {
     fn initialize_drones(&mut self) {
         let num_drones = self.config.drone.len();
         let num_impls = self.drone_impls.len();
-        println!("num drones {}",num_drones);
-        println!("num impls {:?}",num_impls);
-
+        println!("num drones {}", num_drones);
+        println!("num impls {}", num_impls);
 
         // Distribute implementations evenly
         let mut impl_counts = vec![0; num_impls];
-        let min_count = num_drones / num_impls; //non ho ancora caricato i droni
+        let min_count = num_drones / num_impls;
         let remainder = num_drones % num_impls;
 
         // Each implementation should be used at least min_count times
@@ -431,27 +460,43 @@ impl NetworkInitializer {
                 count = 0;
             }
 
-            // Clone the channels that this drone needs
-            let mut channels_for_drone = HashMap::new();
+            // Clone the packet channels that this drone needs
+            let mut packet_send_channels = HashMap::new();
             for &connected_id in &drone.connected_node_ids {
                 if let Some(tx) = self.channels.get(&connected_id) {
-                    channels_for_drone.insert(connected_id, tx.clone());
+                    packet_send_channels.insert(connected_id, tx.clone());
                 }
             }
 
-            // Add controller channel
+            // Create packet receive channel for this drone
+            let (packet_tx, packet_rx) = channel::unbounded();
+
+            // Store the tx end in our channels map
+            self.channels.insert(drone.id, packet_tx);
+
+            // Add controller channels
             let controller_tx = self.controller_tx.clone();
+            let controller_rx = self.controller_rx.clone();
 
             // Get a drone implementation
             let drone_impl = &self.drone_impls[impl_index];
             let drone_id = drone.id;
             let drone_pdr = drone.pdr;
 
+            // Create a new drone implementation
+            let mut drone_instance = MyDrone::new(
+                drone_id,
+                controller_tx,
+                controller_rx,
+                packet_rx,
+                packet_send_channels,
+                drone_pdr
+            );
+
             // Spawn drone thread
             thread::spawn(move || {
-                // Drone logic here
-                // You would use drone_impl, channels_for_drone, controller_tx, etc.
-                println!("Drone {} started with PDR {}", drone_id, drone_pdr);
+                // Start the drone's main loop
+                drone_instance.run();
             });
 
             count += 1;
@@ -461,21 +506,30 @@ impl NetworkInitializer {
     fn initialize_clients(&self) {
         for client in &self.config.client {
             // Clone the channels this client needs
-            let mut channels_for_client = HashMap::new();
+            let mut packet_send_channels = HashMap::new();
             for &drone_id in &client.connected_drone_ids {
                 if let Some(tx) = self.channels.get(&drone_id) {
-                    channels_for_client.insert(drone_id, tx.clone());
+                    packet_send_channels.insert(drone_id, tx.clone());
                 }
             }
 
-            // Add controller channel
-            let controller_tx = self.controller_tx.clone();
+            // Create packet receive channel for this client
+            //let (_, packet_rx) = channel::unbounded::<T>();
+
             let client_id = client.id;
+
+            //depending on the client struct I will add the recv_channel and channel with SC
 
             // Spawn client thread
             thread::spawn(move || {
-                // Client logic here
                 println!("Client {} started", client_id);
+
+                // Client would use packet_send_channels to send packets to connected drones
+                // And packet_rx to receive packets from those drones
+                loop {
+                    // Client logic here
+                    thread::sleep(std::time::Duration::from_secs(1));
+                }
             });
         }
     }
@@ -483,42 +537,271 @@ impl NetworkInitializer {
     fn initialize_servers(&self) {
         for server in &self.config.server {
             // Clone the channels this server needs
-            let mut channels_for_server = HashMap::new();
+            let mut packet_send_channels = HashMap::new();
             for &drone_id in &server.connected_drone_ids {
                 if let Some(tx) = self.channels.get(&drone_id) {
-                    channels_for_server.insert(drone_id, tx.clone());
+                    packet_send_channels.insert(drone_id, tx.clone());
                 }
             }
 
-            // Add controller channel
-            let controller_tx = self.controller_tx.clone();
+            // Create packet receive channel for this server
+            //let (_, packet_rx) = channel::unbounded();
+
             let server_id = server.id;
 
             // Spawn server thread
             thread::spawn(move || {
-                // Server logic here
                 println!("Server {} started", server_id);
+
+                // Server would use packet_send_channels to send packets to connected drones
+                // And packet_rx to receive packets from those drones
+                loop {
+                    // Server logic here
+                    thread::sleep(std::time::Duration::from_secs(1));
+                }
             });
         }
     }
 
     fn spawn_controller(&self) {
-        // Clone necessary data for the controller
+        // Get all node IDs for the controller to manage
         let nodes = self.channels.keys().cloned().collect::<Vec<_>>();
+
+        // Create controller send/receive channels for commands and events
         let controller_tx = self.controller_tx.clone();
+        let controller_rx = self.controller_rx.clone();
 
         thread::spawn(move || {
-            // Controller logic here
             println!("Controller started, managing {} nodes", nodes.len());
+
+            // Controller main loop
+            loop {
+                // Process incoming drone events
+                select! {
+                    recv(controller_rx) -> event => {
+                        if let Ok(event) = event {
+                            println!("Controller received event: {:?}", event);
+                            // Process the event
+                        }
+                    }
+                    default => {
+                        // No events received, can do periodic controller tasks here
+                        thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                }
+            }
         });
     }
-}
 
+    pub fn create_drone_implementations(
+        config: &ParsedConfig,
+        controller_send: Sender<DroneEvent>,
+        controller_recv: Receiver<DroneCommand>,
+        packet_recv: Receiver<Packet>,
+        packet_send: HashMap<NodeId, Sender<Packet>>,
+    ) -> Vec<Box<dyn DroneImplementation>> {
+        let mut implementations: Vec<Box<dyn DroneImplementation>> = Vec::new();
+
+        // Load group implementations
+        let group_implementations = Self::load_group_implementations();
+        let num_impls = group_implementations.len();
+
+        if num_impls == 0 {
+            println!("Warning: No group implementations found. Using default implementation.");
+            // Use default implementation for all drones
+            for drone_config in config.drone.iter() {
+                let id = drone_config.id;
+                let pdr = drone_config.pdr;
+
+                let drone_impl = Box::new(MyDrone::new(
+                    id,
+                    controller_send.clone(),
+                    controller_recv.clone(),
+                    packet_recv.clone(),
+                    packet_send.clone(),
+                    pdr,
+                )) as Box<dyn DroneImplementation>;
+
+                implementations.push(drone_impl);
+            }
+
+            return implementations;
+        }
+
+        // Calculate distribution of implementations
+        let num_drones = config.drone.len();
+        let mut impl_counts = vec![0; num_impls];
+        let min_count = num_drones / num_impls;
+        let remainder = num_drones % num_impls;
+
+        for i in 0..num_impls {
+            impl_counts[i] = min_count;
+            if i < remainder {
+                impl_counts[i] += 1;
+            }
+        }
+
+        // Get the ordered list of implementations
+        let group_keys: Vec<String> = group_implementations.keys().cloned().collect();
+
+        // Distribute implementations to drones
+        let mut impl_index = 0;
+        let mut count = 0;
+
+        for drone_config in &config.drone {
+            if count >= impl_counts[impl_index] {
+                impl_index = (impl_index + 1) % num_impls;
+                count = 0;
+            }
+
+            let id = drone_config.id;
+            let pdr = drone_config.pdr;
+
+            // Get the implementation creator function
+            let impl_key = &group_keys[impl_index];
+            if let Some(create_impl) = group_implementations.get(impl_key) {
+                // Create the group's implementation
+                let drone_impl = create_impl(
+                    id,
+                    controller_send.clone(),
+                    controller_recv.clone(),
+                    packet_recv.clone(),
+                    packet_send.clone(),
+                    pdr,
+                );
+
+                implementations.push(drone_impl);
+            } else {
+                println!("ATTENTION :default drone impl");
+                // Fallback to default implementation
+                let drone_impl = Box::new(MyDrone::new(
+                    id,
+                    controller_send.clone(),
+                    controller_recv.clone(),
+                    packet_recv.clone(),
+                    packet_send.clone(),
+                    pdr,
+                )) as Box<dyn DroneImplementation>;
+
+                implementations.push(drone_impl);
+            }
+
+            count += 1;
+        }
+
+        implementations
+    }
+
+    // Method to load group implementations
+    fn load_group_implementations() -> HashMap<String, GroupImplFactory> {
+        let mut group_implementations = HashMap::new();
+
+        // Group A implementation using Krusty_Club
+        group_implementations.insert(
+            "group_a1".to_string(),
+            Box::new(|id: NodeId, sim_contr_send: Sender<DroneEvent>, sim_contr_recv: Receiver<DroneCommand>,
+                      packet_recv: Receiver<Packet>, packet_send: HashMap<NodeId, Sender<Packet>>, pdr: f32|
+                      -> Box<dyn DroneImplementation> {
+                Box::new(Krusty_Club::Krusty_C::new(
+                    id,
+                    sim_contr_send,
+                    sim_contr_recv,
+                    packet_recv,
+                    packet_send,
+                    pdr
+                ))
+            }) as GroupImplFactory
+        );
+
+        // Same pattern for other implementations
+        group_implementations.insert(
+            "group_a2".to_string(),
+            Box::new(|id, sim_contr_send, sim_contr_recv, packet_recv, packet_send, pdr|
+                      -> Box<dyn DroneImplementation> {
+                Box::new(Krusty_Club::Krusty_C::new(
+                    id,
+                    sim_contr_send,
+                    sim_contr_recv,
+                    packet_recv,
+                    packet_send,
+                    pdr
+                ))
+            }) as GroupImplFactory
+        );
+
+        group_implementations.insert(
+            "group_a3".to_string(),
+            Box::new(|id, sim_contr_send, sim_contr_recv, packet_recv, packet_send, pdr|
+                      -> Box<dyn DroneImplementation> {
+                Box::new(Krusty_Club::Krusty_C::new(
+                    id,
+                    sim_contr_send,
+                    sim_contr_recv,
+                    packet_recv,
+                    packet_send,
+                    pdr
+                ))
+            }) as GroupImplFactory
+        );
+
+        group_implementations.insert(
+            "group_b".to_string(),
+            Box::new(|id, sim_contr_send, sim_contr_recv, packet_recv, packet_send, pdr|
+                      -> Box<dyn DroneImplementation> {
+                Box::new(Krusty_Club::Krusty_C::new(
+                    id,
+                    sim_contr_send,
+                    sim_contr_recv,
+                    packet_recv,
+                    packet_send,
+                    pdr
+                ))
+            }) as GroupImplFactory
+        );
+
+        group_implementations
+    }
+
+    fn configure_drone_connections(&mut self) -> Result<(), Box<dyn Error>> {
+        // Set up connections between drones
+        for drone_config in &self.config.drone {
+            let drone_id = drone_config.id;
+
+            // Find the drone implementation
+            if let Some(drone_impl) = self.drone_impls.iter_mut().find(|d| d.get_id() == drone_id) {
+                // Configure connections to other drones
+                for &connected_id in &drone_config.connected_node_ids {
+                    println!("Drone {} connected to node {}", drone_id, connected_id);
+                }
+            }
+        }
+
+        // Set up connections to clients
+        for client in &self.config.client {
+            for &drone_id in &client.connected_drone_ids {
+                if let Some(drone_impl) = self.drone_impls.iter_mut().find(|d| d.get_id() == drone_id) {
+                    println!("Client {} connected to drone {}", client.id, drone_id);
+                }
+            }
+        }
+
+        // Set up connections to servers
+        for server in &self.config.server {
+            for &drone_id in &server.connected_drone_ids {
+                if let Some(drone_impl) = self.drone_impls.iter_mut().find(|d| d.get_id() == drone_id) {
+                    println!("Server {} connected to drone {}", server.id, drone_id);
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
 
 // Usage example
 fn main() -> Result<(), Box<dyn Error>> {
     // Sample drone implementations
-    let drone_impls: Vec<MyDrone> = vec![
+    let drone_impls: Vec<Box<dyn DroneImplementation>> = vec![
         // Your actual drone implementations would go here
     ];
 
@@ -532,6 +815,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         thread::sleep(std::time::Duration::from_secs(1));
     }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -668,3 +952,5 @@ mod tests {
         // You can further check the logs or counters if needed
     }
 }
+
+

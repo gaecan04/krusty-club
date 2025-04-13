@@ -26,8 +26,8 @@ pub struct Server {
     pub connected_drone_ids: Vec<NodeId>,
 }
 
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serialize", derive(Deserialize))]
+#[derive(Debug, Clone,Serialize,Deserialize)]
+//#[cfg_attr(feature = "serialize", derive(Deserialize))]
 pub struct Config {
     pub drone: Vec<Drone>,
     pub client: Vec<Client>,

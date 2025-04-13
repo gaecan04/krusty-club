@@ -13,6 +13,7 @@ use wg_2024::packet::Packet;
 use simulation_controller::app::NetworkApp;
 use crate::network::TOML_parser;
 use crate::network::initializer::{DroneImplementation, MyDrone, NetworkInitializer, ParsedConfig};
+use utils::serialization_fix;
 
 //pub type DroneImplementation = dyn wg_2024::drone::Drone;
 
@@ -21,8 +22,6 @@ use crate::network::initializer::{DroneImplementation, MyDrone, NetworkInitializ
 /*pub trait DroneImplementation: Drone {
     // Additional methods specific to your implementation
 }*/
-
-
 
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -40,7 +39,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (controller_send, controller_recv, packet_recv, packet_send_map, config) =
         initialize_network_channels(&config_path)?;
 
-    let drone_impls = create_drone_implementations(
+    // Create drone implementations using the NetworkInitializer
+    let drone_impls = NetworkInitializer::create_drone_implementations(
         &config,
         controller_send.clone(),
         controller_recv,
@@ -48,6 +48,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         packet_send_map,
     );
 
+    // Initialize the network
     let mut initializer = NetworkInitializer::new(&config_path, drone_impls)?;
     initializer.initialize()?;
     println!("Network initialized successfully");
@@ -89,59 +90,6 @@ fn run_gui_application(
     Ok(())
 }
 
-pub fn create_drone_implementations(
-    config: &ParsedConfig, // The parsed configuration
-    controller_send: Sender<DroneEvent>,
-    controller_recv: Receiver<DroneCommand>,
-    packet_recv: Receiver<Packet>,
-    packet_send: HashMap<NodeId, Sender<Packet>>,
-) ->  Vec<MyDrone> {
-    let mut implementations:  Vec<MyDrone> = Vec::new();
-
-    // Iterate over the drones in the config (this assumes `config` holds the necessary drone details)
-    for (i, drone_config) in config.drone.iter().enumerate() {
-        // For each drone, create the necessary channels, ID, and PDR
-        let id = NodeId::from(i as u8); // Assuming IDs are sequential from 0 to 9
-        let pdr = drone_config.pdr; // Assuming PDR is part of the config for each drone
-
-        // Now, create the drone instance dynamically
-        // For each drone in the configuration, create the corresponding drone instance
-
-        // Example: Create a default drone implementation (you could also use different implementations per team)
-        // Assuming `Drone` is a concrete struct implementing the `DroneImplementation` trait
-        let drone_impl = MyDrone::new(
-            id,
-            controller_send.clone(),
-            controller_recv.clone(),
-            packet_recv.clone(),
-            packet_send.clone(),
-            pdr,
-        );
-
-
-        // Push the drone into the list of implementations
-        implementations.push(*Box::new(drone_impl));
-    }
-
-    // If no drone implementations were found, use a default implementation
-    if implementations.is_empty() {
-        println!("Warning: No drone implementations found. Using default implementation.");
-        let default_drone = MyDrone::new(
-            NodeId::from(0), // Example ID for default drone
-            controller_send,
-            controller_recv,
-            packet_recv,
-            packet_send,
-            1.0, // Example PDR for default drone
-        );
-        implementations.push(*Box::new(default_drone));
-    }
-
-    implementations
-}
-
-
-
 fn initialize_network_channels(
     config_path: &str,
 ) -> Result<
@@ -175,6 +123,7 @@ fn initialize_network_channels(
         config,
     ))
 }
+
 
 
 

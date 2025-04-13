@@ -9,7 +9,7 @@ toml = { version = "0.8.19"}
 serde = { version = "1.0.215", features = ["derive"] }
 serde_derive = "1.0"
 crossbeam-channel = "0.5.13"
-rand = "0.9.0-beta.0"
+rand = "0.9"
 log = "0.4.22"
 env_logger = "0.11.6"
 config = "0.15.6"
@@ -18,8 +18,22 @@ egui = "0.31.1"
 crossbeam = "0.8.4"
 
 #eg of drones import
-#group_a = { git = "https://github.com/groupA/drone" }
-#group_b = { git = "https://github.com/groupB/drone" }
+Krusty_Club = { git = "https://github.com/Ossyk/Krusty_Club.git " }
+LeDron_James = { git = "https://github.com/anass03/LeDron_James.git", features = ["log"] }
+
+#ap2024_unitn_cppenjoyers_drone = { git = "https://github.com/Cpp-enjoyers/drone.git" }
+#common = { git = "https://github.com/Cpp-enjoyers/common.git" }
+
+skylink = {git = "https://github.com/Suge42/Skylink_drone.git"}
+dr_ones = { git = "https://github.com/Dr-Ones/drone" }
+rustastic-drone = {git = "https://github.com/Rustastic/RustasticDrone"}
+bagel_bomber = {git = "https://github.com/daw-dev/bagel-bomber"}
+fungi_drone = { git = "https://github.com/Fungi-B-D/Fungi-Drone.git" }
+wg_2024-rust = {git = "https://github.com/LuigiMiazzo17/unitn-advancedProgramming-WGL_2024-drone"}
+rolling_drone = { git = "https://github.com/giorebecchi/RollingDrone.git"}
+rustafarian-drone = {git = "https://github.com/Rustafarian-Unitn/rustafarian-drone"}
+bincode = "2.0.1"
+
 
 [features]
 serialize = []
