@@ -1,5 +1,8 @@
 use eframe::egui;
 use egui::{Color32, Painter, Pos2, Response};
+use crossbeam_channel::Sender;
+use wg_2024::controller::{DroneEvent, DroneCommand};
+use wg_2024::network::NodeId;
 
 #[derive(Clone, Copy)]
 pub enum NodeType {
@@ -64,11 +67,12 @@ impl Topology {
     }
 }
 
-pub(crate) struct NetworkRenderer{
+pub(crate) struct NetworkRenderer {
     nodes: Vec<Node>,
     edges: Vec<(usize, usize)>,
     selected_node: Option<usize>,
     pub scale: f32,
+    controller_sender: Option<Sender<DroneEvent>>,
 }
 
 impl NetworkRenderer {
@@ -78,6 +82,7 @@ impl NetworkRenderer {
             edges: Vec::new(),
             selected_node: None,
             scale: 1.0,
+            controller_sender: None,
         };
 
         match Topology::from_str(topology) {
@@ -90,7 +95,25 @@ impl NetworkRenderer {
         network
     }
 
-    fn setup_star(&mut self, x_offset: f32, y_offset: f32) {
+    // Set controller sender
+    pub fn set_controller_sender(&mut self, sender: Sender<DroneEvent>) {
+        self.controller_sender = Some(sender);
+    }
+
+    // Update method implementation
+    pub fn update(&mut self) {
+        // Update the network visualization state
+        // For now, this is just a placeholder since the actual state is managed elsewhere
+    }
+
+    // Update network method implementation
+    pub fn update_network(&mut self) {
+        // This might contain specific network update logic
+        // For now, we'll just call update()
+        self.update();
+    }
+
+    fn setup_star(&mut self, _x_offset: f32, _y_offset: f32) {
         const WINDOW_WIDTH: f32 = 600.0;
         const WINDOW_HEIGHT: f32 = 400.0;
 
@@ -141,7 +164,7 @@ impl NetworkRenderer {
         self.edges.push((client_2_id, 7));
     }
 
-    fn setup_double_line(&mut self, x_offset: f32, y_offset: f32) {
+    fn setup_double_line(&mut self, _x_offset: f32, _y_offset: f32) {
         const WINDOW_WIDTH: f32 = 600.0;
         const WINDOW_HEIGHT: f32 = 400.0;
 
@@ -204,7 +227,7 @@ impl NetworkRenderer {
         self.edges.push((client_2_id, 0));  // Connect to top line
     }
 
-    fn setup_butterfly(&mut self, x_offset: f32, y_offset: f32) {
+    fn setup_butterfly(&mut self, _x_offset: f32, _y_offset: f32) {
         const WINDOW_WIDTH: f32 = 600.0;
         const WINDOW_HEIGHT: f32 = 400.0;
 
@@ -307,40 +330,100 @@ impl NetworkRenderer {
             if response.clicked() {
                 self.selected_node = Some(node.id);
             }
-
-
         }
     }
 
     pub fn render_node_details(&mut self, ctx: &egui::Context) {
         // Display selected node info in a window
         if let Some(id) = self.selected_node {
+            let mut should_close = false;
+            let mut should_crash = false;
+            let mut should_update_pdr = false;
+            let mut should_add_sender = false;
+
+            // Collect node information before manipulating self
+            let node_type = self.nodes[id].node_type;
+            let mut node_pdr = self.nodes[id].pdr;
+
             egui::Window::new("Node Information")
                 .collapsible(false)
                 .open(&mut self.selected_node.is_some())
                 .show(ctx, |ui| {
-                    let node = &mut self.nodes[id];
-                    ui.label(format!("Node {}", node.id));
-                    ui.label(match node.node_type {
+                    ui.label(format!("Node {}", id));
+                    ui.label(match node_type {
                         NodeType::Server => "Type: Server".to_string(),
                         NodeType::Client => "Type: Client".to_string(),
                         NodeType::Drone => "Type: Drone".to_string(),
                     });
 
-                    // If the node is a Drone, allow PDR modification and crash option
-                    if let NodeType::Drone = node.node_type {
-                        ui.add(egui::Slider::new(&mut node.pdr, 0.0..=1.0).text("PDR"));
-                        if ui.button("Crash Node").clicked() {
-                            node.active = false;
-                            self.remove_edges_of_crashed_node(id);
-                        }
+                    // If the node is a Drone, allow PDR modification, crash option, and send option
+                    if let NodeType::Drone = node_type {
+                        ui.add(egui::Slider::new(&mut node_pdr, 0.0..=1.0).text("PDR"));
+
+                        ui.horizontal(|ui| {
+                            if ui.button("Crash Node").clicked() {
+                                should_crash = true;
+                            }
+
+                            if ui.button("Set PDR").clicked() {
+                                should_update_pdr = true;
+                            }
+
+                            // Add send button
+                            if ui.button("Add Sender").clicked() {
+                                should_add_sender = true;
+                            }
+                        });
                     }
 
                     // Close button
                     if ui.button("Close").clicked() {
-                        self.selected_node = None;
+                        should_close = true;
                     }
                 });
+
+            // Now handle the actions outside the closure with single mutable borrow
+            if should_crash {
+                self.nodes[id].active = false;
+                self.remove_edges_of_crashed_node(id);
+
+                // Send crash event through controller_sender if available
+                /*if let Some(sender) = &self.controller_sender {
+                    if let Err(e) = sender.send(DroneEvent::Crashed(id as NodeId)) {
+                        println!("Failed to send crash event: {}", e);
+                    }
+                }*/
+
+                // Update the network
+                self.update_network();
+            }
+
+            if should_update_pdr {
+                self.nodes[id].pdr = node_pdr;
+                // Send PDR update event through controller_sender if available
+                /*if let Some(sender) = &self.controller_sender {
+                    if let Err(e) = sender.send(DroneEvent::PacketDropRateChanged(id as NodeId, node_pdr)) {
+                        println!("Failed to send PDR change event: {}", e);
+                    }
+                }*/
+
+                // Update the network
+                self.update_network();
+            }
+
+            if should_add_sender {
+                if let Some(sender) = &self.controller_sender {
+                    // Simple event for sending a packet from this drone
+                    // You might want to show a dialog to select destination, etc.
+                    // if let Err(e) = sender.send(DroneEvent::PacketSent(id as NodeId)) {println!("Failed to send packet event: {}", e);}
+
+                    self.update_network();
+                }
+            }
+
+            if should_close {
+                self.selected_node = None;
+            }
         }
     }
 }

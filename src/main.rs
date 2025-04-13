@@ -5,6 +5,7 @@ mod simulation_controller;
 
 use std::collections::HashMap;
 use std::error::Error;
+use std::sync::{Arc, Mutex};
 use crossbeam_channel::{Receiver, Sender};
 use wg_2024::controller::{DroneCommand, DroneEvent};
 use wg_2024::drone::Drone;
@@ -43,7 +44,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let drone_impls = NetworkInitializer::create_drone_implementations(
         &config,
         controller_send.clone(),
-        controller_recv,
+        controller_recv.clone(),
         packet_recv,
         packet_send_map,
     );
@@ -53,13 +54,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     initializer.initialize()?;
     println!("Network initialized successfully");
 
+
     // Decide mode
     if std::env::args().any(|arg| arg == "--headless") {
         println!("Running in headless mode");
         run_headless_simulation(simulation_duration);
     } else {
         println!("Starting GUI application");
-        run_gui_application(controller_send, config)?;
+        run_gui_application(controller_send,controller_recv, Arc::new(Mutex::new(config)))?;
     }
 
     Ok(())
@@ -73,23 +75,22 @@ fn run_headless_simulation(duration: u64) {
 
 fn run_gui_application(
     controller_send: Sender<DroneEvent>,
-    config: ParsedConfig,
+    _controller_recv: Receiver<DroneCommand>, // You can remove this if unused in GUI
+    config: Arc<Mutex<ParsedConfig>>,
 ) -> Result<(), Box<dyn Error>> {
     let options = eframe::NativeOptions::default();
 
     eframe::run_native(
-        "Network Topology Simulator",
+        "Drone Simulation",
         options,
-        Box::new(|cc| {
-            // Pass controller_send and config to your GUI app
-            let app = NetworkApp::new_with_network(cc, controller_send, config);
-            Ok(Box::new(app))
-        }),
+        Box::new(|cc| Ok(Box::new(NetworkApp::new_with_network(cc, controller_send, config)))),
     )?;
 
     Ok(())
 }
 
+
+//la funz seguente serve solo per displayare il network
 fn initialize_network_channels(
     config_path: &str,
 ) -> Result<
