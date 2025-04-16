@@ -4,48 +4,11 @@ COSE DA FARE :
 - implementare sto grafo dimmerda
 - fare simulazioni
 
-
-Clients and servers operate with high level Messages which are disassembled into atomically sized
-packets that are routed through the drone network. The Client-Server Protocol standardizes and regulates
-the format of these messages and their exchange.
-
-The previously mentioned packets can be: Fragment, Ack, Nack, FloodRequest, FloodResponse.
-
-As described in the main document,
-Messages must be serialized and can be possibly fragmented,
-and the Fragments can be possibly dropped by drones.
-
-Serialization
-As described in the main document, Message fragment cannot contain dynamically-sized data structures
-(that is, no Vec, no String, no HashMap etc.). Therefore, packets will contain large, fixed-size arrays instead.
-
- pub struct Fragment {
-	fragment_index: u64,
-	total_n_fragments: u64,
-	length: u8,
-	// assembler will fragment/de-fragment data into bytes.
-	data: [u8; 128] // usable for image with .into_bytes()
-}
-
-To reassemble fragments into a single packet, a client or server uses the fragment header as follows:
-
-    1- The client or server receives a fragment.
-    2- It first checks the (session_id, src_id) tuple in the header.
-    3- If it has not received a fragment with the same (session_id, src_id) tuple, then it creates a vector (Vec<u8>
-    with capacity of total_n_fragments * 128) where to copy the data of the fragments.
-    4- It would then copy length elements of the data array at the correct offset in the vector.
-    Note: if there are more than one fragment, length must be 128 for all fragments except for the last.
-    The length of the last one is specified by the length component inside the fragment,
-
-If the client or server has already received a fragment with the same session_id, then it just needs to
-copy the data of the fragment in the vector.
-
-Once that the client or server has received all fragments (that is, fragment_index 0 to total_n_fragments - 1),
- then it has reassembled the whole message and sends back an Ack.
 */
 
 use std::collections::HashMap;
 use crossbeam_channel::{Receiver, RecvError, Sender};
+use eframe::egui::accesskit::Node;
 use wg_2024::packet::{Ack, FloodRequest, FloodResponse, Fragment, Nack, NackType, NodeType, Packet, PacketType};
 use wg_2024::network::{NodeId, SourceRoutingHeader};
 use log::{info, error, warn, debug};
@@ -58,12 +21,13 @@ pub struct server {
     pub fragment_lengths: HashMap<(u64, NodeId), u8>, // Maps (session_id, src_id) to length of the last fragment
     pub packet_sender: HashMap<NodeId, Sender<Packet>>, // Hashmap containing each sender channel to the neighbors (channels to send packets to clients)
     pub packet_receiver: Receiver<Packet>, // Channel to receive packets from clients/drones
+    pub registered_clients: HashMap<NodeId,Vec<NodeId>>,
     //recovery_in_progress:  HashMap<(u64, NodeId), bool>, // Tracks if recovery is already in progress for a session
     //drop_counts: HashMap<(u64, NodeId), usize>, // Track number of drops per session
 }
 
 impl server {
-    pub(crate) fn new(id: u8, packet_sender: Sender<Packet>, packet_receiver: Receiver<Packet>) -> Self {
+    pub(crate) fn new(id: u8, packet_sender: HashMap<NodeId,Sender<Packet>>, packet_receiver: Receiver<Packet>) -> Self {
         // Log server creation
         info!("Server {} created.", id);
 
@@ -71,8 +35,9 @@ impl server {
             id,
             received_fragments: HashMap::new(),
             fragment_lengths: HashMap::new(),
-            packet_sender: HashMap::new(),
+            packet_sender: packet_sender,
             packet_receiver,
+            registered_clients: HashMap::new(),
             //recovery_in_progress: HashMap::new(),
             //drop_counts: HashMap::new(),
         }
@@ -168,6 +133,51 @@ impl server {
         }
         message.truncate(total_length);
         info!("Server reassembled message for session {:?}: {:?}", key, message);
+
+        //chat server implementation:
+        let message_string = String::from_utf8_lossy(&message).to_string();
+        let session_id:u8 = key.0 as u8;
+        let client_id = key.1;
+
+        let tokens: Vec<&str> = message_string.trim().splitn(3, ':').collect();
+
+        match tokens.as_slice() {
+            ["registration_to_chat"] => {
+                self.registered_clients
+                    .entry(session_id)
+                    .or_default()
+                    .push(client_id);
+                info!("Client {} registered to chat in session {}", client_id, session_id);
+            }
+            ["client_list?"] => {
+                if let Some(sender) = self.packet_sender.get(&client_id) {
+                    let clients = self
+                        .registered_clients
+                        .get(&session_id)
+                        .cloned()
+                        .unwrap_or_default();
+                    let response = format!("client_list!: {:?}", clients);
+                    self.send_chat_message(session_id as u64, client_id, response, routing_header);
+                }
+            }
+            ["message_for?", target_id_str, msg] => {
+                if let Ok(target_id) = target_id_str.parse::<NodeId>() {
+                    if (self.registered_clients
+                        .get(&session_id)
+                        .map_or(false, |list| list.contains(&target_id)))
+                    {
+                        let response = format!("message_from!:{}:{}", client_id, msg);
+                        self.send_chat_message(session_id as u64, target_id, response, routing_header);
+                    } else {
+                        let response = "error_wrong_client_id!".to_string();
+                        self.send_chat_message(session_id as u64, client_id, response, routing_header);
+                    }
+                }
+            }
+            _ => {
+                warn!("Unrecognized message: {}", message_string);
+            }
+        }
 
     }
     //fn process_nack(&mut self, nack: &Nack, packet: &mut Packet)
@@ -306,6 +316,42 @@ impl server {
         // TODO: Use this path for future communications with this client
         // You might want to store this path in a new field in your server struct
 
+    }
+
+    fn send_chat_message(&self, session_id:u64, target_id: NodeId, msg: String, original_header:SourceRoutingHeader) {
+        let data = msg.as_bytes();
+        let mut fragment_data = [0u8; 128];
+        let length = data.len().min(128);
+        fragment_data[..length].copy_from_slice(&data[..length]);
+
+        let fragment = Fragment {
+            fragment_index: 0,
+            total_n_fragments: 1,
+            length: length as u8,
+            data: fragment_data,
+        };
+
+        // Reverse route from original to find target
+        let mut hops = original_header.hops.clone();
+        hops.reverse();
+        hops.push(target_id); // may need more logic here later
+
+        let packet = Packet {
+            session_id,
+            routing_header: SourceRoutingHeader {
+                hop_index: 0,
+                hops,
+            },
+            pack_type: PacketType::MsgFragment(fragment),
+        };
+
+        if let Some(sender) = self.packet_sender.get(&target_id) {
+            if let Err(e) = sender.send(packet) {
+                error!("Failed to send chat response to {}: {:?}", target_id, e);
+            }
+        } else {
+            error!("No sender available for node {}", target_id);
+        }
     }
 
 }
