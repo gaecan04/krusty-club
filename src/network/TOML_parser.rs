@@ -24,6 +24,7 @@ pub struct Client {
 pub struct Server {
     pub id: NodeId,
     pub connected_drone_ids: Vec<NodeId>,
+
 }
 
 #[derive(Debug, Clone,Serialize,Deserialize)]

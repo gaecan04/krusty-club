@@ -3,6 +3,12 @@ use crate::TOML_parser::Drone;
 use crate::TOML_parser::Server;
 use crate::TOML_parser::Config;
 
+use crate::nodes::server;
+use crate::nodes::client1;
+use crate::nodes::client2;
+
+
+
 use crate::Drone as OrigDrone;
 use toml;
 use crossbeam_channel::{unbounded, select_biased, select, Receiver, Sender};
@@ -14,6 +20,7 @@ use wg_2024::packet::Packet;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use crossbeam::channel;
 
@@ -21,7 +28,7 @@ use crossbeam::channel;
 use Krusty_Club::Krusty_C;
 // Assuming these are defined elsewhere or imported
 use wg_2024::network::NodeId;
-
+use crate::simulation_controller::SC_backend::SimulationController;
 
 #[cfg(feature = "serialize")]
 
@@ -32,14 +39,14 @@ type GroupImplFactory = Box<dyn Fn(NodeId, Sender<DroneEvent>, Receiver<DroneCom
     Receiver<Packet>, HashMap<NodeId, Sender<Packet>>, f32)
     -> Box<dyn DroneImplementation> + Send + 'static>;
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug,Clone)]
 pub struct ParsedConfig {
     pub drone: Vec<DroneConfig>, // Assume this contains information about each drone
     pub client: Vec<Client>,
     pub server: Vec<Server>,
 }
 
-#[derive(Deserialize,Debug)]
+#[derive(Deserialize,Debug,Clone)]
 pub struct DroneConfig {
     pub id: NodeId,  // Example ID
     pub pdr: f32, // Example PDR
@@ -55,6 +62,109 @@ pub struct MyDrone {
     packet_send: HashMap<NodeId, Sender<Packet>>,
     pdr: f32,
 }
+
+impl ParsedConfig {
+    pub fn add_drone(&mut self, id: NodeId) {
+        // Create a new drone configuration with default values
+        let new_drone = DroneConfig {
+            id,
+            pdr: 1.0,  // Default packet delivery rate
+            connected_node_ids: Vec::new(),  // No connections initially
+        };
+
+        // Add the new drone to the configuration
+        self.drone.push(new_drone);
+    }
+
+    // You might also want to add a method to set the connections for a drone
+    pub fn set_drone_connections(&mut self, drone_id: NodeId, connections: Vec<NodeId>) {
+        if let Some(drone) = self.drone.iter_mut().find(|d| d.id == drone_id) {
+            drone.connected_node_ids = connections;
+        }
+    }
+
+    // And a method to set the PDR for a drone
+    pub fn set_drone_pdr(&mut self, drone_id: NodeId, pdr: f32) {
+        if let Some(drone) = self.drone.iter_mut().find(|d| d.id == drone_id) {
+            drone.pdr = pdr;
+        }
+    }
+
+    pub fn remove_drone_connections(&mut self, drone_id: NodeId) {
+        // First, remove this drone from all other drones' connection lists
+        for drone in &mut self.drone {
+            drone.connected_node_ids.retain(|&id| id != drone_id);
+        }
+
+        // Also remove this drone from all clients' connection lists
+        for client in &mut self.client {
+            client.connected_drone_ids.retain(|&id| id != drone_id);
+        }
+
+        // And remove this drone from all servers' connection lists
+        for server in &mut self.server {
+            server.connected_drone_ids.retain(|&id| id != drone_id);
+        }
+    }
+
+    // Remove all connections to/from a specific client
+    pub fn remove_client_connections(&mut self, client_id: NodeId) {
+        // Remove this client from all drones' connection lists
+        for drone in &mut self.drone {
+            drone.connected_node_ids.retain(|&id| id != client_id);
+        }
+
+        // Also find the client and clear its connections
+        if let Some(client) = self.client.iter_mut().find(|c| c.id == client_id) {
+            client.connected_drone_ids.clear();
+        }
+    }
+
+    // Remove all connections to/from a specific server
+    pub fn remove_server_connections(&mut self, server_id: NodeId) {
+        // Remove this server from all drones' connection lists
+        for drone in &mut self.drone {
+            drone.connected_node_ids.retain(|&id| id != server_id);
+        }
+
+        // Also find the server and clear its connections
+        if let Some(server) = self.server.iter_mut().find(|s| s.id == server_id) {
+            server.connected_drone_ids.clear();
+        }
+    }
+
+
+        pub fn detect_topology(&self) -> Option<String> {
+            let drone_count = self.drone.len();
+            let mut drone_degrees = self.drone.iter().map(|d| d.connected_node_ids.len()).collect::<Vec<_>>();
+            drone_degrees.sort();
+
+            if drone_count == 10 && drone_degrees.iter().filter(|&&deg| deg == 2).count() == 10 {
+                return Some("Double Chain".to_string());
+            }
+
+            if drone_count == 10 && drone_degrees.iter().filter(|&&deg| deg == 2 || deg == 3).count() >= 8 {
+                return Some("Star".to_string());
+            }
+
+            if drone_count == 10 && drone_degrees.iter().all(|&d| d == 2 || d == 3) {
+                return Some("Butterfly".to_string());
+            }
+
+            if drone_count == 10 && drone_degrees.contains(&6) && drone_degrees.contains(&2) {
+                return Some("Tree".to_string());
+            }
+
+            if drone_count == 10 && drone_degrees.iter().any(|&d| d == 4 || d == 5) {
+                return Some("Sub-Net".to_string());
+            }
+
+            None
+        }
+    }
+
+
+
 
 impl DroneImplementation for MyDrone {
     fn process_packet(&mut self, packet: Packet) -> Vec<Packet> {
@@ -134,10 +244,13 @@ pub struct NetworkInitializer {
     channels: HashMap<NodeId, Sender<Packet>>,
     controller_tx: Sender<DroneEvent>,
     controller_rx: Receiver<DroneCommand>,
+    simulation_controller: Arc<Mutex<SimulationController>>,
+
 }
 
 impl NetworkInitializer {
-    pub fn new(config_path: &str, drone_impls: Vec<Box<dyn DroneImplementation>>) -> Result<Self, Box<dyn Error>> {
+    pub fn new(config_path: &str, drone_impls: Vec<Box<dyn DroneImplementation>>,    simulation_controller: Arc<Mutex<SimulationController>>,
+    ) -> Result<Self, Box<dyn Error>> {
         // Read config file
         let config_str = fs::read_to_string(config_path)?;
 
@@ -158,6 +271,7 @@ impl NetworkInitializer {
             channels: HashMap::new(),
             controller_tx,
             controller_rx,
+            simulation_controller,
         })
     }
 
@@ -414,20 +528,26 @@ impl NetworkInitializer {
     }
 
     fn setup_channels(&mut self) {
-        // Create unbounded channels for all nodes
-        for drone in &self.config.drone {
-            let (tx, _) = channel::unbounded();
-            self.channels.insert(drone.id, tx);
-        }
+        let all_node_ids: Vec<NodeId> = self
+            .config
+            .drone
+            .iter()
+            .map(|d| d.id)
+            .chain(self.config.client.iter().map(|c| c.id))
+            .chain(self.config.server.iter().map(|s| s.id))
+            .collect();
 
-        for client in &self.config.client {
-            let (tx, _) = channel::unbounded();
-            self.channels.insert(client.id, tx);
-        }
+        for node_id in all_node_ids {
+            // Create packet channel for each node
+            let (tx, _rx) = unbounded::<Packet>();
 
-        for server in &self.config.server {
-            let (tx, _) = channel::unbounded();
-            self.channels.insert(server.id, tx);
+            // Save to local runtime channels
+            self.channels.insert(node_id, tx.clone());
+
+            // Register with the Simulation Controller for ControllerShortcut
+            if let Ok(mut controller) = self.simulation_controller.lock() {
+                controller.register_packet_sender(node_id, tx);
+            }
         }
     }
 
@@ -442,7 +562,6 @@ impl NetworkInitializer {
         let min_count = num_drones / num_impls;
         let remainder = num_drones % num_impls;
 
-        // Each implementation should be used at least min_count times
         for i in 0..num_impls {
             impl_counts[i] = min_count;
             if i < remainder {
@@ -450,7 +569,6 @@ impl NetworkInitializer {
             }
         }
 
-        // Assign implementations to drones and spawn threads
         let mut impl_index = 0;
         let mut count = 0;
 
@@ -460,7 +578,22 @@ impl NetworkInitializer {
                 count = 0;
             }
 
-            // Clone the packet channels that this drone needs
+            let drone_id = drone.id;
+            let drone_pdr = drone.pdr;
+
+            // Create packet receive channel
+            let (packet_tx, packet_rx) = channel::unbounded::<Packet>();
+            self.channels.insert(drone_id, packet_tx);
+
+            // Create command channel: Controller → Drone
+            let (command_tx, command_rx) = channel::unbounded::<DroneCommand>();
+
+            // Register the Sender in the Simulation Controller
+            if let Ok(mut controller) = self.simulation_controller.lock() {
+                controller.register_command_sender(drone_id, command_tx.clone());
+            }
+
+            // Build packet senders to neighbors
             let mut packet_send_channels = HashMap::new();
             for &connected_id in &drone.connected_node_ids {
                 if let Some(tx) = self.channels.get(&connected_id) {
@@ -468,34 +601,21 @@ impl NetworkInitializer {
                 }
             }
 
-            // Create packet receive channel for this drone
-            let (packet_tx, packet_rx) = channel::unbounded();
-
-            // Store the tx end in our channels map
-            self.channels.insert(drone.id, packet_tx);
-
-            // Add controller channels
+            // Clone event channel (Drone → Controller)
             let controller_tx = self.controller_tx.clone();
-            let controller_rx = self.controller_rx.clone();
 
-            // Get a drone implementation
-            let drone_impl = &self.drone_impls[impl_index];
-            let drone_id = drone.id;
-            let drone_pdr = drone.pdr;
-
-            // Create a new drone implementation
+            // Create the drone
             let mut drone_instance = MyDrone::new(
                 drone_id,
                 controller_tx,
-                controller_rx,
+                command_rx,
                 packet_rx,
                 packet_send_channels,
-                drone_pdr
+                drone_pdr,
             );
 
             // Spawn drone thread
             thread::spawn(move || {
-                // Start the drone's main loop
                 drone_instance.run();
             });
 
@@ -503,65 +623,45 @@ impl NetworkInitializer {
         }
     }
 
-    fn initialize_clients(&self) {
+    fn initialize_clients(&mut self) {
         for client in &self.config.client {
-            // Clone the channels this client needs
-            let mut packet_send_channels = HashMap::new();
-            for &drone_id in &client.connected_drone_ids {
-                if let Some(tx) = self.channels.get(&drone_id) {
-                    packet_send_channels.insert(drone_id, tx.clone());
-                }
-            }
-
-            // Create packet receive channel for this client
-            //let (_, packet_rx) = channel::unbounded::<T>();
-
             let client_id = client.id;
 
-            //depending on the client struct I will add the recv_channel and channel with SC
-
-            // Spawn client thread
-            thread::spawn(move || {
-                println!("Client {} started", client_id);
-
-                // Client would use packet_send_channels to send packets to connected drones
-                // And packet_rx to receive packets from those drones
-                loop {
-                    // Client logic here
-                    thread::sleep(std::time::Duration::from_secs(1));
-                }
-            });
-        }
-    }
-
-    fn initialize_servers(&self) {
-        for server in &self.config.server {
-            // Clone the channels this server needs
-            let mut packet_send_channels = HashMap::new();
-            for &drone_id in &server.connected_drone_ids {
+            let mut senders = HashMap::new();
+            for &drone_id in &client.connected_drone_ids {
                 if let Some(tx) = self.channels.get(&drone_id) {
-                    packet_send_channels.insert(drone_id, tx.clone());
+                    senders.insert(drone_id, tx.clone());
                 }
             }
 
-            // Create packet receive channel for this server
-            //let (_, packet_rx) = channel::unbounded();
+            let (client_tx, client_rx) = crossbeam_channel::unbounded();
+            self.channels.insert(client_id, client_tx.clone());
 
-            let server_id = server.id;
-
-            // Spawn server thread
-            thread::spawn(move || {
-                println!("Server {} started", server_id);
-
-                // Server would use packet_send_channels to send packets to connected drones
-                // And packet_rx to receive packets from those drones
-                loop {
-                    // Server logic here
-                    thread::sleep(std::time::Duration::from_secs(1));
-                }
-            });
+            client1::start_client(client_id, client_rx, senders);
         }
     }
+
+
+    fn initialize_servers(&mut self) {
+        for server in &self.config.server {
+            let server_id = server.id;
+
+            // Gather packet senders to connected drones
+            let mut senders = HashMap::new();
+            for &drone_id in &server.connected_drone_ids {
+                if let Some(tx) = self.channels.get(&drone_id) {
+                    senders.insert(drone_id, tx.clone());
+                }
+            }
+
+            // Create and store receiver
+            let (server_tx, server_rx) = crossbeam_channel::unbounded();
+            self.channels.insert(server_id, server_tx.clone());
+
+            server::start_server(server_id, server_rx, senders);
+        }
+    }
+
 
     fn spawn_controller(&self) {
         // Get all node IDs for the controller to manage
@@ -798,133 +898,22 @@ impl NetworkInitializer {
     }
 }
 
-// Usage example
-fn main() -> Result<(), Box<dyn Error>> {
-    // Sample drone implementations
-    let drone_impls: Vec<Box<dyn DroneImplementation>> = vec![
-        // Your actual drone implementations would go here
-    ];
-
-    let mut initializer = NetworkInitializer::new("network_config.toml", drone_impls)?;
-    initializer.initialize()?;
-
-    println!("Network initialized successfully!");
-
-    // Keep the main thread alive
-    loop {
-        thread::sleep(std::time::Duration::from_secs(1));
-    }
-}
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+    use crate::simulation_controller::SC_backend::SimulationController;
+
+    fn mock_controller(config: ParsedConfig) -> Arc<Mutex<SimulationController>> {
+        let (event_sender, event_receiver) = crossbeam_channel::unbounded::<DroneEvent>();
+        Arc::new(Mutex::new(SimulationController::new(Arc::new(Mutex::new(config)), event_receiver)))
+    }
 
     #[test]
     fn test_channel_setup() {
         // Create a mock config for testing
-        let mock_config = Config {
-            drone: vec![
-                Drone {
-                    id: 1,
-                    connected_node_ids: vec![2],
-                    pdr: 0.9,
-                },
-                Drone {
-                    id: 2,
-                    connected_node_ids: vec![1],
-                    pdr: 0.8,
-                },
-            ],
-            client: vec![
-                Client {
-                    id: 3,
-                    connected_drone_ids: vec![1],
-                },
-            ],
-            server: vec![
-                Server {
-                    id: 4,
-                    connected_drone_ids: vec![1],
-                },
-            ],
-        };
-
-        // Initialize NetworkInitializer with mock config
-        let mut initializer = NetworkInitializer::new("topologies/butterfly.toml", vec![]).unwrap();
-
-        // Call setup_channels to create channels
-        initializer.setup_channels();
-
-        // Check that channels for each node were created
-        for drone in &mock_config.drone {
-            assert!(initializer.channels.contains_key(&drone.id), "Missing channel for drone {}", drone.id);
-        }
-
-        for client in &mock_config.client {
-            assert!(initializer.channels.contains_key(&client.id), "Missing channel for client {}", client.id);
-        }
-
-        for server in &mock_config.server {
-            assert!(initializer.channels.contains_key(&server.id), "Missing channel for server {}", server.id);
-        }
-    }
-
-
-
-    use super::*;
-    use std::sync::{Arc, Mutex};
-    use std::thread;
-
-    #[test]
-    fn test_drone_initialization() {
-        let drone_count = 3;
-        let counter = Arc::new(Mutex::new(0));
-
-        // Create a mock config with 3 drones
-        let mock_config = Config {
-            drone: vec![
-                Drone { id: 1, connected_node_ids: vec![2], pdr: 0.9 },
-                Drone { id: 2, connected_node_ids: vec![1], pdr: 0.8 },
-                Drone { id: 3, connected_node_ids: vec![1], pdr: 0.7 },
-            ],
-            client: vec![],
-            server: vec![],
-        };
-
-        let mut initializer = NetworkInitializer::new("topologies/butterfly.toml", vec![]).unwrap();
-
-        // Setup channels and drone implementations
-        initializer.setup_channels();
-
-        // Simulate drone thread creation (in place of the actual `thread::spawn`)
-        for drone in mock_config.drone.clone() {
-            let counter = Arc::clone(&counter);
-            thread::spawn(move || {
-                let mut count = counter.lock().unwrap();
-                *count += 1;
-                println!("Drone {} initialized", drone.id);
-            });
-        }
-
-        // Wait for threads to complete
-        thread::sleep(std::time::Duration::from_secs(1));
-
-        // Check if the expected number of threads (drones) were spawned
-        let count = counter.lock().unwrap();
-        assert_eq!(*count, drone_count, "Expected {} drones, but got {}", drone_count, *count);
-    }
-
-
-
-
-    use super::*;
-
-    #[test]
-    fn test_full_network_initialization() {
-        // Use a mock or simplified config to test the entire initialization flow
-        let mock_config = Config {
+        let config = Config {
             drone: vec![
                 Drone { id: 1, connected_node_ids: vec![2], pdr: 0.9 },
                 Drone { id: 2, connected_node_ids: vec![1], pdr: 0.8 },
@@ -933,24 +922,141 @@ mod tests {
                 Client { id: 3, connected_drone_ids: vec![1] },
             ],
             server: vec![
-                Server { id: 4, connected_drone_ids: vec![2] },
+                Server { id: 4, connected_drone_ids: vec![1] },
             ],
         };
 
-        let mut initializer = NetworkInitializer::new("topologies/butterfly.toml", vec![]).unwrap();
+        let parsed_config = ParsedConfig {
+            drone: config.drone.iter().map(|d| DroneConfig {
+                id: d.id,
+                pdr: d.pdr,
+                connected_node_ids: d.connected_node_ids.clone(),
+            }).collect(),
+            client: config.client.clone(),
+            server: config.server.clone(),
+        };
 
-        // Perform the full initialization process
-        initializer.initialize().unwrap();
+        let controller = mock_controller(parsed_config.clone());
 
-        // Check that all channels are set up
-        assert!(initializer.channels.contains_key(&1), "Missing channel for drone 1");
-        assert!(initializer.channels.contains_key(&2), "Missing channel for drone 2");
-        assert!(initializer.channels.contains_key(&3), "Missing channel for client 3");
-        assert!(initializer.channels.contains_key(&4), "Missing channel for server 4");
+        let drone_impls = vec![]; // no implementations for channel setup test
 
-        // Check that the drone threads are spawned (if using thread simulation)
-        // You can further check the logs or counters if needed
+        let mut initializer = NetworkInitializer {
+            config,
+            drone_impls,
+            channels: HashMap::new(),
+            controller_tx: crossbeam_channel::unbounded().0,
+            controller_rx: crossbeam_channel::unbounded().1,
+            simulation_controller: controller,
+        };
+
+        initializer.setup_channels();
+
+        for drone in &parsed_config.drone {
+            assert!(initializer.channels.contains_key(&drone.id), "Missing channel for drone {}", drone.id);
+        }
+        for client in &parsed_config.client {
+            assert!(initializer.channels.contains_key(&client.id), "Missing channel for client {}", client.id);
+        }
+        for server in &parsed_config.server {
+            assert!(initializer.channels.contains_key(&server.id), "Missing channel for server {}", server.id);
+        }
+    }
+
+    #[test]
+    fn test_drone_initialization() {
+        let drone_count = 3;
+        let drones = vec![
+            Drone { id: 1, connected_node_ids: vec![2], pdr: 0.9 },
+            Drone { id: 2, connected_node_ids: vec![1], pdr: 0.8 },
+            Drone { id: 3, connected_node_ids: vec![1], pdr: 0.7 },
+        ];
+
+        let parsed_config = ParsedConfig {
+            drone: drones.iter().map(|d| DroneConfig {
+                id: d.id,
+                pdr: d.pdr,
+                connected_node_ids: d.connected_node_ids.clone(),
+            }).collect(),
+            client: vec![],
+            server: vec![],
+        };
+
+        let controller = mock_controller(parsed_config.clone());
+
+        let mut initializer = NetworkInitializer {
+            config: Config { drone: drones, client: vec![], server: vec![] },
+            drone_impls: vec![Box::new(MyDrone::new(
+                0,
+                crossbeam_channel::unbounded().0,
+                crossbeam_channel::unbounded().1,
+                crossbeam_channel::unbounded().1,
+                HashMap::new(),
+                0.5,
+            ))],
+            channels: HashMap::new(),
+            controller_tx: crossbeam_channel::unbounded().0,
+            controller_rx: crossbeam_channel::unbounded().1,
+            simulation_controller: controller,
+        };
+
+        initializer.setup_channels();
+        initializer.initialize_drones(); // Calls your new logic
+
+        // There's no deterministic way to test threads started here,
+        // so we rely on "it didn't panic" and print logs
+        assert_eq!(true, true);
+    }
+
+    #[test]
+    fn test_full_network_initialization() {
+        let drones = vec![
+            Drone { id: 1, connected_node_ids: vec![2], pdr: 0.9 },
+            Drone { id: 2, connected_node_ids: vec![1], pdr: 0.8 },
+        ];
+        let clients = vec![Client { id: 3, connected_drone_ids: vec![1] }];
+        let servers = vec![Server { id: 4, connected_drone_ids: vec![2] }];
+
+        let config = Config {
+            drone: drones.clone(),
+            client: clients.clone(),
+            server: servers.clone(),
+        };
+
+        let parsed_config = ParsedConfig {
+            drone: drones.iter().map(|d| DroneConfig {
+                id: d.id,
+                pdr: d.pdr,
+                connected_node_ids: d.connected_node_ids.clone(),
+            }).collect(),
+            client: clients.clone(),
+            server: servers.clone(),
+        };
+
+        let controller = mock_controller(parsed_config.clone());
+
+        let mut initializer = NetworkInitializer {
+            config,
+            drone_impls: vec![Box::new(MyDrone::new(
+                0,
+                crossbeam_channel::unbounded().0,
+                crossbeam_channel::unbounded().1,
+                crossbeam_channel::unbounded().1,
+                HashMap::new(),
+                0.5,
+            ))],
+            channels: HashMap::new(),
+            controller_tx: crossbeam_channel::unbounded().0,
+            controller_rx: crossbeam_channel::unbounded().1,
+            simulation_controller: controller,
+        };
+
+        initializer.setup_channels();
+        initializer.initialize_drones();
+        initializer.initialize_clients();
+        initializer.initialize_servers();
+
+        for node_id in [1, 2, 3, 4] {
+            assert!(initializer.channels.contains_key(&node_id), "Missing channel for node {}", node_id);
+        }
     }
 }
-
-

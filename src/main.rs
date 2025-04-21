@@ -2,28 +2,20 @@ mod network;
 mod nodes;
 mod utils;
 mod simulation_controller;
-
 use std::collections::HashMap;
 use std::error::Error;
 use std::sync::{Arc, Mutex};
-use crossbeam_channel::{Receiver, Sender};
+use std::thread;
+use crossbeam_channel::{Receiver, Sender, unbounded};
 use wg_2024::controller::{DroneCommand, DroneEvent};
 use wg_2024::drone::Drone;
 use wg_2024::network::NodeId;
 use wg_2024::packet::Packet;
 use simulation_controller::app::NetworkApp;
+use simulation_controller::SC_backend::SimulationController;
 use crate::network::TOML_parser;
 use crate::network::initializer::{DroneImplementation, MyDrone, NetworkInitializer, ParsedConfig};
 use utils::serialization_fix;
-
-//pub type DroneImplementation = dyn wg_2024::drone::Drone;
-
-// Concrete implementation of the Drone trait
-
-/*pub trait DroneImplementation: Drone {
-    // Additional methods specific to your implementation
-}*/
-
 
 fn main() -> Result<(), Box<dyn Error>> {
     // Config and duration
@@ -37,65 +29,107 @@ fn main() -> Result<(), Box<dyn Error>> {
         .unwrap_or(60);
 
     // Initialize network and shared channels
-    let (controller_send, controller_recv, packet_recv, packet_send_map, config) =
+    let (event_sender, event_receiver, command_sender, command_receiver, packet_recv, packet_send_map, config) =
         initialize_network_channels(&config_path)?;
+
+    let parsed_config = Arc::new(Mutex::new(config.clone()));
+
+    // ✅ Create drone_factory closure => Required by updated SC constructor
+    let drone_factory = Arc::new(
+        |id, controller_send, controller_recv, packet_recv, packet_send, pdr| {
+            Box::new(MyDrone::new(
+                id,
+                controller_send,
+                controller_recv,
+                packet_recv,
+                packet_send,
+                pdr,
+            )) as Box<dyn Drone>
+        }
+    );
+
+    // Create Simulation Controller with factory
+    let controller = Arc::new(Mutex::new(SimulationController::new(
+        parsed_config.clone(),
+        event_sender.clone(),
+        event_receiver,
+        drone_factory.clone(),
+    )));
 
     // Create drone implementations using the NetworkInitializer
     let drone_impls = NetworkInitializer::create_drone_implementations(
         &config,
-        controller_send.clone(),
-        controller_recv.clone(),
+        event_sender.clone(),
+        command_receiver.clone(),
         packet_recv,
         packet_send_map,
     );
 
     // Initialize the network
-    let mut initializer = NetworkInitializer::new(&config_path, drone_impls)?;
+    let mut initializer = NetworkInitializer::new(&config_path, drone_impls, controller.clone())?;
     initializer.initialize()?;
     println!("Network initialized successfully");
-
 
     // Decide mode
     if std::env::args().any(|arg| arg == "--headless") {
         println!("Running in headless mode");
-        run_headless_simulation(simulation_duration);
+        run_headless_simulation(simulation_duration, parsed_config.clone(), controller.clone());
     } else {
         println!("Starting GUI application");
-        run_gui_application(controller_send,controller_recv, Arc::new(Mutex::new(config)))?;
+        run_gui_application(event_sender.clone(), command_receiver, parsed_config, drone_factory)?;
     }
 
     Ok(())
 }
 
-fn run_headless_simulation(duration: u64) {
+fn run_headless_simulation(
+    duration: u64,
+    _config: Arc<Mutex<ParsedConfig>>,
+    controller: Arc<Mutex<SimulationController>>,
+) {
     println!("Running simulation for {} seconds", duration);
+
+    let controller_clone = controller.clone();
+    thread::spawn(move || {
+        let mut controller = controller_clone.lock().unwrap();
+        controller.run();
+    });
+
     std::thread::sleep(std::time::Duration::from_secs(duration));
     println!("Simulation completed");
 }
 
 fn run_gui_application(
-    controller_send: Sender<DroneEvent>,
-    _controller_recv: Receiver<DroneCommand>, // You can remove this if unused in GUI
+    event_sender: Sender<DroneEvent>,
+    command_receiver: Receiver<DroneCommand>,
     config: Arc<Mutex<ParsedConfig>>,
+    drone_factory: Arc<dyn Fn(NodeId, Sender<DroneEvent>, Receiver<DroneCommand>, Receiver<Packet>, HashMap<NodeId, Sender<Packet>>, f32) -> Box<dyn Drone> + Send + Sync>,
 ) -> Result<(), Box<dyn Error>> {
     let options = eframe::NativeOptions::default();
 
     eframe::run_native(
         "Drone Simulation",
         options,
-        Box::new(|cc| Ok(Box::new(NetworkApp::new_with_network(cc, controller_send, config)))),
+        Box::new(|cc| {
+            Ok(Box::new(NetworkApp::new_with_network(
+                cc,
+                event_sender,
+                config,
+                drone_factory.clone(),
+            )))
+        }),
     )?;
 
     Ok(())
 }
 
-
-//la funz seguente serve solo per displayare il network
 fn initialize_network_channels(
     config_path: &str,
 ) -> Result<
     (
         Sender<DroneEvent>,
+        Receiver<DroneEvent>,
+        Sender<DroneCommand>,
         Receiver<DroneCommand>,
         Receiver<Packet>,
         HashMap<NodeId, Sender<Packet>>,
@@ -105,20 +139,21 @@ fn initialize_network_channels(
 > {
     let config = TOML_parser::parse_config(config_path)?;
 
-    let (controller_send, _controller_event_recv) = crossbeam_channel::unbounded::<DroneEvent>();
-    let (command_send, controller_recv) = crossbeam_channel::unbounded::<DroneCommand>();
-    let (packet_send, packet_recv) = crossbeam_channel::unbounded::<Packet>();
+    let (event_sender, event_receiver) = unbounded::<DroneEvent>();
+    let (command_sender, command_receiver) = unbounded::<DroneCommand>();
+    let (packet_send, packet_recv) = unbounded::<Packet>();
 
     let packet_send_map: HashMap<NodeId, Sender<Packet>> = config
         .drone
         .iter()
-        .enumerate()
-        .map(|(i, _)| (NodeId::from(i as u8), packet_send.clone()))
+        .map(|drone| (drone.id, packet_send.clone()))
         .collect();
 
     Ok((
-        controller_send,
-        controller_recv,
+        event_sender,
+        event_receiver,
+        command_sender,
+        command_receiver,
         packet_recv,
         packet_send_map,
         config,
@@ -128,25 +163,3 @@ fn initialize_network_channels(
 
 
 
-/*
-mod network;
-mod nodes;
-mod utils;
-mod simulation_controller;
-
-use simulation_controller::app::NetworkApp;
-
-fn main() -> Result<(), eframe::Error> {
-    // Initialize network topology
-    /*let network_initializer = NetworkInitializer::new("topologies/star.toml")
-        .expect("Failed to initialize network");
-*/
-
-    // Launch GUI with network configuration
-    let options = eframe::NativeOptions::default();
-    eframe::run_native(
-        "Network Topology Simulator",
-        options,
-        Box::new(|_cc| Ok(Box::new(NetworkApp::default())))
-    )
-}*/

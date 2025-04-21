@@ -1,3 +1,3 @@
 pub(crate) mod app;
 pub(crate) mod network_designer;
-mod SC_backend;
+pub(crate) mod SC_backend;

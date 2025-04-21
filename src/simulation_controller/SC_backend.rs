@@ -4,9 +4,10 @@ use std::sync::{Arc, Mutex};
 use crossbeam_channel::{Receiver, Sender};
 use wg_2024::packet::Packet;
 use wg_2024::controller::{DroneCommand,DroneEvent};
+use wg_2024::drone::Drone;
 use wg_2024::network::NodeId;
-use crate::network::initializer::ParsedConfig;
-
+use crate::network::initializer::{ParsedConfig};
+use crate::simulation_controller::network_designer::{Node, NodeType};
 //Reminder about structs
 /*pub enum DroneCommand {
     RemoveSender(usize), // NodeId
@@ -23,26 +24,87 @@ pub enum DroneEvent {
 pub struct SimulationController {
     network_config: Arc<Mutex<ParsedConfig>>,
     event_receiver: Receiver<DroneEvent>,
+    event_sender: Sender<DroneEvent>,
     command_senders: HashMap<NodeId, Sender<DroneCommand>>, // Map of NodeId -> CommandSender
     network_graph: HashMap<NodeId, HashSet<NodeId>>, // Adjacency list of the network
+    packet_senders: HashMap<NodeId, Sender<Packet>>,
+    drone_factory: Arc<dyn Fn(
+        NodeId,
+        Sender<DroneEvent>,
+        Receiver<DroneCommand>,
+        Receiver<Packet>,
+        HashMap<NodeId, Sender<Packet>>,
+        f32,
+    ) -> Box<dyn Drone> + Send + Sync>,
 }
 
 impl SimulationController {
     pub fn new(
         network_config: Arc<Mutex<ParsedConfig>>,
-        event_receiver: Receiver<DroneEvent>
+        event_sender: Sender<DroneEvent>,
+        event_receiver: Receiver<DroneEvent>,
+        drone_factory: Arc<dyn Fn(NodeId,Sender<DroneEvent>,Receiver<DroneCommand>,Receiver<Packet>,HashMap<NodeId, Sender<Packet>>,f32, ) -> Box<dyn Drone> + Send + Sync>,
+
     ) -> Self {
         let mut controller = SimulationController {
             network_config,
+            event_sender,
             event_receiver,
             command_senders: HashMap::new(),
             network_graph: HashMap::new(),
+            packet_senders: HashMap::new(),
+            drone_factory,
         };
 
         // Initialize the network graph
         controller.initialize_network_graph();
 
         controller
+    }
+
+    pub fn get_node_state(&self, node_id: NodeId) -> Option<Node> {
+        let config = self.network_config.lock().unwrap();
+
+        // We use a dummy/default position since position is not available
+        let default_position = (0.0, 0.0);
+
+        for drone in &config.drone {
+            if drone.id == node_id {
+                return Some(Node {
+                    id: node_id as usize,
+                    node_type: NodeType::Drone,
+                    pdr: drone.pdr,
+                    active: self.network_graph.contains_key(&node_id),
+                    position: default_position, // fallback
+                });
+            }
+        }
+
+        for client in &config.client {
+            if client.id == node_id {
+                return Some(Node {
+                    id: node_id as usize,
+                    node_type: NodeType::Client,
+                    pdr: 1.0,
+                    active: self.network_graph.contains_key(&node_id),
+                    position: default_position,
+                });
+            }
+        }
+
+        for server in &config.server {
+            if server.id == node_id {
+                return Some(Node {
+                    id: node_id as usize,
+                    node_type: NodeType::Server,
+                    pdr: 1.0,
+                    active: self.network_graph.contains_key(&node_id),
+                    position: default_position,
+                });
+            }
+        }
+
+        None
     }
 
     // Initialize network graph from config
@@ -92,6 +154,11 @@ impl SimulationController {
         self.command_senders.insert(node_id, sender);
     }
 
+    pub fn register_packet_sender(&mut self, node_id: NodeId, sender: Sender<Packet>) {
+        self.packet_senders.insert(node_id, sender);
+    }
+
+
     // Main loop to process events
     pub fn run(&mut self) {
         while let Ok(event) = self.event_receiver.recv() {
@@ -112,12 +179,18 @@ impl SimulationController {
             },
             DroneEvent::ControllerShortcut(packet) => {
                 // Handle direct routing for critical packets
-                if let Some(sender) = self.command_senders.get(&packet.routing_header.hops[packet.routing_header.hops.len() - 1]) {
-                    // Direct delivery to destination
-                    // This is a simplified example - in reality, you would
-
-                    // likely need to transform the packet in some way
-                    println!("Controller shortcut: Directly routing packet to {}", packet.routing_header.hops[packet.routing_header.hops.len() - 1]);
+                if let Some(dest_id) = packet.routing_header.destination() {
+                    if let Some(sender) = self.packet_senders.get(&dest_id) {
+                        if let Err(e) = sender.send(packet.clone()) {
+                            eprintln!("Failed to forward ControllerShortcut to node {}: {}", dest_id, e);
+                        } else {
+                            println!("ControllerShortcut forwarded to node {}", dest_id);
+                        }
+                    } else {
+                        eprintln!("No packet sender found for destination node {}", dest_id);
+                    }
+                } else {
+                    eprintln!("ControllerShortcut has no destination");
                 }
             }
         }
@@ -261,30 +334,50 @@ impl SimulationController {
             return Err("New drone configuration violates network constraints".into());
         }
 
-        // Create a new drone in the configuration
-        let mut config = self.network_config.lock().unwrap();
+        // Update internal config
+        {
+            let mut config = self.network_config.lock().unwrap();
+            config.add_drone(id);
+            config.set_drone_connections(id, connections.clone());
+        }
 
-        // Add the drone to the configuration
-        // This is a simplified example - you would need to create the actual drone object
-        // and update the configuration properly
-
-        // Update the network graph
+        // Update network graph
         let mut neighbors = HashSet::new();
         for &conn_id in &connections {
             neighbors.insert(conn_id);
-
-            // Update the connected node's neighbors
-            if let Some(conn_neighbors) = self.network_graph.get_mut(&conn_id) {
-                conn_neighbors.insert(id);
-            }
+            self.network_graph.entry(conn_id).or_default().insert(id);
         }
         self.network_graph.insert(id, neighbors);
 
-        // In a real implementation, you would also need to create channels for
-        // communication with the new drone and set up the actual drone object
+        // Create command channel (controller → drone)
+        let (command_tx, command_rx) = crossbeam_channel::unbounded();
+        self.command_senders.insert(id, command_tx.clone());
+
+        // Create packet channel (to drone)
+        let (packet_tx, packet_rx) = crossbeam_channel::unbounded();
+        self.packet_senders.insert(id, packet_tx.clone());
+
+        // Create packet senders map for this drone (to neighbors)
+        let mut packet_send_map = HashMap::new();
+        for &conn_id in &connections {
+            if let Some(sender) = self.packet_senders.get(&conn_id) {
+                packet_send_map.insert(conn_id, sender.clone());
+            }
+        }
+
+        // Clone for drone thread
+        let controller_send = self.event_sender.clone();
+        let factory = Arc::clone(&self.drone_factory);
+
+        // Spawn drone in its own thread
+        std::thread::spawn(move || {
+            let mut drone = factory(id, controller_send, command_rx, packet_rx, packet_send_map, pdr);
+            drone.run();
+        });
 
         Ok(())
     }
+
 
     // Validate that adding a new drone won't violate network constraints
     fn validate_new_drone(&self, id: NodeId, connections: &[NodeId]) -> Result<bool, Box<dyn Error>> {
@@ -304,4 +397,9 @@ impl SimulationController {
         // (This is a simplified check - you might need more validation)
         Ok(true)
     }
+
+
+
+
 }
+
