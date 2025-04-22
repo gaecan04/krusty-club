@@ -437,79 +437,88 @@ impl NetworkRenderer {
 
     // Add a connection between two nodes
     fn add_connection(&mut self, source_id: usize, target_id: usize) -> bool {
-        // Convert node IDs to indices
         if let (Some(&source_idx), Some(&target_idx)) = (
             self.node_id_to_index.get(&(source_id as NodeId)),
-            self.node_id_to_index.get(&(target_id as NodeId))
+            self.node_id_to_index.get(&(target_id as NodeId)),
         ) {
-            // Check if the connection already exists
-            if !self.edges.contains(&(source_idx, target_idx)) && !self.edges.contains(&(target_idx, source_idx)) {
-                // Add the connection
-                self.edges.push((source_idx, target_idx));
+            if self.edges.contains(&(source_idx, target_idx)) || self.edges.contains(&(target_idx, source_idx)) {
+                return false;
+            }
 
-                // Update the config if available
-                if let Some(config) = &self.config {
-                    let mut cfg = config.lock().unwrap();
+            if let Some(cfg_arc) = &self.config {
+                let mut cfg = cfg_arc.lock().unwrap();
 
-                    // Update connections in the config based on node types
-                    let source_type = self.nodes[source_idx].node_type;
+                let a_type = self.nodes[source_idx].node_type;
+                let b_type = self.nodes[target_idx].node_type;
 
-                    let a_type = self.nodes[source_idx].node_type;
-                    let b_type = self.nodes[target_idx].node_type;
-
-                    match (a_type, b_type) {
-                        (NodeType::Drone, NodeType::Drone) => {
-                            cfg.append_drone_connection(source_id as NodeId, target_id as NodeId);
-                            cfg.append_drone_connection(target_id as NodeId, source_id as NodeId);
-                        }
-                        (NodeType::Drone, NodeType::Server) => {
-                            cfg.append_drone_connection(source_id as NodeId, target_id as NodeId);
-                            cfg.append_server_connection(target_id as NodeId, source_id as NodeId);
-                        }
-                        (NodeType::Server, NodeType::Drone) => {
-                            cfg.append_drone_connection(target_id as NodeId, source_id as NodeId);
-                            cfg.append_server_connection(source_id as NodeId, target_id as NodeId);
-                        }
-                        (NodeType::Drone, NodeType::Client) => {
-                            // Drone → Client
-                            let client = cfg.client.iter().find(|c| c.id == target_id as NodeId);
-                            if let Some(c) = client {
-                                if c.connected_drone_ids.len() >= 2 {
-                                    eprintln!("Client {} already has 2 drone connections!", target_id);
-                                    return false;
-                                }
+                // 🔒 Constraint checks
+                let constraint_ok = match (a_type, b_type) {
+                    (NodeType::Client, NodeType::Drone) => {
+                        let c = cfg.client.iter().find(|c| c.id == source_id as NodeId);
+                        if let Some(c) = c {
+                            if c.connected_drone_ids.len() >= 2 {
+                                eprintln!("Client {} already has 2 drone connections!", source_id);
+                                return false;
                             }
-
-                            cfg.append_client_connection(target_id as NodeId, source_id as NodeId);
-                            cfg.append_drone_connection(source_id as NodeId, target_id as NodeId);
                         }
-                        (NodeType::Client, NodeType::Drone) => {
-                            // Client → Drone
-                            let client = cfg.client.iter().find(|c| c.id == source_id as NodeId);
-                            if let Some(c) = client {
-                                if c.connected_drone_ids.len() >= 2 {
-                                    eprintln!("Client {} already has 2 drone connections!", source_id);
-                                    return false;
-                                }
+                        true
+                    }
+
+                    (NodeType::Drone, NodeType::Client) => {
+                        let c = cfg.client.iter().find(|c| c.id == target_id as NodeId);
+                        if let Some(c) = c {
+                            if c.connected_drone_ids.len() >= 2 {
+                                eprintln!("Client {} already has 2 drone connections!", target_id);
+                                return false;
                             }
+                        }
+                        true
+                    }
 
-                            cfg.append_client_connection(source_id as NodeId, target_id as NodeId);
-                            cfg.append_drone_connection(target_id as NodeId, source_id as NodeId);
-                        }
-                        _ => {
-                            eprintln!("Unsupported connection: {:?} ↔ {:?}", a_type, b_type);
-                        }
+                    _ => true,
+                };
+
+                if !constraint_ok {
+                    return false; // 🚫 Constraint violated — exit early
+                }
+
+                // ✅ Passed checks — apply connection
+                match (a_type, b_type) {
+                    (NodeType::Drone, NodeType::Drone) => {
+                        cfg.append_drone_connection(source_id as NodeId, target_id as NodeId);
+                        cfg.append_drone_connection(target_id as NodeId, source_id as NodeId);
+                    }
+                    (NodeType::Drone, NodeType::Server) => {
+                        cfg.append_drone_connection(source_id as NodeId, target_id as NodeId);
+                        cfg.append_server_connection(target_id as NodeId, source_id as NodeId);
+                    }
+                    (NodeType::Server, NodeType::Drone) => {
+                        cfg.append_drone_connection(target_id as NodeId, source_id as NodeId);
+                        cfg.append_server_connection(source_id as NodeId, target_id as NodeId);
+                    }
+                    (NodeType::Drone, NodeType::Client) => {
+                        cfg.append_drone_connection(source_id as NodeId, target_id as NodeId);
+                        cfg.append_client_connection(target_id as NodeId, source_id as NodeId);
+                    }
+                    (NodeType::Client, NodeType::Drone) => {
+                        cfg.append_drone_connection(target_id as NodeId, source_id as NodeId);
+                        cfg.append_client_connection(source_id as NodeId, target_id as NodeId);
+                    }
+                    _ => {
+                        eprintln!("Unsupported connection between {:?} and {:?}", a_type, b_type);
                     }
                 }
-                if let Some(ctrl_arc) = &self.simulation_controller {
-                    let mut ctrl = ctrl_arc.lock().unwrap();
-                    ctrl.add_connection(source_id as NodeId, target_id as NodeId);
-                }
 
-
-                return true;
-                }
+                // ✅ Only now: add edge visually
+                self.edges.push((source_idx, target_idx));
             }
+            if let Some(ctrl_arc) = &self.simulation_controller {
+                let mut ctrl = ctrl_arc.lock().unwrap();
+                ctrl.add_connection(source_id as NodeId, target_id as NodeId);
+            }
+
+            return true;
+        }
 
         false
     }
