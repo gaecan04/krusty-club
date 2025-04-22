@@ -161,7 +161,32 @@ impl ParsedConfig {
 
             None
         }
+    pub fn append_drone_connection(&mut self, drone_id: NodeId, peer: NodeId) {
+        if let Some(drone) = self.drone.iter_mut().find(|d| d.id == drone_id) {
+            if !drone.connected_node_ids.contains(&peer) {
+                drone.connected_node_ids.push(peer);
+            }
+        }
     }
+
+    pub fn append_server_connection(&mut self, server_id: NodeId, drone: NodeId) {
+        if let Some(server) = self.server.iter_mut().find(|s| s.id == server_id) {
+            if !server.connected_drone_ids.contains(&drone) {
+                server.connected_drone_ids.push(drone);
+            }
+        }
+    }
+
+    pub fn append_client_connection(&mut self, client_id: NodeId, drone: NodeId) {
+        if let Some(client) = self.client.iter_mut().find(|c| c.id == client_id) {
+            if !client.connected_drone_ids.contains(&drone) {
+                client.connected_drone_ids.push(drone);
+            }
+        }
+    }
+
+
+}
 
 
 

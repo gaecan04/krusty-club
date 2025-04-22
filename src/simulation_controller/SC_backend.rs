@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::sync::{Arc, Mutex};
 use crossbeam_channel::{Receiver, Sender};
+use egui::debug_text::print;
 use wg_2024::packet::Packet;
 use wg_2024::controller::{DroneCommand,DroneEvent};
 use wg_2024::drone::Drone;
@@ -261,7 +262,7 @@ impl SimulationController {
     }
 
     // Validate that a drone crash won't violate network constraints
-    fn validate_drone_crash(&self, drone_id: NodeId) -> Result<bool, Box<dyn Error>> {
+   /* fn validate_drone_crash(&self, drone_id: NodeId) -> Result<bool, Box<dyn Error>> {
         let config = self.network_config.lock().unwrap();
 
         // Check if the drone exists
@@ -296,6 +297,8 @@ impl SimulationController {
                 .collect();
 
             if connected_drones.is_empty() || connected_drones.len() > 2 {
+                println!("client must be connected to at most 2 drones");
+
                 return Ok(false);
             }
         }
@@ -309,23 +312,29 @@ impl SimulationController {
                 .collect();
 
             if connected_drones.len() < 2 {
+                println!("SERVER must be connected to at least 2 drones");
                 return Ok(false);
             }
         }
 
         Ok(true)
-    }
+    }*/
 
     fn is_crash_allowed(&self, test_graph: &HashMap<NodeId, HashSet<NodeId>>) -> bool {
         for server_id in self.get_all_server_ids() {
             let neighbors = test_graph.get(&server_id);
-            let drone_neighbors = neighbors.map(|n| {
+            let drone_neighbors = neighbors.map_or(0, |n| {
                 n.iter()
-                    .filter(|id| self.get_node_state(**id).map_or(false, |s| s.active && s.node_type == NodeType::Drone))
+                    .filter(|id| {
+                        self.get_node_type(**id)
+                            .map_or(false, |t| t == NodeType::Drone && test_graph.contains_key(*id))
+                    })
                     .count()
-            }).unwrap_or(0);
+            });
+
 
             if drone_neighbors < 2 {
+                println!("server must be connected to at least 2 drones");
                 return false; // 🚨 Violates server redundancy rule
             }
         }
@@ -336,6 +345,7 @@ impl SimulationController {
                 if state.active {
                     let reachable = self.bfs_reachable_servers(client_id, test_graph);
                     if reachable.is_empty() {
+
                         return false;
                     }
                 }
@@ -343,6 +353,20 @@ impl SimulationController {
         }
         true
     }
+
+    fn get_node_type(&self, id: NodeId) -> Option<NodeType> {
+        let cfg = self.config.lock().unwrap();
+        if cfg.drone.iter().any(|d| d.id == id) {
+            Some(NodeType::Drone)
+        } else if cfg.client.iter().any(|c| c.id == id) {
+            Some(NodeType::Client)
+        } else if cfg.server.iter().any(|s| s.id == id) {
+            Some(NodeType::Server)
+        } else {
+            None
+        }
+    }
+
 
     pub fn get_all_drone_ids(&self) -> Vec<NodeId> {
         self.config
@@ -556,6 +580,11 @@ impl SimulationController {
 
         Ok(())
     }
+    pub fn add_connection(&mut self, a: NodeId, b: NodeId) {
+        self.network_graph.entry(a).or_default().insert(b);
+        self.network_graph.entry(b).or_default().insert(a);
+    }
+
 
 }
 

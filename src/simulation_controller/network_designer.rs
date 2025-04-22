@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use crate::simulation_controller::SC_backend::SimulationController;
 use crate::network::initializer::ParsedConfig;
 
-#[derive(Clone, Copy,PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum NodeType {
     Server,
     Client,
@@ -449,35 +449,71 @@ impl NetworkRenderer {
 
                 // Update the config if available
                 if let Some(config) = &self.config {
-                    let mut config = config.lock().unwrap();
+                    let mut cfg = config.lock().unwrap();
 
                     // Update connections in the config based on node types
                     let source_type = self.nodes[source_idx].node_type;
 
-                    match source_type {
-                        NodeType::Drone => {
-                            config.set_drone_connections(source_id as NodeId, vec![target_id as NodeId] );
-                        },
-                        NodeType::Client => {
-                            config.set_drone_connections(source_id as NodeId, vec![target_id as NodeId]);
-                        },
-                        NodeType::Server => {
-                            config.set_drone_connections(source_id as NodeId, vec![target_id as NodeId]);
-                        },
+                    let a_type = self.nodes[source_idx].node_type;
+                    let b_type = self.nodes[target_idx].node_type;
+
+                    match (a_type, b_type) {
+                        (NodeType::Drone, NodeType::Drone) => {
+                            cfg.append_drone_connection(source_id as NodeId, target_id as NodeId);
+                            cfg.append_drone_connection(target_id as NodeId, source_id as NodeId);
+                        }
+                        (NodeType::Drone, NodeType::Server) => {
+                            cfg.append_drone_connection(source_id as NodeId, target_id as NodeId);
+                            cfg.append_server_connection(target_id as NodeId, source_id as NodeId);
+                        }
+                        (NodeType::Server, NodeType::Drone) => {
+                            cfg.append_drone_connection(target_id as NodeId, source_id as NodeId);
+                            cfg.append_server_connection(source_id as NodeId, target_id as NodeId);
+                        }
+                        (NodeType::Drone, NodeType::Client) => {
+                            // Drone → Client
+                            let client = cfg.client.iter().find(|c| c.id == target_id as NodeId);
+                            if let Some(c) = client {
+                                if c.connected_drone_ids.len() >= 2 {
+                                    eprintln!("Client {} already has 2 drone connections!", target_id);
+                                    return false;
+                                }
+                            }
+
+                            cfg.append_client_connection(target_id as NodeId, source_id as NodeId);
+                            cfg.append_drone_connection(source_id as NodeId, target_id as NodeId);
+                        }
+                        (NodeType::Client, NodeType::Drone) => {
+                            // Client → Drone
+                            let client = cfg.client.iter().find(|c| c.id == source_id as NodeId);
+                            if let Some(c) = client {
+                                if c.connected_drone_ids.len() >= 2 {
+                                    eprintln!("Client {} already has 2 drone connections!", source_id);
+                                    return false;
+                                }
+                            }
+
+                            cfg.append_client_connection(source_id as NodeId, target_id as NodeId);
+                            cfg.append_drone_connection(target_id as NodeId, source_id as NodeId);
+                        }
+                        _ => {
+                            eprintln!("Unsupported connection: {:?} ↔ {:?}", a_type, b_type);
+                        }
                     }
                 }
+                if let Some(ctrl_arc) = &self.simulation_controller {
+                    let mut ctrl = ctrl_arc.lock().unwrap();
+                    ctrl.add_connection(source_id as NodeId, target_id as NodeId);
+                }
 
-                // If we have a controller sender, notify about the new connection
-                /*if let Some(sender) = &self.controller_sender {
-                    let _ = sender.send(DroneEvent::ConnectionAdded(source_id as NodeId, target_id as NodeId));
-                }*/
 
                 return true;
+                }
             }
-        }
 
         false
     }
+
 
     fn setup_star(&mut self, _x_offset: f32, _y_offset: f32) {
         const WINDOW_WIDTH: f32 = 600.0;
@@ -825,58 +861,90 @@ impl NetworkRenderer {
                         NodeType::Client => "Type: Client".to_string(),
                         NodeType::Drone  => "Type: Drone".to_string(),
                     });
+                    // Show neighbors from the config
+                    if let Some(cfg) = &self.config {
+                        let cfg = cfg.lock().unwrap();
+
+                        let neighbors = match node_type {
+                            NodeType::Drone => cfg.drone.iter()
+                                .find(|d| d.id == node_id)
+                                .map(|d| d.connected_node_ids.clone())
+                                .unwrap_or_default(),
+
+                            NodeType::Client => cfg.client.iter()
+                                .find(|c| c.id == node_id)
+                                .map(|c| c.connected_drone_ids.clone())
+                                .unwrap_or_default(),
+
+                            NodeType::Server => cfg.server.iter()
+                                .find(|s| s.id == node_id)
+                                .map(|s| s.connected_drone_ids.clone())
+                                .unwrap_or_default(),
+                        };
+
+                        let list = if neighbors.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            neighbors.iter().map(|id| format!("{}", id)).collect::<Vec<_>>().join(", ")
+                        };
+
+                        ui.label(format!("Connected to: [{}]", list));
+                    }
+
 
                     if let NodeType::Drone = node_type {
-                        // draw the slider and detect any change
-                        let mut new_pdr = self.pdr_value;
-                        ui.add(egui::Slider::new(&mut new_pdr, 0.0..=1.0).text("PDR"));
+                        if self.nodes[idx].active {
+                            // ✅ Draw editable controls only if the drone is active
 
-                        if (new_pdr - self.pdr_value).abs() > f32::EPSILON {
-                            // 1) update local
-                            self.pdr_value       = new_pdr;
-                            self.nodes[idx].pdr  = new_pdr;
-                            // 2) persist in config
-                            if let Some(cfg) = &self.config {
-                                cfg.lock().unwrap()
-                                    .set_drone_pdr(node_id, new_pdr);
-                            }
-                            // 3) notify controller
-                            if let Some(ctrl) = &self.simulation_controller {
-                                let _ = ctrl.lock().unwrap()
-                                    .set_packet_drop_rate(node_id, new_pdr);
-                            }
-                        }
-                        ui.horizontal(|ui| {
-                            if ui.button("Crash Node").clicked() {
-                                should_crash = true;
+                            let mut new_pdr = self.pdr_value;
+                            ui.add(egui::Slider::new(&mut new_pdr, 0.0..=1.0).text("PDR"));
+
+                            if (new_pdr - self.pdr_value).abs() > f32::EPSILON {
+                                self.pdr_value = new_pdr;
+                                self.nodes[idx].pdr = new_pdr;
+
+                                if let Some(cfg) = &self.config {
+                                    cfg.lock().unwrap().set_drone_pdr(node_id, new_pdr);
+                                }
+
+                                if let Some(ctrl) = &self.simulation_controller {
+                                    let _ = ctrl.lock().unwrap().set_packet_drop_rate(node_id, new_pdr);
+                                }
                             }
 
-                            let mut pending_connection: Option<NodeId> = None;
+                            ui.horizontal(|ui| {
+                                if ui.button("Crash Node").clicked() {
+                                    should_crash = true;
+                                }
 
-                            // Inline “Add Connection” via ComboBox over self.nodes
-                            egui::ComboBox::from_label("Connect to:")
-                                .selected_text("select peer")
-                                .show_ui(ui, |ui| {
-                                    // iterate all active drones except this one
+                                let mut pending_connection: Option<NodeId> = None;
 
-                                    for peer in self.nodes.iter() {
-                                        if peer.node_type == NodeType::Drone
-                                            && peer.active
-                                            && peer.id as NodeId != node_id
-                                        {
-                                            let label = format!("Drone {}", peer.id);
-                                            if ui.selectable_label(false, label).clicked() {
-                                                pending_connection = Some(peer.id as NodeId);
-                                                ui.close_menu();
+                                egui::ComboBox::from_label("Connect to:")
+                                    .selected_text("select peer")
+                                    .show_ui(ui, |ui| {
+                                        for peer in self.nodes.iter() {
+                                            if peer.active && peer.id as NodeId != node_id {
+                                                let label = match peer.node_type {
+                                                    NodeType::Drone => format!("Drone {}", peer.id),
+                                                    NodeType::Client => format!("Client {}", peer.id),
+                                                    NodeType::Server => format!("Server {}", peer.id),
+                                                };
+                                                if ui.selectable_label(false, label).clicked() {
+                                                    pending_connection = Some(peer.id as NodeId);
+                                                    ui.close_menu();
+                                                }
                                             }
                                         }
-                                    }
-                                });
-                            if let Some(peer_id) = pending_connection {
-                                self.add_connection(node_id as usize, peer_id as usize);
-                            }
-                        });
+                                    });
 
+                                if let Some(peer_id) = pending_connection {
+                                    self.add_connection(node_id as usize, peer_id as usize);
+                                }
+                            });
+                        } else {
+                            // 🚫 Read-only mode for inactive drone
+                            ui.label("This drone is inactive (crashed). PDR and connections cannot be changed.");
+                        }
                     }
 
                     if ui.button("Close").clicked() {
