@@ -13,6 +13,7 @@ use wg_2024::controller::{DroneCommand, DroneEvent};
 use wg_2024::drone::Drone;
 use wg_2024::network::NodeId;
 use wg_2024::packet::Packet;
+use crate::simulation_controller::chatUI::{ChatMessage, ChatUIState};
 
 enum AppState {
     Welcome,
@@ -50,6 +51,7 @@ pub struct NetworkApp {
     new_drone_id: NodeId,
     new_drone_pdr: f32,
     new_drone_connections_str: String,
+    chat_ui:ChatUIState,
 }
 
 impl NetworkApp {
@@ -519,19 +521,64 @@ impl NetworkApp {
 
     fn render_chat_view(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            // Chat messages display
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                for message in &self.chat_messages {
-                    ui.label(message);
+            ui.heading("Online Clients");
+            ui.horizontal_wrapped(|ui| {
+                for &client_id in &self.chat_ui.online_clients {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(Color32::GREEN, "●");
+                        ui.label(format!("Client #{}", client_id));
+                    });
                 }
             });
 
-            // Chat input
+            ui.separator();
+            ui.heading("Chat");
+            egui::ScrollArea::vertical()
+                .max_height(200.0)
+                .show(ui, |ui| {
+                    for msg in &self.chat_ui.messages {
+                        ui.label(format!("From Client #{}: {}", msg.from, msg.content));
+                    }
+                });
+
+            ui.separator();
             ui.horizontal(|ui| {
-                ui.text_edit_singleline(&mut self.chat_input);
-                if ui.button("Send").clicked() && !self.chat_input.is_empty() {
-                    self.chat_messages.push(self.chat_input.clone());
-                    self.chat_input.clear();
+                ui.label("To:");
+                egui::ComboBox::from_id_source("recipient_combo")
+                    .selected_text(
+                        self.chat_ui
+                            .selected_recipient
+                            .map_or("Select...".into(), |id| format!("Client #{}", id)),
+                    )
+                    .show_ui(ui, |ui| {
+                        for &id in &self.chat_ui.online_clients {
+                            if ui
+                                .selectable_label(self.chat_ui.selected_recipient == Some(id), format!("Client #{}", id))
+                                .clicked()
+                            {
+                                self.chat_ui.selected_recipient = Some(id);
+                            }
+                        }
+                    });
+            });
+
+            ui.horizontal(|ui| {
+                let input = ui
+                    .add(egui::TextEdit::singleline(&mut self.chat_ui.input).hint_text("Type message..."))
+                    .lost_focus();
+                if ui.button("Send").clicked()
+                    || input && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                {
+                    if let Some(to) = self.chat_ui.selected_recipient {
+                        if !self.chat_ui.input.trim().is_empty() {
+                            // 👇 Simulated sending logic
+                            self.chat_ui.messages.push(ChatMessage {
+                                from: 1, // TODO: Replace with actual client ID
+                                content: format!("To Client #{}: {}", to, self.chat_ui.input.trim()),
+                            });
+                            self.chat_ui.input.clear();
+                        }
+                    }
                 }
             });
         });
@@ -609,6 +656,7 @@ impl Default for NetworkApp {
             new_drone_id: 0,
             new_drone_pdr: 0.0,
             new_drone_connections_str: String::new(),
+            chat_ui: ChatUIState::new(),
         }
     }
 }
