@@ -156,58 +156,94 @@ impl NetworkApp {
 
     // This function is kept for the UI but delegates to NetworkRenderer if possible
     fn crash_drone(&mut self, drone_id: NodeId) {
-        // Use the simulation controller directly since we don't have a Crashed event
-        if let Some(controller) = &self.simulation_controller {
-            let mut controller = controller.lock().unwrap();
+        if let Some(ctrl_arc) = &self.simulation_controller {
+            let mut ctrl = ctrl_arc.lock().unwrap();
 
-            match controller.crash_drone(drone_id) {
+            match ctrl.crash_drone(drone_id) {
                 Ok(_) => {
-                    self.simulation_log.push(format!("Drone {} crashed successfully", drone_id));
+                    self.simulation_log.push(format!("✅ Drone {} crashed successfully", drone_id));
 
-                    // Update network renderer if needed
+                    // ✅ Only now update the visual state
                     if let Some(renderer) = &mut self.network_renderer {
-                        renderer.sync_with_simulation_controller();
+                        if let Some(&idx) = renderer.node_id_to_index.get(&drone_id) {
+                            renderer.nodes[idx].active = false;
+                            renderer.remove_edges_of_crashed_node(idx);
+                        }
+                        renderer.sync_connections_with_config(); // Optional
                     }
-                },
+                }
                 Err(e) => {
-                    self.simulation_log.push(format!("Failed to crash drone {}: {}", drone_id, e));
+                    self.simulation_log.push(format!("SC refused to crash {}: {}", drone_id, e));
+
+                    // 🚫 Do NOT update the renderer here!
                 }
             }
-            // after controller.crash_drone(...)
-            if let (Some(renderer), Some(cfg_arc)) =
-                (&mut self.network_renderer, &self.network_config)
-            {
-                renderer.build_from_config(cfg_arc.clone());
-            }
-
         }
     }
 
     // This function is kept for the UI but delegates to NetworkRenderer if possible
     fn set_packet_drop_rate(&mut self, drone_id: NodeId, rate: f32) {
-        // Use the simulation controller directly since we don't have a PacketDropRateChanged event
-        if let Some(controller) = &self.simulation_controller {
-            let mut controller = controller.lock().unwrap();
+        // 1) tell the SC
+        if let Some(ctrl_arc) = &self.simulation_controller {
+            let mut ctrl = ctrl_arc.lock().unwrap();
+            if let Err(e) = ctrl.set_packet_drop_rate(drone_id, rate) {
+                self.simulation_log.push(format!("Failed to set PDR {}→{}: {}", drone_id, rate, e));
+                return;
+            }
+            self.simulation_log.push(format!("Set PDR for drone {} to {}", drone_id, rate));
+        }
 
-            match controller.set_packet_drop_rate(drone_id, rate) {
-                Ok(_) => {
-                    self.simulation_log.push(format!("Set packet drop rate for drone {} to {}", drone_id, rate));
+        // 2) persist in config
+        if let Some(cfg_arc) = &self.network_config {
+            let mut cfg = cfg_arc.lock().unwrap();
+            cfg.set_drone_pdr(drone_id, rate);
+        }
 
-                    // Update network renderer if needed
-                    if let Some(renderer) = &mut self.network_renderer {
-                        renderer.sync_with_simulation_controller();
-                    }
-                },
-                Err(e) => {
-                    self.simulation_log.push(format!("Failed to set packet drop rate for drone {}: {}", drone_id, e));
+        // 3) no need for full rebuild—just sync positions & statuses
+        if let Some(renderer) = &mut self.network_renderer {
+            renderer.sync_with_simulation_controller();
+        }
+    }
+
+    fn add_connection(&mut self, a: NodeId, b: NodeId) {
+        // 1) ask the SC to wire up channels both ways
+        if let Some(ctrl_arc) = &self.simulation_controller {
+            let mut ctrl = ctrl_arc.lock().unwrap();
+            // You’ll need to expose a method on SC like `connect(a, b)`
+            if let Err(e) = ctrl.add_link(a, b) {
+                self.simulation_log.push(format!("SC refused link {}↔{}: {}", a, b, e));
+                return;
+            }
+        }
+
+        // 2) update config
+        if let Some(cfg_arc) = &self.network_config {
+            let mut cfg = cfg_arc.lock().unwrap();
+            // add b to a’s list
+            if let Some(dr) = cfg.drone.iter_mut().find(|d| d.id == a) {
+                if !dr.connected_node_ids.contains(&b) {
+                    dr.connected_node_ids.push(b);
+                }
+            }
+            // and a to b’s list
+            if let Some(dr) = cfg.drone.iter_mut().find(|d| d.id == b) {
+                if !dr.connected_node_ids.contains(&a) {
+                    dr.connected_node_ids.push(a);
                 }
             }
         }
+
+        // 3) rebuild GUI
+        if let (Some(r), Some(cfg_arc)) = (&mut self.network_renderer, &self.network_config) {
+            r.build_from_config(cfg_arc.clone());
+        }
+
+        self.simulation_log.push(format!("🔗 Connected {} ↔ {}", a, b));
     }
     // Add function to spawn a new drone
     // in your GUI-side spawn_drone
     fn spawn_drone(&mut self, id: NodeId, pdr: f32, connections: Vec<NodeId>) {
-        // 1) tell the simulation–controller to actually wire it up
+        // 1) SC must approve & create channels
         if let Some(ctrl_arc) = &self.simulation_controller {
             let mut ctrl = ctrl_arc.lock().unwrap();
             if let Err(e) = ctrl.spawn_drone(id, pdr, connections.clone()) {
@@ -216,31 +252,30 @@ impl NetworkApp {
             }
         }
 
-        // 2) update the authoritative config
+        // 2) update the shared TOML config
         if let Some(cfg_arc) = &self.network_config {
             let mut cfg = cfg_arc.lock().unwrap();
             cfg.add_drone(id);
             cfg.set_drone_pdr(id, pdr);
             cfg.set_drone_connections(id, connections.clone());
-            // and make each neighbor bidirectional:
+            // make each peer bidirectional:
             for &peer in &connections {
-                if let Some(d) = cfg.drone.iter_mut().find(|d| d.id == peer) {
-                    d.connected_node_ids.push(id);
+                if let Some(dr) = cfg.drone.iter_mut().find(|d| d.id == peer) {
+                    if !dr.connected_node_ids.contains(&id) {
+                        dr.connected_node_ids.push(id);
+                    }
                 }
             }
         }
 
         // 3) rebuild the entire renderer
-        if let (Some(renderer), Some(cfg_arc)) =
-            (&mut self.network_renderer, &self.network_config)
-        {
+        if let (Some(renderer), Some(cfg_arc)) = (&mut self.network_renderer, &self.network_config) {
             renderer.build_from_config(cfg_arc.clone());
         }
 
         self.simulation_log.push(format!("🎉 Spawned drone {}", id));
 
     }
-
     fn render_simulation_tabs(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("tabs_panel").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -354,37 +389,19 @@ impl NetworkApp {
                 .show(ctx, |ui| {
                     ui.label("Drone ID:");
                     ui.add(egui::DragValue::new(&mut self.new_drone_id).range(0..=100));
+
                     ui.label("Packet Drop Rate:");
                     ui.add(egui::Slider::new(&mut self.new_drone_pdr, 0.0..=1.0));
+
                     ui.label("Connections (comma separated):");
                     ui.text_edit_singleline(&mut self.new_drone_connections_str);
 
-                    // Show available nodes for connections
+                    // available‐nodes foldout…
                     if let Some(renderer) = &self.network_renderer {
                         ui.collapsing("Available Nodes", |ui| {
-                            ui.label("Drone IDs:");
-                            let drone_ids = renderer.get_drone_ids();
-                            if !drone_ids.is_empty() {
-                                ui.label(format!("{:?}", drone_ids));
-                            } else {
-                                ui.label("No drones available");
-                            }
-
-                            ui.label("Client IDs:");
-                            let client_ids = renderer.get_client_ids();
-                            if !client_ids.is_empty() {
-                                ui.label(format!("{:?}", client_ids));
-                            } else {
-                                ui.label("No clients available");
-                            }
-
-                            ui.label("Server IDs:");
-                            let server_ids = renderer.get_server_ids();
-                            if !server_ids.is_empty() {
-                                ui.label(format!("{:?}", server_ids));
-                            } else {
-                                ui.label("No servers available");
-                            }
+                            ui.label(format!("Drone IDs: {:?}", renderer.get_drone_ids()));
+                            ui.label(format!("Client IDs: {:?}", renderer.get_client_ids()));
+                            ui.label(format!("Server IDs: {:?}", renderer.get_server_ids()));
                         });
                     }
 
@@ -393,14 +410,14 @@ impl NetworkApp {
                             self.show_spawn_drone_popup = false;
                         }
                         if ui.button("Spawn").clicked() {
-                            // Parse connections
+                            // 1) parse
                             let connections: Vec<NodeId> = self
                                 .new_drone_connections_str
                                 .split(',')
                                 .filter_map(|s| s.trim().parse().ok())
                                 .collect();
 
-                            // Validate
+                            // 2) validate
                             let already_exists = self
                                 .network_renderer
                                 .as_ref()
@@ -414,10 +431,8 @@ impl NetworkApp {
                             });
 
                             if already_exists {
-                                self.simulation_log.push(format!(
-                                    "Cannot spawn: ID {} already in use",
-                                    self.new_drone_id
-                                ));
+                                self.simulation_log
+                                    .push(format!("Cannot spawn: ID {} already in use", self.new_drone_id));
                             } else if connections.is_empty() {
                                 self.simulation_log
                                     .push("Cannot spawn: need at least one connection".into());
@@ -425,16 +440,17 @@ impl NetworkApp {
                                 self.simulation_log
                                     .push("Cannot spawn: invalid connection IDs".into());
                             } else {
-                                // Safe to spawn
-                                self.spawn_drone(self.new_drone_id, self.new_drone_pdr, connections);
+                                // 3) spawn + rebuild
+                                self.spawn_drone(self.new_drone_id, self.new_drone_pdr, connections.clone());
                                 self.show_spawn_drone_popup = false;
                                 self.new_drone_connections_str.clear();
-                                self.show_spawn_drone_popup = false;
+                                ctx.request_repaint();
                             }
                         }
                     });
                 });
         }
+
     }
 
     fn render_welcome_screen(&mut self, ctx: &egui::Context) {

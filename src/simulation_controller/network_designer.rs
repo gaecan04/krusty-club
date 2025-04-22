@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use crate::simulation_controller::SC_backend::SimulationController;
 use crate::network::initializer::ParsedConfig;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy,PartialEq)]
 pub enum NodeType {
     Server,
     Client,
@@ -75,7 +75,7 @@ impl Topology {
 }
 
 pub(crate) struct NetworkRenderer {
-    nodes: Vec<Node>,
+    pub(crate) nodes: Vec<Node>,
     edges: Vec<(usize, usize)>,
     selected_node: Option<usize>,
     pub scale: f32,
@@ -163,7 +163,7 @@ impl NetworkRenderer {
     }
 
     // Sync connections with config to ensure they're consistent
-    fn sync_connections_with_config(&mut self) {
+    pub(crate) fn sync_connections_with_config(&mut self) {
         if let Some(config) = &self.config {
             let config = config.lock().unwrap();
 
@@ -261,6 +261,10 @@ impl NetworkRenderer {
 
     // Build network from config
     pub(crate) fn build_from_config(&mut self, config: Arc<Mutex<ParsedConfig>>) {
+        let mut previous_states = HashMap::new();
+        for node in &self.nodes {
+            previous_states.insert(node.id, node.active);
+        }
         // Clear existing nodes and edges
         self.nodes.clear();
         self.edges.clear();
@@ -288,10 +292,21 @@ impl NetworkRenderer {
             let x = (node_index % grid_size) as f32 * cell_width + cell_width;
             let y = (node_index / grid_size) as f32 * cell_height + cell_height;
 
-            self.nodes.push(Node::drone(drone.id as usize, x, y,drone.pdr));
+            // 👇 Recover the active state if it was set before
+            let active = previous_states.get(&(drone.id as usize)).copied().unwrap_or(true);
+
+            self.nodes.push(Node {
+                id: drone.id as usize,
+                node_type: NodeType::Drone,
+                pdr: drone.pdr,
+                active,
+                position: (x, y),
+            });
+
             self.node_id_to_index.insert(drone.id, self.nodes.len() - 1);
             node_index += 1;
         }
+
 
         // Add clients
         for client in &config.client {
@@ -642,7 +657,7 @@ impl NetworkRenderer {
     }
 
     /// node_id is the actual NodeId (u8) — we look up its internal index before removing.
-    fn remove_edges_of_crashed_node(&mut self, idx: usize) {
+    pub(crate) fn remove_edges_of_crashed_node(&mut self, idx: usize) {
         self.edges.retain(|&(a, b)| a != idx && b != idx);
 
         // Update the config if available
@@ -725,9 +740,23 @@ impl NetworkRenderer {
                 if a < self.nodes.len() && b < self.nodes.len() {
                     let pos_a = Pos2::new(self.nodes[a].position.0, self.nodes[a].position.1);
                     let pos_b = Pos2::new(self.nodes[b].position.0, self.nodes[b].position.1);
-                    painter.line_segment([pos_a, pos_b], (2.0, Color32::GRAY));
+
+                    let node_a_type = self.nodes[a].node_type;
+                    let node_b_type = self.nodes[b].node_type;
+
+                    // Determine edge color based on what it's connected to
+                    let color = if node_a_type == NodeType::Server || node_b_type == NodeType::Server {
+                        Color32::BLUE
+                    } else if node_a_type == NodeType::Client || node_b_type == NodeType::Client {
+                        Color32::YELLOW
+                    } else {
+                        Color32::GRAY
+                    };
+
+                    painter.line_segment([pos_a, pos_b], (2.0, color));
                 }
             }
+
         }
 
         // Handle node interaction
@@ -780,9 +809,8 @@ impl NetworkRenderer {
                 self.last_opened = Some(idx);
             }
 
-            let mut should_close      = false;
-            let mut should_crash      = false;
-            let mut should_add_sender = false;
+            let mut should_close = false;
+            let mut should_crash = false;
 
             let node_id   = self.nodes[idx].id as NodeId;
             let node_type = self.nodes[idx].node_type;
@@ -805,8 +833,8 @@ impl NetworkRenderer {
 
                         if (new_pdr - self.pdr_value).abs() > f32::EPSILON {
                             // 1) update local
-                            self.pdr_value          = new_pdr;
-                            self.nodes[idx].pdr     = new_pdr;
+                            self.pdr_value       = new_pdr;
+                            self.nodes[idx].pdr  = new_pdr;
                             // 2) persist in config
                             if let Some(cfg) = &self.config {
                                 cfg.lock().unwrap()
@@ -818,19 +846,37 @@ impl NetworkRenderer {
                                     .set_packet_drop_rate(node_id, new_pdr);
                             }
                         }
-
                         ui.horizontal(|ui| {
                             if ui.button("Crash Node").clicked() {
                                 should_crash = true;
                             }
-                            if ui.button("Add Connection").clicked() {
-                                should_add_sender = true;
+
+                            let mut pending_connection: Option<NodeId> = None;
+
+                            // Inline “Add Connection” via ComboBox over self.nodes
+                            egui::ComboBox::from_label("Connect to:")
+                                .selected_text("select peer")
+                                .show_ui(ui, |ui| {
+                                    // iterate all active drones except this one
+
+                                    for peer in self.nodes.iter() {
+                                        if peer.node_type == NodeType::Drone
+                                            && peer.active
+                                            && peer.id as NodeId != node_id
+                                        {
+                                            let label = format!("Drone {}", peer.id);
+                                            if ui.selectable_label(false, label).clicked() {
+                                                pending_connection = Some(peer.id as NodeId);
+                                                ui.close_menu();
+                                            }
+                                        }
+                                    }
+                                });
+                            if let Some(peer_id) = pending_connection {
+                                self.add_connection(node_id as usize, peer_id as usize);
                             }
                         });
-                    } else {
-                        if ui.button("Add Connection").clicked() {
-                            should_add_sender = true;
-                        }
+
                     }
 
                     if ui.button("Close").clicked() {
@@ -840,19 +886,40 @@ impl NetworkRenderer {
 
             // Crash logic
             if should_crash {
-                self.nodes[idx].active = false;
-                self.remove_edges_of_crashed_node(idx);
-                self.update_network();
+                let crash_allowed = if let Some(ctrl_arc) = &self.simulation_controller {
+                    let mut ctrl = ctrl_arc.lock().unwrap();
+                    match ctrl.crash_drone(node_id as NodeId) {
+                        Ok(_) => true,
+                        Err(e) => {
+                            eprintln!("SC refused to crash {}: {}", node_id, e);
+                            false
+                        }
+                    }
+                } else {
+                    false
+                };
+
+                if crash_allowed {
+                    // ✅ Now it's safe to mutably borrow self
+                    self.nodes[idx].active = false;
+
+                    if let Some(cfg_arc) = &self.config {
+                        let mut cfg = cfg_arc.lock().unwrap();
+                        cfg.remove_drone_connections(node_id as NodeId);
+                    }
+
+                    if let Some(cfg_arc) = &self.config {
+                        self.build_from_config(cfg_arc.clone());
+                    }
+                }
             }
 
-            if should_add_sender {
-                self.update_network();
-            }
+
 
             // Close and reset
             if should_close {
                 self.selected_node = None;
-                self.last_opened    = None;
+                self.last_opened   = None;
             }
         }
     }
