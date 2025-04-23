@@ -118,7 +118,7 @@ impl server {
             self.handle_complete_message(key, routing_header.clone());
         }
     }
-    fn handle_complete_message(&mut self, key: (u64, NodeId), routing_header: SourceRoutingHeader) {
+    /*fn handle_complete_message(&mut self, key: (u64, NodeId), routing_header: SourceRoutingHeader) {
         let fragments = self.received_fragments.remove(&key).unwrap();
         let total_length = fragments.len() * 128 - 128 + self.fragment_lengths.remove(&key).unwrap_or(128) as usize;
 
@@ -134,9 +134,10 @@ impl server {
         message.truncate(total_length);
         info!("Server reassembled message for session {:?}: {:?}", key, message);
 
+
         //chat server implementation:
         let message_string = String::from_utf8_lossy(&message).to_string();
-        let session_id:u8 = key.0 as u8;
+        let session_id: u64 = key.0;
         let client_id = key.1;
 
         let tokens: Vec<&str> = message_string.trim().splitn(3, ':').collect();
@@ -144,7 +145,7 @@ impl server {
         match tokens.as_slice() {
             ["registration_to_chat"] => {
                 self.registered_clients
-                    .entry(session_id)
+                    .entry(session_id as NodeId)
                     .or_default()
                     .push(client_id);
                 info!("Client {} registered to chat in session {}", client_id, session_id);
@@ -153,7 +154,7 @@ impl server {
                 if let Some(sender) = self.packet_sender.get(&client_id) {
                     let clients = self
                         .registered_clients
-                        .get(&session_id)
+                        .get(&(session_id as NodeId))
                         .cloned()
                         .unwrap_or_default();
                     let response = format!("client_list!: {:?}", clients);
@@ -163,7 +164,7 @@ impl server {
             ["message_for?", target_id_str, msg] => {
                 if let Ok(target_id) = target_id_str.parse::<NodeId>() {
                     if (self.registered_clients
-                        .get(&session_id)
+                        .get(&(session_id as NodeId))
                         .map_or(false, |list| list.contains(&target_id)))
                     {
                         let response = format!("message_from!:{}:{}", client_id, msg);
@@ -179,7 +180,86 @@ impl server {
             }
         }
 
+    }*/
+
+
+    fn handle_complete_message(&mut self, key: (u64, NodeId), routing_header: SourceRoutingHeader) {
+        let fragments = self.received_fragments.remove(&key).unwrap();
+        let total_length = fragments.len() * 128 - 128 + self.fragment_lengths.remove(&key).unwrap_or(128) as usize;
+
+        let mut message = Vec::with_capacity(total_length);
+        for fragment in fragments {
+            message.extend_from_slice(&fragment.unwrap());
+        }
+        message.truncate(total_length);
+
+        let message_string = String::from_utf8_lossy(&message).to_string();
+        let session_id: u64 = key.0;
+        let client_id = key.1;
+
+        let tokens: Vec<&str> = message_string.trim().splitn(3, ':').collect();
+
+        match tokens.as_slice() {
+            ["[Login]"] => {
+                self.registered_clients
+                    .entry(session_id as NodeId)
+                    .or_default()
+                    .push(client_id);
+                info!("Client {} registered to chat in session {}", client_id, session_id);
+            }
+            ["[ClientListRequest]"] => {
+                if let Some(sender) = self.packet_sender.get(&client_id) {
+                    let clients = self
+                        .registered_clients
+                        .get(&(session_id as NodeId))
+                        .cloned()
+                        .unwrap_or_default();
+                    let response = format!("[ClientListResponse]::{:?}", clients);
+                    self.send_chat_message(session_id, client_id, response, routing_header);
+                }
+            }
+            ["[ChatRequest]", target_id_str] => {
+                if let Ok(target_id) = target_id_str.parse::<NodeId>() {
+                    let success = self.registered_clients
+                        .get(&(session_id as NodeId))
+                        .map_or(false, |list| list.contains(&target_id));
+                    let response = format!("[ChatStart]::{}", success);
+                    self.send_chat_message(session_id, client_id, response, routing_header);
+                }
+            }
+            ["[MessageTo]", target_id_str, msg] => {
+                if let Ok(target_id) = target_id_str.parse::<NodeId>() {
+                    if self.registered_clients
+                        .get(&(session_id as NodeId))
+                        .map_or(false, |list| list.contains(&target_id))
+                    {
+                        let response = format!("[MessageFrom]::{}::{}", client_id, msg);
+                        self.send_chat_message(session_id, target_id, response, routing_header);
+                    } else {
+                        self.send_chat_message(session_id, client_id, "error_wrong_client_id!".to_string(), routing_header);
+                    }
+                }
+            }
+            ["[ChatFinish]"] => {
+                if let Some(clients) = self.registered_clients.get_mut(&(session_id as NodeId)) {
+                    clients.retain(|&id| id != client_id);
+                    info!("Client {} finished chat in session {}", client_id, session_id);
+                }
+            }
+            ["[Logout]"] => {
+                if let Some(clients) = self.registered_clients.get_mut(&(session_id as NodeId)) {
+                    clients.retain(|&id| id != client_id);
+                    info!("Client {} logged out from session {}", client_id, session_id);
+                }
+            }
+            _ => {
+                warn!("Unrecognized message: {}", message_string);
+                info!("Reassembled message for session {:?}: {:?}", key, message);
+            }
+        }
     }
+
+
     //fn process_nack(&mut self, nack: &Nack, packet: &mut Packet)
     fn handle_nack(&mut self, session_id: u64, nack: &Nack, routing_header: SourceRoutingHeader) {
 
