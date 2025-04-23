@@ -197,7 +197,7 @@ impl server {
         let session_id: u64 = key.0;
         let client_id = key.1;
 
-        let tokens: Vec<&str> = message_string.trim().splitn(3, ':').collect();
+        let tokens: Vec<&str> = message_string.trim().splitn(3, "::").collect();
 
         match tokens.as_slice() {
             ["[Login]"] => {
