@@ -134,33 +134,186 @@ impl ParsedConfig {
     }
 
 
-        pub fn detect_topology(&self) -> Option<String> {
-            let drone_count = self.drone.len();
-            let mut drone_degrees = self.drone.iter().map(|d| d.connected_node_ids.len()).collect::<Vec<_>>();
-            drone_degrees.sort();
+    pub fn detect_topology(&self) -> Option<String> {
+        use std::collections::{HashMap, HashSet};
+        println!("=== DETECTING TOPOLOGY ===");
+        println!("Total drones: {}", self.drone.len());
 
-            if drone_count == 10 && drone_degrees.iter().filter(|&&deg| deg == 2).count() == 10 {
-                return Some("Double Chain".to_string());
-            }
 
-            if drone_count == 10 && drone_degrees.iter().filter(|&&deg| deg == 2 || deg == 3).count() >= 8 {
-                return Some("Star".to_string());
-            }
-
-            if drone_count == 10 && drone_degrees.iter().all(|&d| d == 2 || d == 3) {
-                return Some("Butterfly".to_string());
-            }
-
-            if drone_count == 10 && drone_degrees.contains(&6) && drone_degrees.contains(&2) {
-                return Some("Tree".to_string());
-            }
-
-            if drone_count == 10 && drone_degrees.iter().any(|&d| d == 4 || d == 5) {
-                return Some("Sub-Net".to_string());
-            }
-
-            None
+        let drone_count = self.drone.len();
+        if drone_count != 10 {
+            return None;
         }
+
+        let drone_vec: Vec<NodeId> = {
+            let mut v = self.drone.iter().map(|d| d.id).collect::<Vec<_>>();
+            v.sort(); // IDs 1..10
+            v
+        };
+
+        let drone_set: HashSet<NodeId> = drone_vec.iter().copied().collect();
+
+        println!("--- Raw drone connections ---");
+        for d in &self.drone {
+            println!("Drone {} → {:?}", d.id, d.connected_node_ids);
+        }
+
+
+        let connections: HashMap<_, HashSet<_>> = self.drone.iter()
+            .map(|d| {
+                let filtered = d.connected_node_ids
+                    .iter()
+                    .cloned()
+                    .filter(|id| drone_set.contains(id)) // 👈 Only drones
+                    .collect::<HashSet<_>>();
+                (d.id, filtered)
+            })
+            .collect();
+        println!("--- Drone-only Connections Map ---");
+        for (id, neighs) in &connections {
+            println!("Drone {} → {:?}", id, neighs);
+        }
+
+
+
+        // === STAR (Decagram) ===
+        let is_star = {
+            let mut ok = true;
+            for (i, &id) in drone_vec.iter().enumerate() {
+                let expected1 = drone_vec[(i + 3) % 10];
+                let expected2 = drone_vec[(i + 7) % 10];
+
+                if let Some(neigh) = connections.get(&id) {
+                    if neigh.len() != 2 || !(neigh.contains(&expected1) && neigh.contains(&expected2)) {
+                        ok = false;
+                        break;
+                    }
+                } else {
+                    ok = false;
+                    break;
+                }
+            }
+            ok
+        };
+
+
+        // === DOUBLE CHAIN ===
+        let is_double_chain = {
+            let mut deg2 = 0;
+            let mut deg3 = 0;
+            let mut symmetric_links = 0;
+
+            for (&a, neighbors) in &connections {
+                match neighbors.len() {
+                    2 => deg2 += 1,
+                    3 => deg3 += 1,
+                    _ => {},
+                }
+
+                for &b in neighbors {
+                    if let Some(n_b) = connections.get(&b) {
+                        if n_b.contains(&a) {
+                            symmetric_links += 1;
+                        }
+                    }
+                }
+            }
+            // Each link counted twice
+            let mutual_pairs = symmetric_links / 2;
+
+            deg2 == 4 && deg3 == 6 && mutual_pairs >= 13 // empirical check
+        };
+
+        // === BUTTERFLY ===
+
+        let is_butterfly = {
+            let mut degrees = Vec::new();
+            let mut id_to_neighbors = HashMap::new();
+
+            for d in &self.drone {
+                let filtered: Vec<NodeId> = d.connected_node_ids
+                    .iter()
+                    .filter(|&&n| drone_set.contains(&n))
+                    .cloned()
+                    .collect();
+
+                id_to_neighbors.insert(d.id, filtered.clone());
+                degrees.push(filtered.len());
+            }
+
+            let deg2 = degrees.iter().filter(|&&d| d == 2).count();
+            let deg3 = degrees.iter().filter(|&&d| d == 3).count();
+
+            // Butterfly core check
+            let has_cross_core = id_to_neighbors.get(&9).map_or(false, |n| n.contains(&5) && n.contains(&7) && n.contains(&10)) &&
+                id_to_neighbors.get(&10).map_or(false, |n| n.contains(&6) && n.contains(&8) && n.contains(&9));
+
+            println!("Collected {} drone degrees", degrees.len());
+            for (i, d) in degrees.iter().enumerate() {
+                println!("Drone {} has degree {}", drone_vec[i], d);
+            }
+
+            println!("Butterfly structural check: {}", has_cross_core);
+
+            deg2 == 4 && deg3 == 6 && has_cross_core
+        };
+
+        // === TREE ===
+        let is_tree = {
+            let mut deg2 = 0;
+            let mut deg3 = 0;
+            let mut deg4 = 0;
+            let mut deg6 = 0;
+
+            for (_id, neighbors) in &connections {
+                match neighbors.len() {
+                    2 => deg2 += 1,
+                    3 => deg3 += 1,
+                    4 => deg4 += 1,
+                    6 => deg6 += 1,
+                    _ => {}
+                }
+            }
+
+            deg2 == 1 && deg4 == 2 && deg6 == 3 && deg3 == 4
+        };
+
+    //subnet
+        let is_subnet = {
+            let high_deg = connections.values().filter(|n| n.len() >= 4).count();
+            high_deg >= 3
+        };
+
+        if is_tree {
+            println!("Detected TREE");
+            return Some("Tree".to_string());
+        }
+
+        if is_subnet {
+            println!("Detected SUB NET");
+            return Some("Sub-Net".to_string());
+        }
+        if is_star {
+            println!("Detected STAR");
+            return Some("Star".to_string());
+        }
+
+        if is_butterfly{
+            println!("Detected BUTTERFLY");
+            return Some("Butterfly".to_string());
+        }
+
+        if is_double_chain {
+            println!("Detected DOUBLE CHAIN");
+            return Some("Double Chain".to_string());
+        }
+
+
+
+
+        // Fallback
+        None
+    }
     pub fn append_drone_connection(&mut self, drone_id: NodeId, peer: NodeId) {
         if let Some(drone) = self.drone.iter_mut().find(|d| d.id == drone_id) {
             if !drone.connected_node_ids.contains(&peer) {

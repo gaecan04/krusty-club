@@ -81,8 +81,11 @@ impl NetworkApp {
 
     fn set_topology(&mut self, topology: &str) {
         // Attempt to load and parse the network configuration
-        let config_path = format!("topologies/{}.toml", topology);
-
+        let config_path = if topology.ends_with(".toml") {
+            topology.to_string()
+        } else {
+            format!("topologies/{}.toml", topology)
+        };
         match crate::network::TOML_parser::parse_config(&config_path) {
             Ok(config) => {
                 // Log success and network stats
@@ -129,6 +132,7 @@ impl NetworkApp {
                 self.simulation_log.push(format!("Failed to load topology '{}': {}", topology, e));
             }
         }
+
     }
 
     fn flood_network(&mut self) {
@@ -470,7 +474,7 @@ impl NetworkApp {
                 // Buttons with some spacing and styling
                 ui.vertical(|ui| {
                     if ui.button("Start Simulation").clicked() {
-                        self.state = AppState::Topology;
+                        self.state=AppState::Simulation
                     }
 
                     ui.add_space(20.0);
@@ -518,6 +522,44 @@ impl NetworkApp {
             });
         });
     }
+/*
+    pub fn new_with_network_and_path(
+        cc: &eframe::CreationContext<'_>,
+        controller_send: Sender<DroneEvent>,
+        config: Arc<Mutex<ParsedConfig>>,
+        drone_factory: Arc<dyn Fn(
+            NodeId,
+            Sender<DroneEvent>,
+            Receiver<DroneCommand>,
+            Receiver<Packet>,
+            HashMap<NodeId, Sender<Packet>>,
+            f32,
+        ) -> Box<dyn Drone> + Send + Sync>,
+        config_path: &str,
+    ) -> Self {
+        let mut app = Self::new(cc);
+
+        // Apply values from existing setup
+        app.controller_send = Some(controller_send.clone());
+        app.simulation_controller = Some(Arc::new(Mutex::new(SimulationController::new(
+            config.clone(),
+            controller_send,
+            crossbeam_channel::unbounded().1, // dummy event_rx for GUI-only
+            drone_factory,
+        ))));
+        app.network_config = Some(config.clone());
+
+        // Load topology in the background (but DO NOT jump to Simulation yet)
+        app.set_topology(config_path);
+        app.topology_selected = true; // Mark that we did load something
+        // BUT: Keep `app.state = AppState::Welcome` so the welcome screen still shows
+        app.state=AppState::Welcome;
+        app
+    }
+
+ */
+
+
 
     fn render_chat_view(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -583,15 +625,17 @@ impl NetworkApp {
             });
         });
     }
+
+
     pub fn new_with_network(
         cc: &eframe::CreationContext<'_>,
         controller_send: Sender<DroneEvent>,
         config: Arc<Mutex<ParsedConfig>>,
         arc: Arc<dyn Fn(NodeId, Sender<DroneEvent>, Receiver<DroneCommand>, Receiver<Packet>, HashMap<NodeId, Sender<Packet>>, f32) -> Box<dyn Drone> + Send + Sync>,
+        config_path: &str,
     ) -> Self {
         let mut app = Self::new(cc);
 
-        app.network_config = Some(config.clone());
         app.controller_send = Some(controller_send.clone());
 
         // Create drone_factory closure
@@ -623,10 +667,24 @@ impl NetworkApp {
             renderer.set_simulation_controller(controller.clone());
             app.simulation_log.push("Controller connected to network renderer".to_string());
         }
-
+        app.network_config = Some(config.clone());
+        app.detect_and_log_topology(&config_path, config.clone());
+        app.topology_selected = true;
+        app.state=AppState::Welcome;
         app
     }
 
+    pub fn detect_and_log_topology(&mut self, path: &str, config: Arc<Mutex<ParsedConfig>>) {
+        if let Some(topology_name) = config.lock().unwrap().detect_topology() {
+            self.simulation_log.push(format!("Loaded topology from '{}'", path));
+            self.simulation_log.push(format!("Detected topology: {}", topology_name));
+            self.selected_topology = Some(topology_name);
+        } else {
+            self.simulation_log.push(format!("Could not detect known topology from '{}'", path));
+        }
+
+        self.topology_selected = true;
+    }
 
 }
 

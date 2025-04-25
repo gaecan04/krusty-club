@@ -20,8 +20,8 @@ use utils::serialization_fix;
 fn main() -> Result<(), Box<dyn Error>> {
     // Config and duration
     let config_path = std::env::args()
-        .nth(2)
-        .unwrap_or_else(|| "topologies/butterfly.toml".to_string());
+        .nth(1)
+        .unwrap_or_else(|| "topologies/default.toml".to_string());
 
     let simulation_duration = std::env::args()
         .nth(3)
@@ -76,7 +76,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         run_headless_simulation(simulation_duration, parsed_config.clone(), controller.clone());
     } else {
         println!("Starting GUI application");
-        run_gui_application(event_sender.clone(), command_receiver, parsed_config, drone_factory)?;
+        run_gui_application(event_sender.clone(), command_receiver, parsed_config, drone_factory,&config_path)?;
     }
 
     Ok(())
@@ -104,10 +104,11 @@ fn run_gui_application(
     command_receiver: Receiver<DroneCommand>,
     config: Arc<Mutex<ParsedConfig>>,
     drone_factory: Arc<dyn Fn(NodeId, Sender<DroneEvent>, Receiver<DroneCommand>, Receiver<Packet>, HashMap<NodeId, Sender<Packet>>, f32) -> Box<dyn Drone> + Send + Sync>,
+    config_path: &str,
 ) -> Result<(), Box<dyn Error>> {
     let options = eframe::NativeOptions::default();
 
-    eframe::run_native(
+    /*eframe::run_native(
         "Drone Simulation",
         options,
         Box::new(|cc| {
@@ -118,9 +119,22 @@ fn run_gui_application(
                 drone_factory.clone(),
             )))
         }),
+    )?;*/
+    eframe::run_native(
+        "Drone Simulation",
+        options,
+        Box::new(|cc| {
+            Ok(Box::new(NetworkApp::new_with_network(
+                cc,
+                event_sender.clone(),
+                config.clone(),
+                drone_factory.clone(),
+                config_path,
+            )))
+        }),
     )?;
-
     Ok(())
+
 }
 
 fn initialize_network_channels(

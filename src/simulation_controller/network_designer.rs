@@ -57,8 +57,10 @@ impl Node {
 
 enum Topology {
     Star,
-    DoubleLine,
+    DoubleChain,
     Butterfly,
+    Tree,
+    SubNet,
     Custom,
 }
 
@@ -66,8 +68,10 @@ impl Topology {
     fn from_str(s: &str) -> Option<Self> {
         match s {
             "star" => Some(Topology::Star),
-            "double_line" => Some(Topology::DoubleLine),
+            "double_chain" => Some(Topology::DoubleChain),
             "butterfly" => Some(Topology::Butterfly),
+            "tree" => Some(Topology::Tree),
+            "sub-net" => Some(Topology::SubNet),
             "custom" => Some(Topology::Custom),
             _ => None,
         }
@@ -114,8 +118,11 @@ impl NetworkRenderer {
 
         match Topology::from_str(topology) {
             Some(Topology::Star) => network.setup_star(x_offset, y_offset),
-            Some(Topology::DoubleLine) => network.setup_double_line(x_offset, y_offset),
+            Some(Topology::DoubleChain) => network.setup_double_chain(x_offset, y_offset),
             Some(Topology::Butterfly) => network.setup_butterfly(x_offset, y_offset),
+            Some(Topology::Tree) => network.setup_tree(x_offset, y_offset),
+            Some(Topology::SubNet) => network.setup_subnet(x_offset, y_offset),
+
             Some(Topology::Custom) => (), // Custom topology will be set up from config
             None => println!("Invalid topology"),
         }
@@ -130,15 +137,13 @@ impl NetworkRenderer {
 
     // Create a network renderer directly from config
     pub(crate) fn new_from_config(topology: &str, x_offset: f32, y_offset: f32, config: Arc<Mutex<ParsedConfig>>) -> Self {
-        let mut network = Self::new(topology, x_offset, y_offset);
+        let mut network = Self::new("custom", x_offset, y_offset); // Force base to be empty
 
         // Store the config
         network.config = Some(config.clone());
 
-        // If this is a custom topology or we want to ensure consistency with config
-        if topology == "custom" || topology == "star" || topology == "double_line" || topology == "butterfly" {
-            network.build_from_config(config);
-        }
+        // Always build strictly from config
+        network.build_from_config(config);
 
         network
     }
@@ -575,7 +580,7 @@ impl NetworkRenderer {
         self.edges.push((client_2_id, 7));
     }
 
-    fn setup_double_line(&mut self, _x_offset: f32, _y_offset: f32) {
+    fn setup_double_chain(&mut self, _x_offset: f32, _y_offset: f32) {
         const WINDOW_WIDTH: f32 = 600.0;
         const WINDOW_HEIGHT: f32 = 400.0;
 
@@ -701,6 +706,129 @@ impl NetworkRenderer {
         self.edges.push((client_2_id, 0));  // Connect to top line
     }
 
+    fn setup_tree(&mut self, _x_offset: f32, _y_offset: f32) {
+        const WINDOW_WIDTH: f32 = 600.0;
+        const WINDOW_HEIGHT: f32 = 400.0;
+
+        let mut id = 0;
+
+        // L1 (1 node)
+        let x_l1 = WINDOW_WIDTH / 2.0;
+        let y_l1 = 50.0;
+        self.nodes.push(Node::drone(id, x_l1, y_l1, 1.0));
+        let root_id = id;
+        id += 1;
+
+        // L2 (2 nodes)
+        let y_l2 = y_l1 + 60.0;
+        let l2_ids: Vec<usize> = (0..2).map(|i| {
+            let x = 200.0 + i as f32 * 200.0;
+            self.nodes.push(Node::drone(id, x, y_l2, 1.0));
+            let l2_id = id;
+            self.edges.push((root_id, id));
+            id += 1;
+            l2_id
+        }).collect();
+
+        // L3 (3 nodes)
+        let y_l3 = y_l2 + 60.0;
+        let l3_ids: Vec<usize> = (0..3).map(|i| {
+            let x = 150.0 + i as f32 * 150.0;
+            self.nodes.push(Node::drone(id, x, y_l3, 1.0));
+            let l3_id = id;
+            for &l2 in &l2_ids {
+                self.edges.push((l2, l3_id));
+            }
+            id += 1;
+            l3_id
+        }).collect();
+
+        // L4 (4 nodes)
+        let y_l4 = y_l3 + 60.0;
+        let l4_ids: Vec<usize> = (0..4).map(|i| {
+            let x = 100.0 + i as f32 * 125.0;
+            self.nodes.push(Node::drone(id, x, y_l4, 1.0));
+            let l4_id = id;
+            for &l3 in &l3_ids {
+                self.edges.push((l3, l4_id));
+            }
+            id += 1;
+            l4_id
+        }).collect();
+
+        // Add server at top
+        self.nodes.push(Node::server(id, x_l1, y_l1 - 50.0));
+        self.edges.push((id, root_id));
+        self.edges.push((id, l2_ids[0]));
+        id += 1;
+
+        // Add two clients connected to bottom leaves
+        self.nodes.push(Node::client(id, 50.0, y_l4 + 50.0));
+        self.edges.push((id, l4_ids[0]));
+        id += 1;
+
+        self.nodes.push(Node::client(id, WINDOW_WIDTH - 50.0, y_l4 + 50.0));
+        self.edges.push((id, l4_ids[3]));
+    }
+
+
+    fn setup_subnet(&mut self, _x_offset: f32, _y_offset: f32) {
+        const WINDOW_WIDTH: f32 = 600.0;
+        const WINDOW_HEIGHT: f32 = 400.0;
+
+        let mut id = 0;
+
+        // Group A: left 5 drones in a star shape
+        let center_a = (150.0, WINDOW_HEIGHT / 2.0);
+        for i in 0..5 {
+            let angle = i as f32 * (std::f32::consts::TAU / 5.0);
+            let x = center_a.0 + 50.0 * angle.cos();
+            let y = center_a.1 + 50.0 * angle.sin();
+            self.nodes.push(Node::drone(id, x, y, 1.0));
+            id += 1;
+        }
+
+        // Connect Group A drones in a star-like pattern
+        for i in 0..5 {
+            self.edges.push((i, (i + 2) % 5));
+        }
+
+        // Group B: right 5 drones in another star
+        let center_b = (450.0, WINDOW_HEIGHT / 2.0);
+        for i in 0..5 {
+            let angle = i as f32 * (std::f32::consts::TAU / 5.0);
+            let x = center_b.0 + 50.0 * angle.cos();
+            let y = center_b.1 + 50.0 * angle.sin();
+            self.nodes.push(Node::drone(id, x, y, 1.0));
+            id += 1;
+        }
+
+        // Connect Group B drones in a star-like pattern
+        for i in 5..10 {
+            self.edges.push((i, 5 + (i + 2) % 5));
+        }
+
+        // Interconnect 2 drones from each group
+        self.edges.push((0, 5)); // bridge
+        self.edges.push((2, 7)); // bridge
+
+        // Add a server and two clients
+        self.nodes.push(Node::server(id, WINDOW_WIDTH / 2.0, 50.0));
+        self.edges.push((id, 0));
+        self.edges.push((id, 5));
+        id += 1;
+
+        self.nodes.push(Node::client(id, 50.0, WINDOW_HEIGHT - 30.0));
+        self.edges.push((id, 3));
+        id += 1;
+
+        self.nodes.push(Node::client(id, WINDOW_WIDTH - 50.0, WINDOW_HEIGHT - 30.0));
+        self.edges.push((id, 8));
+    }
+
+
+
+
     /// node_id is the actual NodeId (u8) — we look up its internal index before removing.
     pub(crate) fn remove_edges_of_crashed_node(&mut self, idx: usize) {
         self.edges.retain(|&(a, b)| a != idx && b != idx);
@@ -730,6 +858,7 @@ impl NetworkRenderer {
     }
 
 
+
         /// Remove every edge incident on `node_id`, and clean up the config.
     /*pub fn remove_edges_of_crashed_node(&mut self, node_id: usize) {
         // 1) Find the index in `self.nodes` for that NodeId.
@@ -751,6 +880,7 @@ impl NetworkRenderer {
 
 
     pub fn render(&mut self, ui: &mut egui::Ui) {
+            /*
         // Draw network controls
         ui.horizontal(|ui| {
             if ui.button("Add Drone").clicked() {
@@ -777,7 +907,7 @@ impl NetworkRenderer {
                 }
             }
         });
-
+*/
         // Draw edges first
         {
             let painter = ui.painter();
@@ -1064,5 +1194,6 @@ impl NetworkRenderer {
             }
         }
     }
+
 
 }
