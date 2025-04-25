@@ -33,6 +33,7 @@ wg_2024-rust = {git = "https://github.com/LuigiMiazzo17/unitn-advancedProgrammin
 rolling_drone = { git = "https://github.com/giorebecchi/RollingDrone.git"}
 rustafarian-drone = {git = "https://github.com/Rustafarian-Unitn/rustafarian-drone"}
 bincode = "2.0.1"
+image = "0.25.6"
 
 
 [features]

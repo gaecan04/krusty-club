@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use eframe::{egui, App, CreationContext};
 use eframe::egui::{Stroke, StrokeKind};
-use egui::{Color32, RichText, Vec2, Rect, Sense, Shape};
+use egui::{Color32, RichText, Vec2, Rect, Sense, Shape, Pos2};
 use crate::network::initializer::{MyDrone, ParsedConfig};
 use crate::simulation_controller::network_designer::NetworkRenderer;
 use std::thread;
@@ -79,7 +79,8 @@ impl NetworkApp {
         app
     }
 
-    fn set_topology(&mut self, topology: &str) {
+    /*
+    fn set_topology(&mut self, topology: &str,ctx: &egui::Context) {
         // Attempt to load and parse the network configuration
         let config_path = if topology.ends_with(".toml") {
             topology.to_string()
@@ -133,7 +134,7 @@ impl NetworkApp {
             }
         }
 
-    }
+    }*/
 
     fn flood_network(&mut self) {
         self.simulation_log.push("Flood Network initiated".to_string());
@@ -249,7 +250,7 @@ impl NetworkApp {
     // Add function to spawn a new drone
     // in your GUI-side spawn_drone
     fn spawn_drone(&mut self, id: NodeId, pdr: f32, connections: Vec<NodeId>) {
-        // 1) SC must approve & create channels
+        // 1. Ask the Simulation Controller to spawn (MUST happen first)
         if let Some(ctrl_arc) = &self.simulation_controller {
             let mut ctrl = ctrl_arc.lock().unwrap();
             if let Err(e) = ctrl.spawn_drone(id, pdr, connections.clone()) {
@@ -258,13 +259,20 @@ impl NetworkApp {
             }
         }
 
-        // 2) update the shared TOML config
+        // 2. Update Config
         if let Some(cfg_arc) = &self.network_config {
             let mut cfg = cfg_arc.lock().unwrap();
-            cfg.add_drone(id);
+
+            // 🛠️ Check AFTER asking SC to spawn
+            if cfg.drone.iter().any(|d| d.id == id) {
+                self.simulation_log.push(format!("⚠️ Warning: Drone {} already present in config, updating.", id));
+            } else {
+                cfg.add_drone(id);
+            }
+
             cfg.set_drone_pdr(id, pdr);
             cfg.set_drone_connections(id, connections.clone());
-            // make each peer bidirectional:
+
             for &peer in &connections {
                 if let Some(dr) = cfg.drone.iter_mut().find(|d| d.id == peer) {
                     if !dr.connected_node_ids.contains(&id) {
@@ -274,13 +282,12 @@ impl NetworkApp {
             }
         }
 
-        // 3) rebuild the entire renderer
+        // 3. Rebuild the renderer
         if let (Some(renderer), Some(cfg_arc)) = (&mut self.network_renderer, &self.network_config) {
             renderer.build_from_config(cfg_arc.clone());
         }
 
         self.simulation_log.push(format!("🎉 Spawned drone {}", id));
-
     }
     fn render_simulation_tabs(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("tabs_panel").show(ctx, |ui| {
@@ -362,10 +369,21 @@ impl NetworkApp {
                         if ui.button("Spawn Drone").clicked() {
                             self.show_spawn_drone_popup = true;
                         }
+                        ui.add_space(10.0);
+                        if ui.button("Recenter Graph").clicked() {
+                            self.pan_offset = Vec2::ZERO;
+                        }
                     });
 
                     // Network view with zoom and pan
                     let (response, painter) = ui.allocate_painter(ui.available_size(), Sense::drag());
+
+                    if self.pan_offset == Vec2::ZERO {
+                        self.auto_fit_and_center_graph(response.rect);
+                    }
+
+
+
                     painter.add(Shape::rect_stroke(
                         response.rect,
                         2.0,
@@ -376,12 +394,13 @@ impl NetworkApp {
                         self.pan_offset += response.drag_delta();
                     }
                     if let Some(renderer) = &mut self.network_renderer {
+                        renderer.scale = self.zoom_level;
                         painter.clip_rect();
                         let center = response.rect.center();
                         let scaled_size = response.rect.size() * self.zoom_level;
                         let scaled_rect = Rect::from_center_size(center + self.pan_offset, scaled_size);
                         painter.add(Shape::rect_filled(scaled_rect, 0.0, Color32::TRANSPARENT));
-                        renderer.render(ui);
+                        renderer.render(ui, self.pan_offset);
                         renderer.render_node_details(ctx);
                     }
                 });
@@ -459,6 +478,9 @@ impl NetworkApp {
 
     }
 
+
+
+
     fn render_welcome_screen(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
@@ -488,6 +510,48 @@ impl NetworkApp {
         });
     }
 
+    fn auto_fit_and_center_graph(&mut self, canvas_rect: Rect) {
+        if let Some(renderer) = &self.network_renderer {
+            if renderer.nodes.is_empty() {
+                return;
+            }
+
+            // Compute bounds of all nodes
+            let mut min = Pos2::new(f32::INFINITY, f32::INFINITY);
+            let mut max = Pos2::new(f32::NEG_INFINITY, f32::NEG_INFINITY);
+
+            for node in &renderer.nodes {
+                let pos = Pos2::new(node.position.0, node.position.1);
+                min = min.min(pos);
+                max = max.max(pos);
+            }
+
+            let graph_size = max - min;
+            let canvas_size = canvas_rect.size();
+
+            // Padding factor (leave a margin)
+            let padding = 0.8;
+
+            // Compute optimal zoom (scale)
+            let zoom_x = canvas_size.x * padding / graph_size.x;
+            let zoom_y = canvas_size.y * padding / graph_size.y;
+            let optimal_zoom = zoom_x.min(zoom_y).clamp(0.5, 3.0); // restrict zoom range
+
+            self.zoom_level = optimal_zoom;
+            if let Some(r) = &mut self.network_renderer {
+                r.scale = optimal_zoom;
+            }
+
+            // Compute center offset
+            let graph_center = Pos2::new((min.x + max.x) / 2.0, (min.y + max.y) / 2.0);
+            let canvas_center = canvas_rect.center();
+
+            self.pan_offset = (canvas_center.to_vec2() - graph_center.to_vec2()) * optimal_zoom;
+        }
+    }
+
+
+    /*
     fn render_topology_selection(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
@@ -499,17 +563,17 @@ impl NetworkApp {
                 ui.horizontal(|ui| {
                     // Star Topology Button
                     if ui.button("Star Topology").clicked() {
-                        self.set_topology("star");
+                        self.set_topology("star",ctx);
                     }
 
                     // Double Line Topology Button
                     if ui.button("Double Line Topology").clicked() {
-                        self.set_topology("double_line");
+                        self.set_topology("double_line",ctx);
                     }
 
                     // Butterfly Topology Button
                     if ui.button("Butterfly Topology").clicked() {
-                        self.set_topology("butterfly");
+                        self.set_topology("butterfly",ctx);
                     }
                 });
 
@@ -557,6 +621,7 @@ impl NetworkApp {
         app
     }
 
+ */
  */
 
 
@@ -661,7 +726,7 @@ impl NetworkApp {
         app.controller_thread = Some(controller_thread);
 
         // Init GUI renderer
-        app.network_renderer = Some(NetworkRenderer::new_from_config("custom", 50.0, 50.0, config.clone()));
+        app.network_renderer = Some(NetworkRenderer::new_from_config("custom", 50.0, 50.0, config.clone(),&cc.egui_ctx));
         if let Some(renderer) = &mut app.network_renderer {
             renderer.set_controller_sender(controller_send);
             renderer.set_simulation_controller(controller.clone());
@@ -723,8 +788,9 @@ impl eframe::App for NetworkApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         match self.state {
             AppState::Welcome => self.render_welcome_screen(ctx),
-            AppState::Topology => self.render_topology_selection(ctx),
+            //AppState::Topology => self.render_topology_selection(ctx),
             AppState::Simulation => self.render_simulation_tabs(ctx),
+            _ => {}
         }
     }
 }

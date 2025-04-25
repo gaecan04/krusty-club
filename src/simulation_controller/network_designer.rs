@@ -1,5 +1,5 @@
 use eframe::egui;
-use egui::{Color32, Painter, Pos2, Response, TextEdit};
+use egui::{Color32, Context, Painter, Pos2, Response, TextEdit, Vec2};
 use crossbeam_channel::Sender;
 use wg_2024::controller::{DroneEvent, DroneCommand};
 use wg_2024::network::NodeId;
@@ -95,10 +95,23 @@ pub(crate) struct NetworkRenderer {
     target_node_id: String,
     pdr_value: f32,
     last_opened: Option<usize>,
+
+    //for icons=photos
+    drone_texture: Option<egui::TextureHandle>,
+    client_texture: Option<egui::TextureHandle>,
+    server_texture: Option<egui::TextureHandle>,
+    fire: Option<egui::TextureHandle>,
 }
 
 impl NetworkRenderer {
-    pub(crate) fn new(topology: &str, x_offset: f32, y_offset: f32) -> Self {
+    pub(crate) fn new(topology: &str, x_offset: f32, y_offset: f32,ctx: &egui::Context) -> Self {
+        let drone_texture = Some(load_texture(ctx, "assets/drone.png"));
+        let client_texture = Some(load_texture(ctx, "assets/client.png"));
+        let server_texture = Some(load_texture(ctx, "assets/server.png"));
+        let fire = Some(load_texture(ctx, "assets/fire.png"));
+
+
+
         let mut network = NetworkRenderer {
             nodes: Vec::new(),
             edges: Vec::new(),
@@ -114,6 +127,10 @@ impl NetworkRenderer {
             target_node_id: String::new(),
             pdr_value: 0.0,
             last_opened: None,
+            drone_texture,
+            client_texture,
+            server_texture,
+            fire,
         };
 
         match Topology::from_str(topology) {
@@ -136,8 +153,8 @@ impl NetworkRenderer {
     }
 
     // Create a network renderer directly from config
-    pub(crate) fn new_from_config(topology: &str, x_offset: f32, y_offset: f32, config: Arc<Mutex<ParsedConfig>>) -> Self {
-        let mut network = Self::new("custom", x_offset, y_offset); // Force base to be empty
+    pub(crate) fn new_from_config(topology: &str, x_offset: f32, y_offset: f32, config: Arc<Mutex<ParsedConfig>>,ctx: &egui::Context) -> Self {
+        let mut network = Self::new(topology, x_offset, y_offset,ctx); // Force base to be empty
 
         // Store the config
         network.config = Some(config.clone());
@@ -418,26 +435,7 @@ impl NetworkRenderer {
 
 
 
-   /* fn add_drone_node(&mut self, id: NodeId, pdr: f32, connections: Vec<NodeId>) {
-        let new_node = Node::drone(id as usize, self.next_position_x, self.next_position_y);
-        self.nodes.push(new_node);
-        self.node_id_to_index.insert(id, self.nodes.len() - 1);
 
-        // Update layout
-        self.next_position_x += 50.0;
-        if self.next_position_x > 550.0 {
-            self.next_position_x = 50.0;
-            self.next_position_y += 50.0;
-        }
-
-        // Update config
-        if let Some(config) = &self.config {
-            let mut config = config.lock().unwrap();
-            config.add_drone(id);
-        }
-
-        // Maybe also record PDR + connections if needed in your data structures
-    }*/
 
 
     // Add a connection between two nodes
@@ -581,66 +579,53 @@ impl NetworkRenderer {
     }
 
     fn setup_double_chain(&mut self, _x_offset: f32, _y_offset: f32) {
-        const WINDOW_WIDTH: f32 = 600.0;
-        const WINDOW_HEIGHT: f32 = 400.0;
+        const WINDOW_WIDTH: f32 = 1200.0;
+        const WINDOW_HEIGHT: f32 = 900.0;
 
-        let line_spacing = (WINDOW_WIDTH - 100.0) / 4.0; // Distribute across window width
-        let mut node_count = 0;
+        let drones_per_row = 5;
+        let h_spacing = (WINDOW_WIDTH - 2.0 * 100.0) / (drones_per_row as f32 - 1.0);
+        let top_y = WINDOW_HEIGHT / 2.0 - 80.0;
+        let bottom_y = WINDOW_HEIGHT / 2.0 + 80.0;
 
-        // Create two lines of drones
-        for i in 0..5 {
-            let top_drone_x = 50.0 + i as f32 * line_spacing;
-            let bottom_drone_x = 50.0 + i as f32 * line_spacing;
-
-            let top_drone_y = WINDOW_HEIGHT / 3.0;
-            let bottom_drone_y = 2.0 * WINDOW_HEIGHT / 3.0;
-
-            self.nodes.push(Node::drone(node_count, top_drone_x, top_drone_y,1.0));
-            node_count += 1;
-            self.nodes.push(Node::drone(node_count, bottom_drone_x, bottom_drone_y,1.0));
-            node_count += 1;
-
-            // Connect vertical drones
-            if i > 0 {
-                self.edges.push((node_count - 2, node_count - 1));
-            }
-
-            // Connect horizontal drones
-            if i > 0 {
-                self.edges.push((node_count - 2, node_count - 4));
-                self.edges.push((node_count - 1, node_count - 3));
-            }
+        // Add drones 1-5 (top row)
+        for i in 0..drones_per_row {
+            let x = 100.0 + i as f32 * h_spacing;
+            let id = i + 1;
+            self.nodes.push(Node::drone(id, x, top_y, 1.0));
         }
 
-        // Add server outside the drone lines
-        let server_id = node_count;
-        let server_x = WINDOW_WIDTH - 50.0;
-        let server_y = WINDOW_HEIGHT / 6.0;
-        self.nodes.push(Node::server(server_id, server_x, server_y));
-        node_count += 1;
+        // Add drones 6-10 (bottom row)
+        for i in 0..drones_per_row {
+            let x = 100.0 + i as f32 * h_spacing;
+            let id = i + 6;
+            self.nodes.push(Node::drone(id, x, bottom_y, 1.0));
+        }
 
-        // Connect server to nearby drones
-        self.edges.push((server_id, 0)); // Connect to first top drone
-        self.edges.push((server_id, 1)); // Connect to first bottom drone
+        // Horizontal edges top: (1-2), (2-3), ..., (4-5)
+        for i in 1..drones_per_row {
+            self.edges.push((i, i + 1));
+        }
 
-        // Add clients outside the drone lines
-        let client_1_id = node_count;
-        let client_2_id = node_count + 1;
+        // Horizontal edges bottom: (6-7), (7-8), ..., (9-10)
+        for i in 6..(6 + drones_per_row - 1) {
+            self.edges.push((i, i + 1));
+        }
 
-        // Client 1 below bottom line
-        let client_1_x = 50.0;
-        let client_1_y = WINDOW_HEIGHT - 50.0;
+        // Vertical edges: (1-6), (2-7), ..., (5-10)
+        for i in 0..drones_per_row {
+            self.edges.push((i + 1, i + 6));
+        }
 
-        // Client 2 above top line
-        let client_2_x = WINDOW_WIDTH - 50.0;
-        let client_2_y = 50.0;
+        // Server above drone 1
+        let server_id = 102;
+        self.nodes.push(Node::server(server_id, 100.0, top_y - 80.0));
+        self.edges.push((server_id, 1));
 
-        self.nodes.push(Node::client(client_1_id, client_1_x, client_1_y));
-        self.nodes.push(Node::client(client_2_id, client_2_x, client_2_y));
-
-        // Connect clients to their respective drones
-        self.edges.push((client_1_id, 1));  // Connect to bottom line
-        self.edges.push((client_2_id, 0));  // Connect to top line
+        // Clients below drones 6 and 10
+        self.nodes.push(Node::client(100, 100.0, bottom_y + 80.0)); // near drone 6
+        self.nodes.push(Node::client(101, 100.0 + 4.0 * h_spacing, bottom_y + 80.0)); // near drone 10
+        self.edges.push((100, 6));
+        self.edges.push((101, 10));
     }
 
     fn setup_butterfly(&mut self, _x_offset: f32, _y_offset: f32) {
@@ -879,7 +864,7 @@ impl NetworkRenderer {
 
 
 
-    pub fn render(&mut self, ui: &mut egui::Ui) {
+    pub fn render(&mut self, ui: &mut egui::Ui,offset: Vec2) {
             /*
         // Draw network controls
         ui.horizontal(|ui| {
@@ -913,16 +898,23 @@ impl NetworkRenderer {
             let painter = ui.painter();
             for &(a, b) in &self.edges {
                 if a < self.nodes.len() && b < self.nodes.len() {
-                    let pos_a = Pos2::new(self.nodes[a].position.0, self.nodes[a].position.1);
-                    let pos_b = Pos2::new(self.nodes[b].position.0, self.nodes[b].position.1);
+                    let node_a = &self.nodes[a];
+                    let node_b = &self.nodes[b];
 
-                    let node_a_type = self.nodes[a].node_type;
-                    let node_b_type = self.nodes[b].node_type;
+                    let pos_a = Pos2::new(
+                        node_a.position.0 * self.scale + offset.x,
+                        node_a.position.1 * self.scale + offset.y,
+                    );
 
-                    // Determine edge color based on what it's connected to
-                    let color = if node_a_type == NodeType::Server || node_b_type == NodeType::Server {
+                    let pos_b = Pos2::new(
+                        node_b.position.0 * self.scale + offset.x,
+                        node_b.position.1 * self.scale + offset.y,
+                    );
+
+                    // Edge color based on node type (optional)
+                    let color = if node_a.node_type == NodeType::Server || node_b.node_type == NodeType::Server {
                         Color32::BLUE
-                    } else if node_a_type == NodeType::Client || node_b_type == NodeType::Client {
+                    } else if node_a.node_type == NodeType::Client || node_b.node_type == NodeType::Client {
                         Color32::YELLOW
                     } else {
                         Color32::GRAY
@@ -932,11 +924,16 @@ impl NetworkRenderer {
                 }
             }
 
+
         }
 
         // Handle node interaction
         for (idx, node) in self.nodes.iter().enumerate() {
-            let pos = Pos2::new(node.position.0, node.position.1);
+            let pos = Pos2::new(
+                node.position.0 * self.scale + offset.x,
+                node.position.1 * self.scale + offset.y,
+            );
+
             let color = match node.node_type {
                 NodeType::Server => Color32::BLUE,
                 NodeType::Client => Color32::YELLOW,
@@ -952,16 +949,33 @@ impl NetworkRenderer {
             // Now we can safely draw the node circle using the painter
             {
                 let painter = ui.painter();
-                painter.circle(pos, 10.0, color, (1.0, Color32::BLACK));
+                if let Some(texture) = match node.node_type {
+                    NodeType::Drone => {
+                        if node.active {
+                            &self.drone_texture
+                        } else {
+                            &self.fire
+                        }
+                    },
+                    NodeType::Client => &self.client_texture,
+                    NodeType::Server => &self.server_texture,
+                } {
+                    let size = egui::vec2(32.0, 32.0); // Size for the image
+                    let rect = egui::Rect::from_center_size(pos, size);
+                    ui.painter().image(texture.id(), rect, egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0)), Color32::WHITE);
 
-                // Draw node ID next to the node
-                painter.text(
-                    Pos2::new(pos.x + 15.0, pos.y - 10.0),
-                    egui::Align2::LEFT_CENTER,
-                    format!("{}", node.id),
-                    egui::FontId::proportional(14.0),
-                    Color32::BLACK,
-                );
+                    // node id next to image
+                    painter.text(
+                        Pos2::new(pos.x + 15.0, pos.y - 10.0),
+                        egui::Align2::LEFT_CENTER,
+                        format!("{}", node.id),
+                        egui::FontId::proportional(14.0),
+                        Color32::BLACK,
+                    );
+
+                }
+
+
             }
 
             // Handle click interaction
@@ -1196,4 +1210,14 @@ impl NetworkRenderer {
     }
 
 
+}
+
+fn load_texture(ctx: &egui::Context, path: &str) -> egui::TextureHandle {
+    let image = image::open(path).unwrap_or_else(|e| {
+        panic!("❌ Failed to load image at '{}': {}", path, e);
+    });    let size = [image.width() as usize, image.height() as usize];
+    let image_buffer = image.to_rgba8();
+    let pixels = image_buffer.as_flat_samples();
+    let color_image = egui::ColorImage::from_rgba_unmultiplied(size, pixels.as_slice());
+    ctx.load_texture(path, color_image, egui::TextureOptions::default())
 }
