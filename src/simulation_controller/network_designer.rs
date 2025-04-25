@@ -7,6 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use crate::simulation_controller::SC_backend::SimulationController;
 use crate::network::initializer::ParsedConfig;
+use egui::epaint::PathShape;
+
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum NodeType {
@@ -301,7 +303,6 @@ impl NetworkRenderer {
         const WINDOW_HEIGHT: f32 = 400.0;
 
         let detected_topo = config.detect_topology();
-        let use_custom_layout = matches!(detected_topo.as_deref(), Some("Star") | Some("Double Chain"));
 
         if let Some(topo_name) = detected_topo {
             match topo_name.as_str() {
@@ -314,8 +315,8 @@ impl NetworkRenderer {
                         let angle = i as f32 * (std::f32::consts::TAU / 10.0);
                         let x = center_x + radius * angle.cos();
                         let y = center_y + radius * angle.sin();
-
                         let active = previous_states.get(&(drone.id as usize)).copied().unwrap_or(true);
+
                         self.nodes.push(Node {
                             id: drone.id as usize,
                             node_type: NodeType::Drone,
@@ -324,41 +325,6 @@ impl NetworkRenderer {
                             position: (x, y),
                         });
                         self.node_id_to_index.insert(drone.id, self.nodes.len() - 1);
-                    }
-
-                    for client in &config.client {
-                        if let Some(drone_id) = client.connected_drone_ids.first() {
-                            if let Some(&drone_index) = self.node_id_to_index.get(drone_id) {
-                                let (dx, dy) = self.nodes[drone_index].position;
-                                let angle = ((client.id as f32 - 100.0) / 10.0) * std::f32::consts::TAU;
-                                let cx = dx + 60.0 * angle.cos();
-                                let cy = dy + 60.0 * angle.sin();
-                                self.nodes.push(Node::client(client.id as usize, cx, cy));
-                                self.node_id_to_index.insert(client.id, self.nodes.len() - 1);
-                            }
-                        }
-                    }
-
-                    for server in &config.server {
-                        let mut sum_x = 0.0;
-                        let mut sum_y = 0.0;
-                        let mut count = 0.0;
-
-                        for drone_id in &server.connected_drone_ids {
-                            if let Some(&drone_index) = self.node_id_to_index.get(drone_id) {
-                                let (dx, dy) = self.nodes[drone_index].position;
-                                sum_x += dx;
-                                sum_y += dy;
-                                count += 1.0;
-                            }
-                        }
-
-                        if count > 0.0 {
-                            let sx = sum_x / count;
-                            let sy = sum_y / count - 60.0;
-                            self.nodes.push(Node::server(server.id as usize, sx, sy));
-                            self.node_id_to_index.insert(server.id, self.nodes.len() - 1);
-                        }
                     }
                 }
 
@@ -370,8 +336,8 @@ impl NetworkRenderer {
                     for (i, drone) in config.drone.iter().enumerate() {
                         let x = 50.0 + (i % 5) as f32 * spacing;
                         let y = if i < 5 { top_y } else { bottom_y };
-
                         let active = previous_states.get(&(drone.id as usize)).copied().unwrap_or(true);
+
                         self.nodes.push(Node {
                             id: drone.id as usize,
                             node_type: NodeType::Drone,
@@ -381,25 +347,180 @@ impl NetworkRenderer {
                         });
                         self.node_id_to_index.insert(drone.id, self.nodes.len() - 1);
                     }
+                }
 
-                    for client in &config.client {
-                        let idx = self.nodes.len();
-                        let x = 40.0;
-                        let y = bottom_y + 50.0 + (idx as f32 * 10.0);
-                        self.nodes.push(Node::client(client.id as usize, x, y));
-                        self.node_id_to_index.insert(client.id, self.nodes.len() - 1);
-                    }
+                "Butterfly" => {
+                    let x1 = 100.0;
+                    let x2 = 200.0;
+                    let x3 = 300.0;
+                    let x4 = 400.0;
 
-                    for server in &config.server {
-                        let idx = self.nodes.len();
-                        let x = 40.0;
-                        let y = top_y - 60.0 - (idx as f32 * 10.0);
-                        self.nodes.push(Node::server(server.id as usize, x, y));
-                        self.node_id_to_index.insert(server.id, self.nodes.len() - 1);
+                    let top_y = 100.0;
+                    let mid_y = 200.0;
+                    let bottom_y = 300.0;
+
+                    let positions = vec![
+                        (x1, top_y),    // 1
+                        (x2, top_y),    // 2
+                        (x3, top_y),    // 3
+                        (x4, top_y),    // 4
+                        (x1, mid_y), // 5
+                        (x2, mid_y), // 6
+                        (x3, mid_y), // 7
+                        (x4, mid_y), // 8
+                        (x2, bottom_y),    // 9
+                        (x3, bottom_y),    // 10
+                    ];
+
+                    for (i, drone) in config.drone.iter().enumerate() {
+                        if i >= positions.len() {
+                            break;
+                        }
+                        let (x, y) = positions[i];
+                        let active = previous_states.get(&(drone.id as usize)).copied().unwrap_or(true);
+
+                        self.nodes.push(Node {
+                            id: drone.id as usize,
+                            node_type: NodeType::Drone,
+                            pdr: drone.pdr,
+                            active,
+                            position: (x, y),
+                        });
+                        self.node_id_to_index.insert(drone.id, self.nodes.len() - 1);
                     }
                 }
 
+
+                "Tree" => {
+                    let spacing_x = WINDOW_WIDTH / 5.0;
+                    let spacing_y = WINDOW_HEIGHT / 5.0;
+                    let mut y = spacing_y;
+                    let levels = [1, 2, 3, 4];
+                    let mut id = 0;
+
+                    for &n_nodes in &levels {
+                        let x_start = (WINDOW_WIDTH - (n_nodes as f32 - 1.0) * spacing_x) / 2.0;
+                        for j in 0..n_nodes {
+                            if id >= config.drone.len() {
+                                break;
+                            }
+                            let x = x_start + j as f32 * spacing_x;
+                            let active = previous_states.get(&(config.drone[id].id as usize)).copied().unwrap_or(true);
+
+                            self.nodes.push(Node {
+                                id: config.drone[id].id as usize,
+                                node_type: NodeType::Drone,
+                                pdr: config.drone[id].pdr,
+                                active,
+                                position: (x, y),
+                            });
+                            self.node_id_to_index.insert(config.drone[id].id, self.nodes.len() - 1);
+                            id += 1;
+                        }
+                        y += spacing_y;
+                    }
+                }
+
+                "Sub-Net" => {
+                    /*let group_center_left = (WINDOW_WIDTH / 4.0, WINDOW_HEIGHT / 2.0);
+                    let group_center_right = (3.0 * WINDOW_WIDTH / 4.0, WINDOW_HEIGHT / 2.0);
+                    let radius = 60.0;
+
+                    for (i, drone) in config.drone.iter().enumerate() {
+                        let center = if i < 5 { group_center_left } else { group_center_right };
+                        let angle = (i % 5) as f32 * (std::f32::consts::TAU / 5.0);
+                        let x = center.0 + radius * angle.cos();
+                        let y = center.1 + radius * angle.sin();
+                        let active = previous_states.get(&(drone.id as usize)).copied().unwrap_or(true);
+
+                        self.nodes.push(Node {
+                            id: drone.id as usize,
+                            node_type: NodeType::Drone,
+                            pdr: drone.pdr,
+                            active,
+                            position: (x, y),
+                        });
+                        self.node_id_to_index.insert(drone.id, self.nodes.len() - 1);
+                    }*/
+
+                        let top_y = 100.0;
+                        let bottom_y = 200.0;
+
+                        // Predefine exact X coordinates
+                        let x_coords = vec![
+                            60.0,   // 1
+                            120.0,  // 2
+                            180.0,  // 3
+                            240.0,  // 4
+                            300.0,  // 5
+                            360.0,  // 6
+                            90.0,   // 7 (center between 1 and 2)
+                            180.0,  // 8 (under 3)
+                            240.0,  // 9 (under 4)
+                            330.0   // 10 (center between 5 and 6)
+                        ];
+
+                        for (i, drone) in config.drone.iter().enumerate() {
+                            if i >= x_coords.len() {
+                                break;
+                            }
+
+                            let x = x_coords[i];
+                            let y = if i < 6 { top_y } else { bottom_y };
+                            let active = previous_states.get(&(drone.id as usize)).copied().unwrap_or(true);
+
+                            self.nodes.push(Node {
+                                id: drone.id as usize,
+                                node_type: NodeType::Drone,
+                                pdr: drone.pdr,
+                                active,
+                                position: (x, y),
+                            });
+
+                            self.node_id_to_index.insert(drone.id, self.nodes.len() - 1);
+                        }
+
+
+                }
+
                 _ => {}
+            }
+
+            // 👇 Add clients after drones are placed
+            for client in &config.client {
+                if let Some(drone_id) = client.connected_drone_ids.first() {
+                    if let Some(&drone_index) = self.node_id_to_index.get(drone_id) {
+                        let (dx, dy) = self.nodes[drone_index].position;
+                        let angle = ((client.id as f32 - 100.0) / 10.0) * std::f32::consts::TAU;
+                        let cx = dx + 60.0 * angle.cos();
+                        let cy = dy + 60.0 * angle.sin();
+                        self.nodes.push(Node::client(client.id as usize, cx, cy));
+                        self.node_id_to_index.insert(client.id, self.nodes.len() - 1);
+                    }
+                }
+            }
+
+            // 👇 Add smarter server placement
+            for server in &config.server {
+                let mut sum_x = 0.0;
+                let mut min_y = f32::INFINITY;
+                let mut count = 0.0;
+
+                for drone_id in &server.connected_drone_ids {
+                    if let Some(&drone_index) = self.node_id_to_index.get(drone_id) {
+                        let (dx, dy) = self.nodes[drone_index].position;
+                        sum_x += dx;
+                        min_y = min_y.min(dy);
+                        count += 1.0;
+                    }
+                }
+
+                if count > 0.0 {
+                    let sx = sum_x / count;
+                    let sy = min_y - 80.0;
+                    self.nodes.push(Node::server(server.id as usize, sx, sy));
+                    self.node_id_to_index.insert(server.id, self.nodes.len() - 1);
+                }
             }
         }
 
@@ -1007,7 +1128,29 @@ impl NetworkRenderer {
                         Color32::GRAY
                     };
 
-                    painter.line_segment([pos_a, pos_b], (2.0, color));
+                    if node_a.node_type == NodeType::Client || node_b.node_type == NodeType::Client {
+                        let control = Pos2::new((pos_a.x + pos_b.x) / 2.0, (pos_a.y + pos_b.y) / 2.0 - 40.0);
+
+                        let mut points = Vec::new();
+                        let steps = 20;
+                        for i in 0..=steps {
+                            let t = i as f32 / steps as f32;
+                            let inv_t = 1.0 - t;
+
+                            let x = inv_t * inv_t * pos_a.x + 2.0 * inv_t * t * control.x + t * t * pos_b.x;
+                            let y = inv_t * inv_t * pos_a.y + 2.0 * inv_t * t * control.y + t * t * pos_b.y;
+
+                            points.push(Pos2::new(x, y));
+                        }
+
+                        let curve = egui::epaint::PathShape::line(points, egui::Stroke::new(2.0, color));
+                        painter.add(curve);
+                    } else {
+                        painter.line_segment([pos_a, pos_b], (2.0, color));
+                    }
+
+
+
                 }
             }
 
