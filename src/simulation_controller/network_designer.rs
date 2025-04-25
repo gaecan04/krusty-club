@@ -251,7 +251,10 @@ impl NetworkRenderer {
         }
 
         // 3) rebuild any remaining edges from the up‐to‐date config, if you like
-        self.sync_connections_with_config();
+        //self.sync_connections_with_config();
+        self.prune_inactive_edges();
+
+
     }
     pub fn prune_inactive_edges(&mut self) {
         if let Some(ctrl_arc) = &self.simulation_controller {
@@ -287,7 +290,7 @@ impl NetworkRenderer {
         for node in &self.nodes {
             previous_states.insert(node.id, node.active);
         }
-        // Clear existing nodes and edges
+
         self.nodes.clear();
         self.edges.clear();
         self.node_id_to_index.clear();
@@ -297,61 +300,152 @@ impl NetworkRenderer {
         const WINDOW_WIDTH: f32 = 600.0;
         const WINDOW_HEIGHT: f32 = 400.0;
 
-        // Calculate layout parameters
-        let num_drones = config.drone.len();
-        let num_clients = config.client.len();
-        let num_servers = config.server.len();
+        let detected_topo = config.detect_topology();
+        let use_custom_layout = matches!(detected_topo.as_deref(), Some("Star") | Some("Double Chain"));
 
-        // Calculate grid positions for nodes
-        let total_nodes = num_drones + num_clients + num_servers;
-        let grid_size = (total_nodes as f32).sqrt().ceil() as usize;
-        let cell_width = WINDOW_WIDTH / (grid_size as f32 + 1.0);
-        let cell_height = WINDOW_HEIGHT / (grid_size as f32 + 1.0);
+        if let Some(topo_name) = detected_topo {
+            match topo_name.as_str() {
+                "Star" => {
+                    let center_x = WINDOW_WIDTH / 2.0;
+                    let center_y = WINDOW_HEIGHT / 2.0;
+                    let radius = 120.0;
 
-        // Add drones
-        let mut node_index = 0;
-        for drone in &config.drone {
-            let x = (node_index % grid_size) as f32 * cell_width + cell_width;
-            let y = (node_index / grid_size) as f32 * cell_height + cell_height;
+                    for (i, drone) in config.drone.iter().enumerate() {
+                        let angle = i as f32 * (std::f32::consts::TAU / 10.0);
+                        let x = center_x + radius * angle.cos();
+                        let y = center_y + radius * angle.sin();
 
-            // 👇 Recover the active state if it was set before
-            let active = previous_states.get(&(drone.id as usize)).copied().unwrap_or(true);
+                        let active = previous_states.get(&(drone.id as usize)).copied().unwrap_or(true);
+                        self.nodes.push(Node {
+                            id: drone.id as usize,
+                            node_type: NodeType::Drone,
+                            pdr: drone.pdr,
+                            active,
+                            position: (x, y),
+                        });
+                        self.node_id_to_index.insert(drone.id, self.nodes.len() - 1);
+                    }
 
-            self.nodes.push(Node {
-                id: drone.id as usize,
-                node_type: NodeType::Drone,
-                pdr: drone.pdr,
-                active,
-                position: (x, y),
-            });
+                    for client in &config.client {
+                        if let Some(drone_id) = client.connected_drone_ids.first() {
+                            if let Some(&drone_index) = self.node_id_to_index.get(drone_id) {
+                                let (dx, dy) = self.nodes[drone_index].position;
+                                let angle = ((client.id as f32 - 100.0) / 10.0) * std::f32::consts::TAU;
+                                let cx = dx + 60.0 * angle.cos();
+                                let cy = dy + 60.0 * angle.sin();
+                                self.nodes.push(Node::client(client.id as usize, cx, cy));
+                                self.node_id_to_index.insert(client.id, self.nodes.len() - 1);
+                            }
+                        }
+                    }
 
-            self.node_id_to_index.insert(drone.id, self.nodes.len() - 1);
-            node_index += 1;
+                    for server in &config.server {
+                        let mut sum_x = 0.0;
+                        let mut sum_y = 0.0;
+                        let mut count = 0.0;
+
+                        for drone_id in &server.connected_drone_ids {
+                            if let Some(&drone_index) = self.node_id_to_index.get(drone_id) {
+                                let (dx, dy) = self.nodes[drone_index].position;
+                                sum_x += dx;
+                                sum_y += dy;
+                                count += 1.0;
+                            }
+                        }
+
+                        if count > 0.0 {
+                            let sx = sum_x / count;
+                            let sy = sum_y / count - 60.0;
+                            self.nodes.push(Node::server(server.id as usize, sx, sy));
+                            self.node_id_to_index.insert(server.id, self.nodes.len() - 1);
+                        }
+                    }
+                }
+
+                "Double Chain" => {
+                    let top_y = WINDOW_HEIGHT / 2.0 - 60.0;
+                    let bottom_y = WINDOW_HEIGHT / 2.0 + 60.0;
+                    let spacing = (WINDOW_WIDTH - 100.0) / 4.0;
+
+                    for (i, drone) in config.drone.iter().enumerate() {
+                        let x = 50.0 + (i % 5) as f32 * spacing;
+                        let y = if i < 5 { top_y } else { bottom_y };
+
+                        let active = previous_states.get(&(drone.id as usize)).copied().unwrap_or(true);
+                        self.nodes.push(Node {
+                            id: drone.id as usize,
+                            node_type: NodeType::Drone,
+                            pdr: drone.pdr,
+                            active,
+                            position: (x, y),
+                        });
+                        self.node_id_to_index.insert(drone.id, self.nodes.len() - 1);
+                    }
+
+                    for client in &config.client {
+                        let idx = self.nodes.len();
+                        let x = 40.0;
+                        let y = bottom_y + 50.0 + (idx as f32 * 10.0);
+                        self.nodes.push(Node::client(client.id as usize, x, y));
+                        self.node_id_to_index.insert(client.id, self.nodes.len() - 1);
+                    }
+
+                    for server in &config.server {
+                        let idx = self.nodes.len();
+                        let x = 40.0;
+                        let y = top_y - 60.0 - (idx as f32 * 10.0);
+                        self.nodes.push(Node::server(server.id as usize, x, y));
+                        self.node_id_to_index.insert(server.id, self.nodes.len() - 1);
+                    }
+                }
+
+                _ => {}
+            }
         }
 
+        if self.nodes.is_empty() {
+            let total_nodes = config.drone.len() + config.client.len() + config.server.len();
+            let grid_size = (total_nodes as f32).sqrt().ceil() as usize;
+            let cell_width = WINDOW_WIDTH / (grid_size as f32 + 1.0);
+            let cell_height = WINDOW_HEIGHT / (grid_size as f32 + 1.0);
 
-        // Add clients
-        for client in &config.client {
-            let x = (node_index % grid_size) as f32 * cell_width + cell_width;
-            let y = (node_index / grid_size) as f32 * cell_height + cell_height;
+            let mut node_index = 0;
+            for drone in &config.drone {
+                let x = (node_index % grid_size) as f32 * cell_width + cell_width;
+                let y = (node_index / grid_size) as f32 * cell_height + cell_height;
 
-            self.nodes.push(Node::client(client.id as usize, x, y));
-            self.node_id_to_index.insert(client.id, self.nodes.len() - 1);
-            node_index += 1;
+                let active = previous_states.get(&(drone.id as usize)).copied().unwrap_or(true);
+
+                self.nodes.push(Node {
+                    id: drone.id as usize,
+                    node_type: NodeType::Drone,
+                    pdr: drone.pdr,
+                    active,
+                    position: (x, y),
+                });
+                self.node_id_to_index.insert(drone.id, self.nodes.len() - 1);
+                node_index += 1;
+            }
+
+            for client in &config.client {
+                let x = (node_index % grid_size) as f32 * cell_width + cell_width;
+                let y = (node_index / grid_size) as f32 * cell_height + cell_height;
+
+                self.nodes.push(Node::client(client.id as usize, x, y));
+                self.node_id_to_index.insert(client.id, self.nodes.len() - 1);
+                node_index += 1;
+            }
+
+            for server in &config.server {
+                let x = (node_index % grid_size) as f32 * cell_width + cell_width;
+                let y = (node_index / grid_size) as f32 * cell_height + cell_height;
+
+                self.nodes.push(Node::server(server.id as usize, x, y));
+                self.node_id_to_index.insert(server.id, self.nodes.len() - 1);
+                node_index += 1;
+            }
         }
 
-        // Add servers
-        for server in &config.server {
-            let x = (node_index % grid_size) as f32 * cell_width + cell_width;
-            let y = (node_index / grid_size) as f32 * cell_height + cell_height;
-
-            self.nodes.push(Node::server(server.id as usize, x, y));
-            self.node_id_to_index.insert(server.id, self.nodes.len() - 1);
-            node_index += 1;
-        }
-
-        // Add connections between nodes
-        // Drone-to-drone connections
         for drone in &config.drone {
             if let Some(&source_index) = self.node_id_to_index.get(&drone.id) {
                 for &target_id in &drone.connected_node_ids {
@@ -362,7 +456,6 @@ impl NetworkRenderer {
             }
         }
 
-        // Client-to-drone connections
         for client in &config.client {
             if let Some(&source_index) = self.node_id_to_index.get(&client.id) {
                 for &target_id in &client.connected_drone_ids {
@@ -373,7 +466,6 @@ impl NetworkRenderer {
             }
         }
 
-        // Server-to-drone connections
         for server in &config.server {
             if let Some(&source_index) = self.node_id_to_index.get(&server.id) {
                 for &target_id in &server.connected_drone_ids {
@@ -384,9 +476,8 @@ impl NetworkRenderer {
             }
         }
 
-        // Update next position coordinates for new nodes
-        self.next_position_x = cell_width;
-        self.next_position_y = (node_index / grid_size + 1) as f32 * cell_height;
+        self.next_position_x = 50.0;
+        self.next_position_y = WINDOW_HEIGHT - 50.0;
     }
 
     // Add a new node to the network
@@ -528,55 +619,51 @@ impl NetworkRenderer {
 
 
     fn setup_star(&mut self, _x_offset: f32, _y_offset: f32) {
-        const WINDOW_WIDTH: f32 = 600.0;
-        const WINDOW_HEIGHT: f32 = 400.0;
+        println!("im in setup");
+        const WINDOW_WIDTH: f32 = 800.0;
+        const WINDOW_HEIGHT: f32 = 600.0;
 
         let num_drones = 10;
         let center_x = WINDOW_WIDTH / 2.0;
         let center_y = WINDOW_HEIGHT / 2.0;
-        let radius = 100.0; // Reduced radius to fit within window
+        let radius = 200.0;
 
-        // Create drones in a circular pattern
+        // Position drones in a circle (IDs: 1 to 10)
         for i in 0..num_drones {
-            let angle = i as f32 * (std::f32::consts::PI * 2.0 / num_drones as f32);
+            let angle = i as f32 * (std::f32::consts::TAU / num_drones as f32);
             let x = center_x + radius * angle.cos();
             let y = center_y + radius * angle.sin();
-            self.nodes.push(Node::drone(i, x, y,1.0));
+            self.nodes.push(Node::drone(i + 1, x, y, 1.0)); // PDR will be synced from config
         }
 
-        // Connect drones with some edges
+        // Connect each drone to its 3rd follower (decagram)
         for i in 0..num_drones {
-            let target = (i + 3) % num_drones;
-            self.edges.push((i, target));
+            let from_id = i + 1;
+            let to_id = ((i + 3) % num_drones) + 1;
+            self.edges.push((from_id, to_id));
         }
 
-        // Place server outside the drone circle
-        let server_id = num_drones;
-        let server_x = center_x + radius + 50.0;
-        let server_y = center_y;
-        self.nodes.push(Node::server(server_id, server_x, server_y));
+        // Add client 100 near drone 1
+        self.nodes.push(Node::client(100, center_x - radius - 50.0, center_y));
+        self.edges.push((100, 1));
 
-        // Connect server to specific drones
-        self.edges.push((server_id, 0)); // Connect to first drone
-        self.edges.push((server_id, 5)); // Connect to mid-range drone
+        // Add client 101 near drone 5
+        let angle_5 = 4.0 * std::f32::consts::TAU / 10.0;
+        self.nodes.push(Node::client(101,
+                                     center_x + (radius + 50.0) * angle_5.cos(),
+                                     center_y + (radius + 50.0) * angle_5.sin()));
+        self.edges.push((101, 5));
 
-        // Place clients outside the drone circle
-        let client_1_id = num_drones + 1;
-        let client_2_id = num_drones + 2;
-
-        let client_1_x = center_x - radius - 50.0;
-        let client_1_y = center_y - 50.0;
-
-        let client_2_x = center_x - radius - 50.0;
-        let client_2_y = center_y + 50.0;
-
-        self.nodes.push(Node::client(client_1_id, client_1_x, client_1_y));
-        self.nodes.push(Node::client(client_2_id, client_2_x, client_2_y));
-
-        // Connect clients to their respective drones
-        self.edges.push((client_1_id, 2));
-        self.edges.push((client_2_id, 7));
+        // Add server 102 near drones 3 and 7
+        let pos3 = &self.nodes[2].position;
+        let pos7 = &self.nodes[6].position;
+        let mid_x = (pos3.0 + pos7.0) / 2.0;
+        let mid_y = (pos3.1 + pos7.1) / 2.0;
+        self.nodes.push(Node::server(102, mid_x, mid_y - 60.0));
+        self.edges.push((102, 3));
+        self.edges.push((102, 7));
     }
+
 
     fn setup_double_chain(&mut self, _x_offset: f32, _y_offset: f32) {
         const WINDOW_WIDTH: f32 = 1200.0;
@@ -974,8 +1061,6 @@ impl NetworkRenderer {
                     );
 
                 }
-
-
             }
 
             // Handle click interaction

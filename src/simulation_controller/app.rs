@@ -170,6 +170,7 @@ impl NetworkApp {
                 Ok(_) => {
                     self.simulation_log.push(format!("✅ Drone {} crashed successfully", drone_id));
 
+                    /*
                     // ✅ Only now update the visual state
                     if let Some(renderer) = &mut self.network_renderer {
                         if let Some(&idx) = renderer.node_id_to_index.get(&drone_id) {
@@ -177,6 +178,16 @@ impl NetworkApp {
                             renderer.remove_edges_of_crashed_node(idx);
                         }
                         renderer.sync_connections_with_config(); // Optional
+                    }
+                    The Simulation Controller (SC) already updates the active flags internally.
+                    sync_with_simulation_controller() reads fresh states and updates the GUI.
+                    build_from_config() re-applies the correct star, chain, etc. layout after crash.
+                     */
+                    if let Some(renderer) = &mut self.network_renderer {
+                        renderer.sync_with_simulation_controller();
+                        if let Some(cfg_arc) = &self.network_config {
+                            renderer.build_from_config(cfg_arc.clone());
+                        }
                     }
                 }
                 Err(e) => {
