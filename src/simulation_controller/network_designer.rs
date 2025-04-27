@@ -4,7 +4,7 @@ use crossbeam_channel::Sender;
 use wg_2024::controller::{DroneEvent, DroneCommand};
 use wg_2024::network::NodeId;
 use std::sync::{Arc, Mutex};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use crate::simulation_controller::SC_backend::SimulationController;
 use crate::network::initializer::ParsedConfig;
 use egui::epaint::PathShape;
@@ -17,12 +17,14 @@ pub enum NodeType {
     Drone,
 }
 
+#[derive(Clone)]
 pub struct Node {
     pub id: usize,
     pub node_type: NodeType,
     pub pdr: f32,
     pub active: bool,
     pub position: (f32, f32),
+    pub manual_position: bool,  // ⭐ NEW
 }
 
 impl Node {
@@ -33,6 +35,7 @@ impl Node {
             pdr,
             active: true,
             position: (x, y),
+            manual_position: false,  // default
         }
     }
 
@@ -43,6 +46,7 @@ impl Node {
             pdr: 1.0,
             active: true,
             position: (x, y),
+            manual_position: false,
         }
     }
 
@@ -53,6 +57,7 @@ impl Node {
             pdr: 1.0,
             active: true,
             position: (x, y),
+            manual_position: false,
         }
     }
 }
@@ -103,8 +108,13 @@ pub(crate) struct NetworkRenderer {
     client_texture: Option<egui::TextureHandle>,
     server_texture: Option<egui::TextureHandle>,
     fire: Option<egui::TextureHandle>,
-
+    // for crash/spawn go-back to grid prob
     current_topology: Option<String>,
+    //for the overwrite spawn prob
+    manual_positions: HashMap<NodeId, (f32, f32)>,
+    last_spawned_position: Option<(f32, f32)>,
+
+
 
 }
 
@@ -137,6 +147,8 @@ impl NetworkRenderer {
             server_texture,
             fire,
             current_topology: None,
+            manual_positions: HashMap::new(),
+            last_spawned_position: None,
         };
 
         match Topology::from_str(topology) {
@@ -296,6 +308,8 @@ impl NetworkRenderer {
         for node in &self.nodes {
             previous_states.insert(node.id, node.active);
         }
+        let previous_nodes = self.nodes.clone();
+
 
         self.nodes.clear();
         self.edges.clear();
@@ -310,10 +324,10 @@ impl NetworkRenderer {
         if let Some(topo_name) = detected_topo.clone() {
             self.current_topology = Some(topo_name.clone());
             println!("✅ Detected topology: {}", topo_name);
-            self.build_topology_layout(&topo_name, &config, &previous_states);
+            self.build_topology_layout(&topo_name, &config, &previous_states, &previous_nodes);
         }else if let Some(prev_topo) = self.current_topology.clone() {
             println!("⚠️ Detection failed after crash. Falling back to last known topology: {}", prev_topo);
-            self.build_topology_layout(&prev_topo, &config, &previous_states);
+            self.build_topology_layout(&prev_topo, &config, &previous_states, &previous_nodes);
         } else {
             println!("❌ No known topology. Falling back to grid layout.");
             self.build_grid(&config, &previous_states);
@@ -324,7 +338,108 @@ impl NetworkRenderer {
         self.next_position_y = WINDOW_HEIGHT - 50.0;
     }
 
-    fn build_topology_layout(&mut self, topo: &str, config: &ParsedConfig, previous_states: &HashMap<usize, bool>) {
+    pub fn rebuild_preserving_topology(&mut self, config: Arc<Mutex<ParsedConfig>>) {
+        const WINDOW_WIDTH: f32 = 600.0;
+        const WINDOW_HEIGHT: f32 = 400.0;
+
+        let mut previous_states = HashMap::new();
+        for node in &self.nodes {
+            previous_states.insert(node.id, node.active);
+        }
+        let previous_nodes = self.nodes.clone();
+        let mut newly_spawned_nodes = Vec::new();
+
+        // Keep track of existing node IDs before clearing
+        let existing_node_ids: HashSet<NodeId> = self.nodes.iter()
+            .map(|node| node.id as NodeId)
+            .collect();
+
+        self.nodes.clear();
+        self.edges.clear();
+        self.node_id_to_index.clear();
+
+        let config = config.lock().unwrap();
+
+        // Process nodes differently based on whether they are new or existing
+        for drone in &config.drone {
+            let is_new_node = !existing_node_ids.contains(&drone.id);
+
+            // Handle new nodes with special positioning
+            if is_new_node && !drone.connected_node_ids.is_empty() {
+
+                // This is a new drone - position it intelligently
+                let (x, y) = self.position_new_drone(drone.id, &drone.connected_node_ids);
+
+                self.nodes.push(Node {
+                    id: drone.id as usize,
+                    node_type: NodeType::Drone,
+                    pdr: drone.pdr,
+                    active: true, // New nodes are active by default
+                    position: (x, y),
+                    manual_position: false,
+                });
+
+                self.node_id_to_index.insert(drone.id, self.nodes.len() - 1);
+
+                // Save this position as manual so it won't be repositioned
+                self.manual_positions.insert(drone.id, (x, y));
+                newly_spawned_nodes.push(drone.id); // 👈 Track added
+
+                // Skip this drone in the regular layout routine
+                continue;
+            }
+        }
+
+        // Now process the rest of the nodes with normal layout
+        if let Some(ref topo) = self.current_topology.clone() {
+            println!("🔄 Rebuilding using saved topology: {}", topo);
+            self.build_topology_layout(&topo, &config, &previous_states, &previous_nodes);
+        } else {
+            println!("⚠️ No saved topology, falling back to grid layout");
+            self.build_grid(&config, &previous_states);
+        }
+
+        self.next_position_x = 50.0;
+        self.next_position_y = WINDOW_HEIGHT - 50.0;
+    }
+
+    pub fn position_new_drone(&mut self, new_drone_id: NodeId, connections: &[NodeId]) -> (f32, f32) {
+        if let Some((last_x, last_y)) = self.last_spawned_position {
+            // If a drone was already spawned, offset from last
+            let new_x = last_x + 50.0; // move to the right by 50
+            let new_y = last_y + 20.0; // move slightly down
+            self.last_spawned_position = Some((new_x, new_y));
+            return (new_x, new_y);
+        }
+
+        // Otherwise (first spawned drone), position next to neighbors
+        if connections.is_empty() {
+            let fallback = (self.next_position_x, self.next_position_y);
+            self.last_spawned_position = Some(fallback);
+            return fallback;
+        }
+
+        let mut neighbor_positions = Vec::new();
+        for &conn_id in connections {
+            if let Some(&idx) = self.node_id_to_index.get(&conn_id) {
+                neighbor_positions.push(self.nodes[idx].position);
+            }
+        }
+
+        if neighbor_positions.is_empty() {
+            let fallback = (self.next_position_x, self.next_position_y);
+            self.last_spawned_position = Some(fallback);
+            return fallback;
+        }
+
+        let avg_x = neighbor_positions.iter().map(|p| p.0).sum::<f32>() / neighbor_positions.len() as f32;
+        let avg_y = neighbor_positions.iter().map(|p| p.1).sum::<f32>() / neighbor_positions.len() as f32;
+
+        self.last_spawned_position = Some((avg_x, avg_y));
+        (avg_x, avg_y)
+    }
+
+    fn build_topology_layout(&mut self, topo: &str, config: &ParsedConfig, previous_states: &HashMap<usize, bool>, previous_nodes: &Vec<Node>){
         const WINDOW_WIDTH: f32 = 600.0;
         const WINDOW_HEIGHT: f32 = 400.0;
         match topo {
@@ -339,13 +454,28 @@ impl NetworkRenderer {
                     let y = center_y + radius * angle.sin();
                     let active = previous_states.get(&(drone.id as usize)).copied().unwrap_or(true);
 
-                    self.nodes.push(Node {
-                        id: drone.id as usize,
-                        node_type: NodeType::Drone,
-                        pdr: drone.pdr,
-                        active,
-                        position: (x, y),
-                    });
+                    // 🛠️ Check if this drone ID was manually positioned before
+                    if let Some(&(mx, my)) = self.manual_positions.get(&drone.id) {
+                        self.nodes.push(Node {
+                            id: drone.id as usize,
+                            node_type: NodeType::Drone,
+                            pdr: drone.pdr,
+                            active,
+                            position: (mx, my),  // ✅ manually saved position
+                            manual_position: true,
+                        });
+                    } else {
+                        self.nodes.push(Node {
+                            id: drone.id as usize,
+                            node_type: NodeType::Drone,
+                            pdr: drone.pdr,
+                            active,
+                            position: (x, y),  // normal computed layout
+                            manual_position: false,
+                        });
+                    }
+
+
                     self.node_id_to_index.insert(drone.id, self.nodes.len() - 1);
                 }
             }
@@ -360,13 +490,28 @@ impl NetworkRenderer {
                     let y = if i < 5 { top_y } else { bottom_y };
                     let active = previous_states.get(&(drone.id as usize)).copied().unwrap_or(true);
 
-                    self.nodes.push(Node {
-                        id: drone.id as usize,
-                        node_type: NodeType::Drone,
-                        pdr: drone.pdr,
-                        active,
-                        position: (x, y),
-                    });
+                    // 🛠️ Check if this drone ID was manually positioned before
+                    if let Some(&(mx, my)) = self.manual_positions.get(&drone.id) {
+                        self.nodes.push(Node {
+                            id: drone.id as usize,
+                            node_type: NodeType::Drone,
+                            pdr: drone.pdr,
+                            active,
+                            position: (mx, my),  // ✅ manually saved position
+                            manual_position: true,
+                        });
+                    } else {
+                        self.nodes.push(Node {
+                            id: drone.id as usize,
+                            node_type: NodeType::Drone,
+                            pdr: drone.pdr,
+                            active,
+                            position: (x, y),  // normal computed layout
+                            manual_position: false,
+                        });
+                    }
+
+
                     self.node_id_to_index.insert(drone.id, self.nodes.len() - 1);
                 }
             }
@@ -401,43 +546,72 @@ impl NetworkRenderer {
                     let (x, y) = positions[i];
                     let active = previous_states.get(&(drone.id as usize)).copied().unwrap_or(true);
 
-                    self.nodes.push(Node {
-                        id: drone.id as usize,
-                        node_type: NodeType::Drone,
-                        pdr: drone.pdr,
-                        active,
-                        position: (x, y),
-                    });
+                    // 🛠️ Check if this drone ID was manually positioned before
+                    if let Some(&(mx, my)) = self.manual_positions.get(&drone.id) {
+                        self.nodes.push(Node {
+                            id: drone.id as usize,
+                            node_type: NodeType::Drone,
+                            pdr: drone.pdr,
+                            active,
+                            position: (mx, my),  // ✅ manually saved position
+                            manual_position: true,
+                        });
+                    } else {
+                        self.nodes.push(Node {
+                            id: drone.id as usize,
+                            node_type: NodeType::Drone,
+                            pdr: drone.pdr,
+                            active,
+                            position: (x, y),  // normal computed layout
+                            manual_position: false,
+                        });
+                    }
+
+
                     self.node_id_to_index.insert(drone.id, self.nodes.len() - 1);
                 }
             }
-
-
             "Tree" => {
                 let spacing_x = WINDOW_WIDTH / 5.0;
                 let spacing_y = WINDOW_HEIGHT / 5.0;
                 let mut y = spacing_y;
                 let levels = [1, 2, 3, 4];
-                let mut id = 0;
+                let mut drone_index = 0;
 
                 for &n_nodes in &levels {
                     let x_start = (WINDOW_WIDTH - (n_nodes as f32 - 1.0) * spacing_x) / 2.0;
                     for j in 0..n_nodes {
-                        if id >= config.drone.len() {
+                        if drone_index >= config.drone.len() {
                             break;
                         }
-                        let x = x_start + j as f32 * spacing_x;
-                        let active = previous_states.get(&(config.drone[id].id as usize)).copied().unwrap_or(true);
 
-                        self.nodes.push(Node {
-                            id: config.drone[id].id as usize,
-                            node_type: NodeType::Drone,
-                            pdr: config.drone[id].pdr,
-                            active,
-                            position: (x, y),
-                        });
-                        self.node_id_to_index.insert(config.drone[id].id, self.nodes.len() - 1);
-                        id += 1;
+                        let drone = &config.drone[drone_index];
+                        let x = x_start + j as f32 * spacing_x;
+                        let active = previous_states.get(&(drone.id as usize)).copied().unwrap_or(true);
+
+                        if let Some(&(mx, my)) = self.manual_positions.get(&drone.id) {
+                            self.nodes.push(Node {
+                                id: drone.id as usize,
+                                node_type: NodeType::Drone,
+                                pdr: drone.pdr,
+                                active,
+                                position: (mx, my),  // ✅ manually saved position
+                                manual_position: true,
+                            });
+                        } else {
+                            self.nodes.push(Node {
+                                id: drone.id as usize,
+                                node_type: NodeType::Drone,
+                                pdr: drone.pdr,
+                                active,
+                                position: (x, y),  // normal computed layout
+                                manual_position: false,
+                            });
+                        }
+
+
+                        self.node_id_to_index.insert(drone.id, self.nodes.len() - 1);
+                        drone_index += 1;
                     }
                     y += spacing_y;
                 }
@@ -470,13 +644,28 @@ impl NetworkRenderer {
                     let y = if i < 6 { top_y } else { bottom_y };
                     let active = previous_states.get(&(drone.id as usize)).copied().unwrap_or(true);
 
-                    self.nodes.push(Node {
-                        id: drone.id as usize,
-                        node_type: NodeType::Drone,
-                        pdr: drone.pdr,
-                        active,
-                        position: (x, y),
-                    });
+                    // 🛠️ Check if this drone ID was manually positioned before
+                    if let Some(&(mx, my)) = self.manual_positions.get(&drone.id) {
+                        self.nodes.push(Node {
+                            id: drone.id as usize,
+                            node_type: NodeType::Drone,
+                            pdr: drone.pdr,
+                            active,
+                            position: (mx, my),  // ✅ manually saved position
+                            manual_position: true,
+                        });
+                    } else {
+                        self.nodes.push(Node {
+                            id: drone.id as usize,
+                            node_type: NodeType::Drone,
+                            pdr: drone.pdr,
+                            active,
+                            position: (x, y),  // normal computed layout
+                            manual_position: false,
+                        });
+                    }
+
+
 
                     self.node_id_to_index.insert(drone.id, self.nodes.len() - 1);
                 }
@@ -546,6 +735,7 @@ impl NetworkRenderer {
                     pdr: drone.pdr,
                     active,
                     position: (x, y),
+                    manual_position:false,
                 });
                 self.node_id_to_index.insert(drone.id, self.nodes.len() - 1);
                 node_index += 1;
@@ -610,6 +800,7 @@ impl NetworkRenderer {
 
 
     // Add a new node to the network
+    // "I don't know neighbors, just drop node somewhere."
     fn add_new_node(&mut self, node_type: NodeType) -> usize {
         // Find the next available ID
         let max_id = self.nodes.iter().map(|n| n.id).max().unwrap_or(0);
@@ -622,6 +813,8 @@ impl NetworkRenderer {
             NodeType::Client => Node::client(new_id, self.next_position_x, self.next_position_y),
 
         };
+
+
 
         // Add the node to our list
         self.nodes.push(new_node);
@@ -674,6 +867,7 @@ impl NetworkRenderer {
                 pdr: drone.pdr,
                 active,
                 position: (x, y),
+                manual_position:false,
             });
             self.node_id_to_index.insert(drone.id, self.nodes.len() - 1);
             node_index += 1;
@@ -1099,57 +1293,8 @@ impl NetworkRenderer {
         }
     }
 
-
-
-    /// Remove every edge incident on `node_id`, and clean up the config.
-    /*pub fn remove_edges_of_crashed_node(&mut self, node_id: usize) {
-        // 1) Find the index in `self.nodes` for that NodeId.
-        if let Some(&idx) = self.node_id_to_index.get(&node_id) {
-            // 2) Drop all edges touching that index.
-            self.edges.retain(|&(a, b)| a != idx && b != idx);
-
-            // 3) Update the toml-backed config so future rebuilds skip this node.
-            if let Some(cfg_arc) = &self.config {
-                let mut cfg = cfg_arc.lock().unwrap();
-                cfg.remove_drone_connections(node_id);
-                cfg.remove_client_connections(node_id);
-                cfg.remove_server_connections(node_id);
-            }
-        }
-    }*/
-
-
-
-
     pub fn render(&mut self, ui: &mut egui::Ui,offset: Vec2) {
-        /*
-    // Draw network controls
-    ui.horizontal(|ui| {
-        if ui.button("Add Drone").clicked() {
-            let new_id = self.add_new_node(NodeType::Drone);
-            // Select the new node
-            self.selected_node = Some(new_id);
-        }
 
-        if ui.button("Add Client").clicked() {
-            let new_id = self.add_new_node(NodeType::Client);
-            // Select the new node
-            self.selected_node = Some(new_id);
-        }
-
-        if ui.button("Add Server").clicked() {
-            let new_id = self.add_new_node(NodeType::Server);
-            // Select the new node
-            self.selected_node = Some(new_id);
-        }
-
-        if ui.button("Refresh Network").clicked() {
-            if let Some(config) = &self.config {
-                self.build_from_config(config.clone());
-            }
-        }
-    });
-*/
         // Draw edges first
         {
             let painter = ui.painter();
@@ -1443,14 +1588,56 @@ impl NetworkRenderer {
     }
 
 
+    //I know neighbors, place drone near its neighbor smartly."
     pub fn add_drone(&mut self, id: NodeId, pdr: f32, connections: Vec<NodeId>) {
+        let mut x = self.next_position_x;
+        let mut y = self.next_position_y;
+
         // Calculate position for the new drone
-        let x = self.next_position_x;
-        let y = self.next_position_y;
+        if let Some(existing_node) = self.nodes.iter().find(|n| n.id == id as usize && n.manual_position) {
+            x = existing_node.position.0;
+            y = existing_node.position.1;
+        }
+
+        self.manual_positions.insert(id, (x, y));
+
+
+        let topology_min = Pos2::new(100.0, 100.0);
+        let topology_max = Pos2::new(500.0, 400.0);
+
+        // ➡️ If there is at least one neighbor, calculate spawn zone
+        if let Some(&first_neighbor) = connections.first() {
+            if let Some(&neighbor_index) = self.node_id_to_index.get(&first_neighbor) {
+                let (nx, ny) = self.nodes[neighbor_index].position;
+
+                let center_x = (topology_min.x + topology_max.x) / 2.0;
+                let center_y = (topology_min.y + topology_max.y) / 2.0;
+
+                // Figure out which quadrant neighbor is closer to
+                if nx < center_x && ny < center_y {
+                    // Top-left zone
+                    x = topology_min.x - 100.0 + rand_offset();
+                    y = topology_min.y - 100.0 + rand_offset();
+                } else if nx >= center_x && ny < center_y {
+                    // Top-right zone
+                    x = topology_max.x + 100.0 + rand_offset();
+                    y = topology_min.y - 100.0 + rand_offset();
+                } else if nx < center_x && ny >= center_y {
+                    // Bottom-left zone
+                    x = topology_min.x - 100.0 + rand_offset();
+                    y = topology_max.y + 100.0 + rand_offset();
+                } else {
+                    // Bottom-right zone
+                    x = topology_max.x + 100.0 + rand_offset();
+                    y = topology_max.y + 100.0 + rand_offset();
+                }
+            }
+        }
+
 
         // Create new drone node
-        let new_node = Node::drone(id as usize, x, y,pdr);
-
+        let mut new_node = Node::drone(id as usize, x, y, pdr);
+        new_node.manual_position = true;
         // Add the node to our list
         let new_node_index = self.nodes.len();
         self.nodes.push(new_node);
@@ -1487,6 +1674,12 @@ impl NetworkRenderer {
     }
 
 
+}
+
+fn rand_offset() -> f32 {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    rng.gen_range(-30.0..30.0)
 }
 
 fn load_texture(ctx: &egui::Context, path: &str) -> egui::TextureHandle {

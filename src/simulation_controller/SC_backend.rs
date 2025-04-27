@@ -82,6 +82,7 @@ impl SimulationController {
                     pdr: drone.pdr,
                     active: self.network_graph.contains_key(&node_id),
                     position: default_position, // fallback
+                    manual_position:false,
                 });
             }
         }
@@ -94,6 +95,7 @@ impl SimulationController {
                     pdr: 1.0,
                     active: self.network_graph.contains_key(&node_id),
                     position: default_position,
+                    manual_position:false,
                 });
             }
         }
@@ -106,6 +108,7 @@ impl SimulationController {
                     pdr: 1.0,
                     active: self.network_graph.contains_key(&node_id),
                     position: default_position,
+                    manual_position:false,
                 });
             }
         }

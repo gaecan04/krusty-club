@@ -298,7 +298,11 @@ impl NetworkApp {
 
         // 3. Rebuild the renderer
         if let (Some(renderer), Some(cfg_arc)) = (&mut self.network_renderer, &self.network_config) {
-            renderer.build_from_config(cfg_arc.clone());
+
+
+            renderer.rebuild_preserving_topology(cfg_arc.clone());
+
+            //renderer.build_from_config(cfg_arc.clone());
         }
 
         self.simulation_log.push(format!("🎉 Spawned drone {}", id));
