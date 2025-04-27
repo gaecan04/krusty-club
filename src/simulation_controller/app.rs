@@ -163,6 +163,8 @@ impl NetworkApp {
 
     // This function is kept for the UI but delegates to NetworkRenderer if possible
     fn crash_drone(&mut self, drone_id: NodeId) {
+        println!("config before :{:?}", self.network_config );
+
         if let Some(ctrl_arc) = &self.simulation_controller {
             let mut ctrl = ctrl_arc.lock().unwrap();
 
@@ -189,6 +191,7 @@ impl NetworkApp {
                             renderer.build_from_config(cfg_arc.clone());
                         }
                     }
+                    println!("config after :{:?}", self.network_config )
                 }
                 Err(e) => {
                     self.simulation_log.push(format!("SC refused to crash {}: {}", drone_id, e));

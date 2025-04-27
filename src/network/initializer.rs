@@ -136,8 +136,6 @@ impl ParsedConfig {
 
     pub fn detect_topology(&self) -> Option<String> {
         use std::collections::{HashMap, HashSet};
-        println!("=== DETECTING TOPOLOGY ===");
-        println!("Total drones: {}", self.drone.len());
 
 
         let drone_count = self.drone.len();
@@ -153,10 +151,7 @@ impl ParsedConfig {
 
         let drone_set: HashSet<NodeId> = drone_vec.iter().copied().collect();
 
-        println!("--- Raw drone connections ---");
-        for d in &self.drone {
-            println!("Drone {} → {:?}", d.id, d.connected_node_ids);
-        }
+
 
 
         let connections: HashMap<_, HashSet<_>> = self.drone.iter()
@@ -169,10 +164,7 @@ impl ParsedConfig {
                 (d.id, filtered)
             })
             .collect();
-        println!("--- Drone-only Connections Map ---");
-        for (id, neighs) in &connections {
-            println!("Drone {} → {:?}", id, neighs);
-        }
+
 
 
 
@@ -247,13 +239,6 @@ impl ParsedConfig {
             // Butterfly core check
             let has_cross_core = id_to_neighbors.get(&9).map_or(false, |n| n.contains(&5) && n.contains(&7) && n.contains(&10)) &&
                 id_to_neighbors.get(&10).map_or(false, |n| n.contains(&6) && n.contains(&8) && n.contains(&9));
-
-            println!("Collected {} drone degrees", degrees.len());
-            for (i, d) in degrees.iter().enumerate() {
-                println!("Drone {} has degree {}", drone_vec[i], d);
-            }
-
-            println!("Butterfly structural check: {}", has_cross_core);
 
             deg2 == 4 && deg3 == 6 && has_cross_core
         };
