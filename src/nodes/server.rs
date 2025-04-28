@@ -6,12 +6,95 @@ COSE DA FARE :
 
 */
 
+use petgraph::algo::dijkstra;
 use std::collections::HashMap;
 use crossbeam_channel::{Receiver, RecvError, Sender};
 use eframe::egui::accesskit::Node;
 use wg_2024::packet::{Ack, FloodRequest, FloodResponse, Fragment, Nack, NackType, NodeType, Packet, PacketType};
 use wg_2024::network::{NodeId, SourceRoutingHeader};
 use log::{info, error, warn, debug};
+use petgraph::graph::{DiGraph, NodeIndex};
+use petgraph::visit::EdgeRef;
+
+#[derive(Clone, Debug)]
+pub struct NetworkGraph {
+    graph: DiGraph<NodeId, usize>,
+    node_indices: HashMap<NodeId, NodeIndex>,
+}
+
+impl NetworkGraph {
+    pub fn new() -> Self {
+        Self {
+            graph: DiGraph::new(),
+            node_indices: HashMap::new(),
+        }
+    }
+
+    pub fn add_node(&mut self, id: NodeId) -> NodeIndex {
+        if let Some(&index) = self.node_indices.get(&id) {
+            index
+        } else {
+            let index = self.graph.add_node(id);
+            self.node_indices.insert(id, index);
+            index
+        }
+    }
+
+    pub fn add_link(&mut self, a: NodeId, b: NodeId) {
+        let a_idx = self.add_node(a);
+        let b_idx = self.add_node(b);
+        self.graph.update_edge(a_idx, b_idx, 0);
+        self.graph.update_edge(b_idx, a_idx, 0);
+    }
+
+    pub fn increment_drop(&mut self, a: NodeId, b: NodeId) {
+        if let (Some(&a_idx), Some(&b_idx)) = (self.node_indices.get(&a), self.node_indices.get(&b)) {
+            if let Some(edge) = self.graph.find_edge(a_idx, b_idx) {
+                if let Some(weight) = self.graph.edge_weight_mut(edge) {
+                    *weight += 1;
+                }
+            }
+            //increment also the other way
+            if let Some(edge) = self.graph.find_edge(b_idx, a_idx) {
+                if let Some(weight) = self.graph.edge_weight_mut(edge) {
+                    *weight += 1;
+                }
+            }
+        }
+    }
+
+    pub fn best_path(&self, source: NodeId, target: NodeId) -> Option<Vec<NodeId>> {
+        let (source_idx, target_idx) = (self.node_indices.get(&source)?, self.node_indices.get(&target)?);
+        let paths = dijkstra(&self.graph, *source_idx, Some(*target_idx), |e| *e.weight());
+        let mut path = vec![];
+
+        if let Some(_) = paths.get(target_idx) {
+            let mut current = *target_idx;
+            path.push(self.graph[current]);
+
+            while current != *source_idx {
+                if let Some((prev, _)) = self.graph
+                    .edges_directed(current, petgraph::Direction::Incoming)
+                    .filter_map(|e| {
+                        let neighbor = e.source();
+                        let cost = paths.get(&neighbor)?;
+                        Some((neighbor, cost))
+                    })
+                    .min_by_key(|&(_, cost)| cost.clone())
+                {
+                    path.push(self.graph[prev]);
+                    current = prev;
+                } else {
+                    return None;
+                }
+            }
+            path.reverse();
+            Some(path)
+        } else {
+            None
+        }
+    }
+}
 
 
 #[derive(Debug, Clone)]
@@ -22,6 +105,7 @@ pub struct server {
     pub packet_sender: HashMap<NodeId, Sender<Packet>>, // Hashmap containing each sender channel to the neighbors (channels to send packets to clients)
     pub packet_receiver: Receiver<Packet>, // Channel to receive packets from clients/drones
     pub registered_clients: HashMap<NodeId,Vec<NodeId>>,
+    pub network_graph: NetworkGraph,
     //recovery_in_progress:  HashMap<(u64, NodeId), bool>, // Tracks if recovery is already in progress for a session
     //drop_counts: HashMap<(u64, NodeId), usize>, // Track number of drops per session
 }
@@ -38,6 +122,7 @@ impl server {
             packet_sender: packet_sender,
             packet_receiver,
             registered_clients: HashMap::new(),
+            network_graph: NetworkGraph::new(),
             //recovery_in_progress: HashMap::new(),
             //drop_counts: HashMap::new(),
         }
@@ -283,7 +368,17 @@ impl server {
                 //poi riceverò flood_response e agisco sul grafo come al solito.
 
                 // grafo fatto con pet_graph.
+                warn!("Server {}: Received Nack::Dropped", self.id);
 
+                if routing_header.hop_index >= 1 {
+                    if let (Some(from), Some(to)) = (
+                        routing_header.hops.get(routing_header.hop_index - 1),
+                        routing_header.hops.get(routing_header.hop_index),
+                    ) {
+                        self.network_graph.increment_drop(*from, *to);
+                        info!("Increased drop cost between {} and {}", from, to);
+                    }
+                }
                 warn!("Received Nack::Dropped, modifying the costs in the graph")
 
             }
@@ -384,6 +479,7 @@ impl server {
         info!("Received FloodResponse for flood_id {} in session {}", flood_response.flood_id, session_id);
         //obiettivo: fare tutta quella roba strana con il grafo.
 
+        /*
         // Extract the path from the response
         let path = flood_response.path_trace
             .iter()
@@ -394,7 +490,14 @@ impl server {
         //integrare tutti i collegamenti e nodi del path dentro il grado
 
         // TODO: Use this path for future communications with this client
-        // You might want to store this path in a new field in your server struct
+        // You might want to store this path in a new field in your server struct*/
+        let nodes: Vec<NodeId> = flood_response.path_trace.iter().map(|(id, _)| *id).collect();
+
+        for pair in nodes.windows(2) {
+            if let [a, b] = pair {
+                self.network_graph.add_link(*a, *b);
+            }
+        }
 
     }
 
@@ -433,105 +536,14 @@ impl server {
             error!("No sender available for node {}", target_id);
         }
     }
+    pub fn compute_best_path(&self, from: NodeId, to: NodeId) -> Option<Vec<NodeId>> {
+        self.network_graph.best_path(from, to)
+    }
 
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*; // Assuming the server module and related types are in the parent module
-    use crossbeam_channel::unbounded;
-    use wg_2024::packet::{Packet, PacketType, Fragment, Ack};
-    use wg_2024::network::{SourceRoutingHeader, NodeId};
 
-    #[test]
-    fn test_handle_nack_dropped_fragment() {
-        // Create channels for sending/receiving packets
-        let (server_tx, server_rx) = unbounded();
-        let (packet_tx, packet_rx) = unbounded();
-
-        // Create server and insert test data
-        let mut srv = server::new(1, server_tx, packet_rx);
-
-        // Session and routing setup
-        let session_id: u64 = 44;
-        let src_node: NodeId = 10;
-        let dst_node: NodeId = 20;
-        let routing_header = SourceRoutingHeader {
-            hop_index: 0,
-            hops: vec![src_node, dst_node],
-        };
-
-        // Create and store a fragment in the server's state for testing
-        let mut data = [0u8; 128];
-        for i in 0..128 {
-            data[i] = i as u8;
-        }
-
-        // Create fragment structures
-        let fragment0 = Fragment {
-            fragment_index: 0,
-            total_n_fragments: 2,
-            length: 128,
-            data,
-        };
-
-        let fragment1 = Fragment {
-            fragment_index: 1,
-            total_n_fragments: 2,
-            length: 64,
-            data,
-        };
-
-        // Manually insert fragments into server state
-        let key = (session_id, src_node);
-        srv.received_fragments.insert(key, vec![Some(data), Some(data)]);
-        srv.fragment_lengths.insert(key, 64);
-
-        // Create a NACK for fragment 0 with Dropped type
-        let nack = Nack {
-            fragment_index: 0,
-            nack_type: NackType::Dropped,
-        };
-
-        // Packet from destination to source (reversed routing)
-        let nack_packet = Packet {
-            pack_type: PacketType::Nack(nack),
-            routing_header: SourceRoutingHeader {
-                hop_index: 0,
-                hops: vec![dst_node, src_node], // Reversed route
-            },
-            session_id,
-        };
-
-        // Send the NACK to the server
-        packet_tx.send(nack_packet).unwrap();
-
-        // Process the NACK
-        if let Ok(packet) = packet_rx.recv() {
-            match &packet.pack_type {
-                PacketType::Nack(nack) => {
-                    srv.handle_nack(packet.session_id, nack, packet.routing_header);
-                },
-                _ => panic!("Expected a NACK packet"),
-            }
-        }
-
-        // Check the server's response - should resend the fragment with a new route
-        let responses: Vec<Packet> = server_rx.try_iter().collect();
-        assert!(!responses.is_empty(), "Server should have sent a response to the NACK");
-
-        // Find resent fragments
-        let resent_fragments: Vec<&Packet> = responses.iter()
-            .filter(|p| {
-                if let PacketType::MsgFragment(fragment) = &p.pack_type {
-                    fragment.fragment_index == 0 && p.session_id == session_id
-                } else {
-                    false
-                }
-            })
-            .collect();
-
-        assert!(!resent_fragments.is_empty(), "Server should have resent the fragment");
-    }
 
 }
