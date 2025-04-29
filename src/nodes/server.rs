@@ -64,34 +64,49 @@ impl NetworkGraph {
     }
 
     pub fn best_path(&self, source: NodeId, target: NodeId) -> Option<Vec<NodeId>> {
-        let (source_idx, target_idx) = (self.node_indices.get(&source)?, self.node_indices.get(&target)?);
-        let paths = dijkstra(&self.graph, *source_idx, Some(*target_idx), |e| *e.weight());
-        let mut path = vec![];
+        let source_idx = *self.node_indices.get(&source)?;
+        let target_idx = *self.node_indices.get(&target)?;
 
-        if let Some(_) = paths.get(target_idx) {
-            let mut current = *target_idx;
-            path.push(self.graph[current]);
+        // Dijkstra: restituisco anche da dove vengo (predecessore)
+        let mut predecessors: HashMap<NodeIndex, NodeIndex> = HashMap::new();
+        let _ = dijkstra(&self.graph, source_idx, Some(target_idx), |e| {
+            let from = e.source();
+            let to = e.target();
+            // Se trovo un nuovo nodo raggiungibile, registro da chi arrivo
+            predecessors.entry(to).or_insert(from);
+            *e.weight()
+        });
 
-            while current != *source_idx {
-                if let Some((prev, _)) = self.graph
-                    .edges_directed(current, petgraph::Direction::Incoming)
-                    .filter_map(|e| {
-                        let neighbor = e.source();
-                        let cost = paths.get(&neighbor)?;
-                        Some((neighbor, cost))
-                    })
-                    .min_by_key(|&(_, cost)| cost.clone())
-                {
-                    path.push(self.graph[prev]);
-                    current = prev;
-                } else {
-                    return None;
-                }
+        // Se non ho trovato un cammino fino a target, esco
+        if !predecessors.contains_key(&target_idx) {
+            return None;
+        }
+
+        // Ora ricostruisco il path usando i predecessori
+        let mut path = vec![self.graph[target_idx]];
+        let mut current = target_idx;
+        while current != source_idx {
+            if let Some(&prev) = predecessors.get(&current) {
+                path.push(self.graph[prev]);
+                current = prev;
+            } else {
+                return None;
             }
-            path.reverse();
-            Some(path)
-        } else {
-            None
+        }
+
+        path.reverse();
+        Some(path)
+    }
+
+
+    pub fn print_graph(&self) {
+        println!("Current network graph:");
+
+        for edge in self.graph.edge_references() {
+            let source = self.graph[edge.source()];
+            let target = self.graph[edge.target()];
+            let weight = edge.weight();
+            println!("{} <-> {} with {} drops", source, target, weight);
         }
     }
 }
@@ -142,7 +157,7 @@ impl server {
                 Ok(mut packet) => {
                     match &packet.pack_type {
                         PacketType::MsgFragment(fragment) => {
-                            self.send_ack(&mut packet, &fragment);
+                            self.send_ack(&packet, &fragment);
                             self.handle_fragment(packet.session_id, fragment, packet.routing_header);
                         }
                         PacketType::Nack(nack) => {
@@ -150,7 +165,7 @@ impl server {
                         }
                         PacketType::Ack(ack) => {
                             // Process ACKs, needed for simulation controller to know when to print the message
-                            self.handle_ack(packet.session_id, ack, packet.routing_header);
+                            //self.handle_ack(packet.session_id, ack, packet.routing_header);
                         }
                         PacketType::FloodRequest(flood_request) => {
                             // Process flood requests from clients trying to discover the network
@@ -423,7 +438,7 @@ impl server {
     }
 
     // modifica cosi che ogni volta che ricevo un frammento mando un ack, con il proprio index number.
-    fn send_ack(&mut self, packet: &mut Packet, fragment: &Fragment) {
+    fn send_ack(&mut self, packet: &Packet, fragment: &Fragment) {
         let ack_packet = Packet {
             pack_type: PacketType::Ack(Ack {
                 fragment_index: fragment.fragment_index,
@@ -469,7 +484,7 @@ impl server {
             pack_type: flood_response,
         };
         self.packet_sender.iter().for_each(|(_, sender)| {
-            sender.try_send(packet_flood_response).unwrap()
+            sender.try_send(packet_flood_response.clone()).unwrap()
         })
 
     }
@@ -544,6 +559,87 @@ impl server {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn test_network_graph_best_path() {
+        println!("Creating new graph for test");
+        let mut graph = NetworkGraph::new();
+
+        // Build small network: Server(0) - Drone1(1) - Drone2(2) - Client(3)
+        graph.add_link(0, 1);
+        graph.add_link(1, 2);
+        graph.add_link(2, 3);
+
+        // Add alternative worse path: Server(0) - Drone4(4) - Client(3)
+        graph.add_link(0, 4);
+        graph.add_link(4, 3);
+
+        // Simulate drop on 0-4 and 4-3 (bad path)
+        graph.increment_drop(0, 4);
+        graph.increment_drop(0, 4);
+        graph.increment_drop(4, 3);
+        println!("prova");
+        // Now best path should be 0 -> 1 -> 2 -> 3
+        let path = graph.best_path(0, 3).unwrap();
+        println!("{:?}", path);
+        assert_eq!(path, vec![0, 1, 2, 3]);
+        graph.print_graph();
+    }
+    #[test]
+    fn test_network_graph_best_path_2() {
+        let mut graph = NetworkGraph::new();
+
+        // Crea la rete:
+        // 0 -> 1 -> 2 -> 3
+        // 0 -> 4 -> 3
+        // 0 -> 5 -> 6 -> 3
+        graph.add_link(0, 1);
+        graph.add_link(1, 2);
+        graph.add_link(2, 3);
+
+        graph.add_link(0, 4);
+        graph.add_link(4, 3);
+
+        graph.add_link(0, 5);
+        graph.add_link(5, 6);
+        graph.add_link(6, 3);
+
+        // Simuliamo drop:
+        // peggioriamo alcuni link
+        graph.increment_drop(0, 1);
+        graph.increment_drop(1, 2);
+        graph.increment_drop(2, 3);
+
+        graph.increment_drop(0, 4);
+        graph.increment_drop(4, 3);
+        graph.increment_drop(4, 3); // penalizza ancora di più 4->3
+
+        graph.print_graph();
+
+        // Non tocchiamo 5-6-3 ➔ Percorso alternativo migliore
+        // Percorsi:
+        // - 0-1-2-3: 3 drop
+        // - 0-4-3: 3 drop
+        // - 0-5-6-3: 0 drop (BEST PATH)
+
+        let path = graph.best_path(0, 3).unwrap();
+        println!("Path found: {:?}", path);
+
+        assert_eq!(path, vec![0, 5, 6, 3]);
+
+        // Verifica anche i pesi lungo il percorso
+        let total_drop: usize = path.windows(2)
+            .map(|pair| {
+                let (a, b) = (pair[0], pair[1]);
+                let a_idx = graph.node_indices.get(&a).unwrap();
+                let b_idx = graph.node_indices.get(&b).unwrap();
+                let edge = graph.graph.find_edge(*a_idx, *b_idx).unwrap();
+                *graph.graph.edge_weight(edge).unwrap()
+            })
+            .sum();
+        assert_eq!(total_drop, 0);
+    }
 
 
 }
