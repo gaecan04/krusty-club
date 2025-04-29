@@ -39,6 +39,13 @@ impl NetworkGraph {
             index
         }
     }
+    pub fn remove_node(&mut self, node_id: NodeId) {
+        if let Some(node_index) = self.node_indices.remove(&node_id) {
+            self.graph.remove_node(node_index);
+        } else {
+            warn!("Tried to remove non-existing node {}", node_id);
+        }
+    }
 
     pub fn add_link(&mut self, a: NodeId, b: NodeId) {
         let a_idx = self.add_node(a);
@@ -46,7 +53,6 @@ impl NetworkGraph {
         self.graph.update_edge(a_idx, b_idx, 0);
         self.graph.update_edge(b_idx, a_idx, 0);
     }
-
     pub fn increment_drop(&mut self, a: NodeId, b: NodeId) {
         if let (Some(&a_idx), Some(&b_idx)) = (self.node_indices.get(&a), self.node_indices.get(&b)) {
             if let Some(edge) = self.graph.find_edge(a_idx, b_idx) {
@@ -62,7 +68,6 @@ impl NetworkGraph {
             }
         }
     }
-
     pub fn best_path(&self, source: NodeId, target: NodeId) -> Option<Vec<NodeId>> {
         let source_idx = *self.node_indices.get(&source)?;
         let target_idx = *self.node_indices.get(&target)?;
@@ -97,8 +102,6 @@ impl NetworkGraph {
         path.reverse();
         Some(path)
     }
-
-
     pub fn print_graph(&self) {
         println!("Current network graph:");
 
@@ -218,70 +221,6 @@ impl server {
             self.handle_complete_message(key, routing_header.clone());
         }
     }
-    /*fn handle_complete_message(&mut self, key: (u64, NodeId), routing_header: SourceRoutingHeader) {
-        let fragments = self.received_fragments.remove(&key).unwrap();
-        let total_length = fragments.len() * 128 - 128 + self.fragment_lengths.remove(&key).unwrap_or(128) as usize;
-
-        // Reassemble the message
-        let mut message = Vec::with_capacity(total_length);
-        if fragments.iter().any(|f| f.is_none()) {
-            error!("Missing fragments detected for session {:?}", key);
-            return; // Handle incomplete fragments gracefully
-        }
-        for fragment in fragments {
-            message.extend_from_slice(&fragment.unwrap());
-        }
-        message.truncate(total_length);
-        info!("Server reassembled message for session {:?}: {:?}", key, message);
-
-
-        //chat server implementation:
-        let message_string = String::from_utf8_lossy(&message).to_string();
-        let session_id: u64 = key.0;
-        let client_id = key.1;
-
-        let tokens: Vec<&str> = message_string.trim().splitn(3, ':').collect();
-
-        match tokens.as_slice() {
-            ["registration_to_chat"] => {
-                self.registered_clients
-                    .entry(session_id as NodeId)
-                    .or_default()
-                    .push(client_id);
-                info!("Client {} registered to chat in session {}", client_id, session_id);
-            }
-            ["client_list?"] => {
-                if let Some(sender) = self.packet_sender.get(&client_id) {
-                    let clients = self
-                        .registered_clients
-                        .get(&(session_id as NodeId))
-                        .cloned()
-                        .unwrap_or_default();
-                    let response = format!("client_list!: {:?}", clients);
-                    self.send_chat_message(session_id as u64, client_id, response, routing_header);
-                }
-            }
-            ["message_for?", target_id_str, msg] => {
-                if let Ok(target_id) = target_id_str.parse::<NodeId>() {
-                    if (self.registered_clients
-                        .get(&(session_id as NodeId))
-                        .map_or(false, |list| list.contains(&target_id)))
-                    {
-                        let response = format!("message_from!:{}:{}", client_id, msg);
-                        self.send_chat_message(session_id as u64, target_id, response, routing_header);
-                    } else {
-                        let response = "error_wrong_client_id!".to_string();
-                        self.send_chat_message(session_id as u64, client_id, response, routing_header);
-                    }
-                }
-            }
-            _ => {
-                warn!("Unrecognized message: {}", message_string);
-            }
-        }
-
-    }*/
-
 
     fn handle_complete_message(&mut self, key: (u64, NodeId), routing_header: SourceRoutingHeader) {
         let fragments = self.received_fragments.remove(&key).unwrap();
@@ -396,7 +335,16 @@ impl server {
                 }
                 warn!("Received Nack::Dropped, modifying the costs in the graph")
 
-            }
+            },
+            NackType::ErrorInRouting(crashed_node_id) => {
+                warn!("Server detected a crashed node {} due to ErrorInRouting.", crashed_node_id);
+
+                // REMOVE the crashed node from the network graph
+                self.network_graph.remove_node(crashed_node_id);
+
+                info!("Server updated network graph after detecting crash of node {}", crashed_node_id);
+                self.network_graph.print_graph(); // optional: print updated graph
+            },
             _ => {
                     warn!("Received ErrorInRouting/DestinationIsDrone/UnexpectedRecipient NACK type, sending flood request");
                     let flood_request = FloodRequest {
