@@ -588,6 +588,30 @@ mod tests {
             .sum();
         assert_eq!(total_drop, 0);
     }
+    #[test]
+    fn test_remove_node_from_graph() {
+        let mut graph = NetworkGraph::new();
+
+        // Setup:
+        graph.add_link(1, 2);
+        graph.add_link(2, 3);
+        graph.add_link(3, 4);
+        println!("Graph before removing node");
+        graph.print_graph();
+        //assert!(graph.node_indices.contains_key(&2));
+        assert!(graph.best_path(1, 4).is_some());
+        // Remove node 2
+        graph.remove_node(2);
+        // Verify node 2 is no longer in the graph
+        assert!(!graph.node_indices.contains_key(&2));
+        // Any path going through node 2 should now fail
+        let path = graph.best_path(1, 4);
+        println!("{:?}", path);
+        let path2= graph.best_path(3,4) ;
+        graph.print_graph();
+        assert!(path.is_none(), "Expected no path from 1 to 4 after node 2 was removed");
+
+    }
 
 
 }
