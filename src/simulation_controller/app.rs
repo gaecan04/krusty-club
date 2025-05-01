@@ -13,7 +13,7 @@ use wg_2024::controller::{DroneCommand, DroneEvent};
 use wg_2024::drone::Drone;
 use wg_2024::network::NodeId;
 use wg_2024::packet::Packet;
-use crate::simulation_controller::chatUI::{ChatMessage, ChatUIState};
+use crate::simulation_controller::chatUI::{ChatMessage, ChatUIState, ClientStatus};
 
 enum AppState {
     Welcome,
@@ -52,6 +52,8 @@ pub struct NetworkApp {
     new_drone_pdr: f32,
     new_drone_connections_str: String,
     chat_ui:ChatUIState,
+    packet_senders: HashMap<NodeId, Sender<Packet>>,
+
 }
 
 impl NetworkApp {
@@ -646,63 +648,39 @@ impl NetworkApp {
 
     fn render_chat_view(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Online Clients");
-            ui.horizontal_wrapped(|ui| {
-                for &client_id in &self.chat_ui.online_clients {
-                    ui.horizontal(|ui| {
-                        ui.colored_label(Color32::GREEN, "●");
-                        ui.label(format!("Client #{}", client_id));
-                    });
-                }
-            });
-
-            ui.separator();
-            ui.heading("Chat");
-            egui::ScrollArea::vertical()
-                .max_height(200.0)
-                .show(ui, |ui| {
-                    for msg in &self.chat_ui.messages {
-                        ui.label(format!("From Client #{}: {}", msg.from, msg.content));
+            // ✅ TEMPORARY BOOTSTRAP
+            if self.chat_ui.client_status.is_empty() || self.chat_ui.servers.is_empty() {
+                if let Some(ctrl) = &self.simulation_controller {
+                    let ctrl = ctrl.lock().unwrap();
+                    for client_id in ctrl.get_all_client_ids() {
+                        self.chat_ui.client_status.insert(client_id, ClientStatus::Offline);
                     }
-                });
+                    self.chat_ui.servers = ctrl.get_all_server_ids();
+                }
+            }
 
-            ui.separator();
-            ui.horizontal(|ui| {
-                ui.label("To:");
-                egui::ComboBox::from_id_source("recipient_combo")
-                    .selected_text(
-                        self.chat_ui
-                            .selected_recipient
-                            .map_or("Select...".into(), |id| format!("Client #{}", id)),
-                    )
-                    .show_ui(ui, |ui| {
-                        for &id in &self.chat_ui.online_clients {
-                            if ui
-                                .selectable_label(self.chat_ui.selected_recipient == Some(id), format!("Client #{}", id))
-                                .clicked()
-                            {
-                                self.chat_ui.selected_recipient = Some(id);
-                            }
-                        }
-                    });
-            });
-
-            ui.horizontal(|ui| {
-                let input = ui
-                    .add(egui::TextEdit::singleline(&mut self.chat_ui.input).hint_text("Type message..."))
-                    .lost_focus();
-                if ui.button("Send").clicked()
-                    || input && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                {
-                    if let Some(to) = self.chat_ui.selected_recipient {
-                        if !self.chat_ui.input.trim().is_empty() {
-                            // 👇 Simulated sending logic
-                            self.chat_ui.messages.push(ChatMessage {
-                                from: 1, // TODO: Replace with actual client ID
-                                content: format!("To Client #{}: {}", to, self.chat_ui.input.trim()),
-                            });
-                            self.chat_ui.input.clear();
-                        }
+            self.chat_ui.render(ui, &mut |from: NodeId, to: NodeId, msg: String| {
+                if let Some(ctrl) = &self.simulation_controller {
+                    let mut ctrl = ctrl.lock().unwrap();
+                    if let Some(sender) = ctrl.get_packet_sender(&from) {
+                        let data = msg.clone().into_bytes();
+                        let mut buf = [0u8; 128];
+                        let len = data.len().min(128);
+                        buf[..len].copy_from_slice(&data[..len]);
+                        let packet = wg_2024::packet::Packet::new_fragment(
+                            wg_2024::network::SourceRoutingHeader {
+                                hop_index: 1,
+                                hops: vec![from, to],
+                            },
+                            0,
+                            wg_2024::packet::Fragment {
+                                fragment_index: 0,
+                                total_n_fragments: 1,
+                                length: len as u8,
+                                data: buf,
+                            },
+                        );
+                        let _ = sender.send(packet);
                     }
                 }
             });
@@ -750,6 +728,9 @@ impl NetworkApp {
             renderer.set_simulation_controller(controller.clone());
             app.simulation_log.push("Controller connected to network renderer".to_string());
         }
+
+
+
         app.network_config = Some(config.clone());
         app.detect_and_log_topology(&config_path, config.clone());
         app.topology_selected = true;
@@ -768,8 +749,13 @@ impl NetworkApp {
 
         self.topology_selected = true;
     }
+    pub fn get_packet_sender(&self, id: NodeId) -> Option<&Sender<Packet>> {
+        self.packet_senders.get(&id)
+    }
+
 
 }
+
 
 impl Default for NetworkApp {
     fn default() -> Self {
@@ -798,6 +784,7 @@ impl Default for NetworkApp {
             new_drone_pdr: 0.0,
             new_drone_connections_str: String::new(),
             chat_ui: ChatUIState::new(),
+            packet_senders: HashMap::new(),
         }
     }
 }
