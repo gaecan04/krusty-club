@@ -1,4 +1,4 @@
-mod client1;
-mod client2;
+pub(crate) mod client1;
+pub(crate) mod client2;
 
-mod server;
+pub(crate) mod server;
