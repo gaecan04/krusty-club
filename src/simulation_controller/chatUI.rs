@@ -23,7 +23,10 @@ pub struct ChatUIState {
     pub chat_messages: Vec<ChatMessage>,
     pub chat_input: String,
     pub active_chat_pair: Option<(NodeId, NodeId)>,
-    pub messages: Vec<ChatMessage>,
+    pub pending_chat_request: Option<(NodeId, NodeId)>,
+    pub selected_sender: Option<NodeId>,
+    pub pending_chat_termination: Option<(NodeId, NodeId)>,
+    pub server_client_map: HashMap<NodeId, Vec<NodeId>>, // new: server ID -> logged-in clients
 }
 
 impl ChatUIState {
@@ -36,11 +39,43 @@ impl ChatUIState {
             chat_messages: vec![],
             chat_input: String::new(),
             active_chat_pair: None,
-            messages: vec![],
+            pending_chat_request: None,
+            selected_sender: None,
+            pending_chat_termination: None,
+            server_client_map: HashMap::new(),
         }
     }
 
+    fn render_server_info(&self, ui: &mut egui::Ui) {
+        ui.group(|ui| {
+            ui.label(RichText::new("Server Overview").strong());
+            for &server_id in &self.servers {
+                ui.separator();
+                ui.label(format!("Server #{server_id}"));
+                let clients = self.server_client_map.get(&server_id).cloned().unwrap_or_default();
+                if clients.is_empty() {
+                    ui.label("  No clients logged in");
+                } else {
+                    ui.label("  Logged in clients:");
+                    for cid in &clients {
+                        ui.label(format!("    - Client #{}", cid));
+                    }
+                    if let Some((a, b)) = self.active_chat_pair {
+                        if clients.contains(&a) && clients.contains(&b) {
+                            ui.label("  🔵 Active chat:");
+                            ui.label(format!("    - Client #{} ↔ Client #{}", a, b));
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     pub fn render(&mut self, ui: &mut egui::Ui, on_send: &mut impl FnMut(NodeId, NodeId, String)) {
+        egui::SidePanel::right("server_status_panel").show_inside(ui, |ui| {
+            self.render_server_info(ui);
+        });
+
         ui.horizontal_wrapped(|ui| {
             for (&client_id, status) in &self.client_status {
                 let color = match status {
@@ -84,6 +119,7 @@ impl ChatUIState {
                         if ui.button("Login").clicked() {
                             if let Some(server_id) = self.selected_server {
                                 self.client_status.insert(client_id, ClientStatus::Connected);
+                                self.server_client_map.entry(server_id).or_default().push(client_id);
                                 on_send(client_id, server_id, "[Login]".to_string());
                             }
                         }
@@ -94,6 +130,12 @@ impl ChatUIState {
                         if ui.button("Logout").clicked() {
                             if let Some(server_id) = self.selected_server {
                                 self.client_status.insert(client_id, ClientStatus::Offline);
+                                if let Some(clients) = self.server_client_map.get_mut(&server_id) {
+                                    clients.retain(|&c| c != client_id);
+                                }
+                                if let Some(clients) = self.server_client_map.get_mut(&server_id) {
+                                    clients.retain(|&c| c != client_id);
+                                }
                                 on_send(client_id, server_id, "[Logout]".to_string());
                             }
                         }
@@ -105,63 +147,112 @@ impl ChatUIState {
                         }
                     });
 
+                    let mut requested_chat_with: Option<NodeId> = None;
+
                     ui.horizontal(|ui| {
                         ui.label("Start Chat With:");
-                        let mut start_chat_with: Option<NodeId> = None;
-
-                        for (&other_id, other_status) in &self.client_status {
-                            if other_id != client_id && *other_status == ClientStatus::Connected {
-                                if ui.button(format!("Client #{other_id}")).clicked() {
-                                    start_chat_with = Some(other_id);
+                        for (&other_id, &other_status) in self.client_status.iter() {
+                            if other_id != client_id && other_status == ClientStatus::Connected {
+                                let same_server = self.server_client_map.iter().any(|(_, list)| {
+                                    list.contains(&client_id) && list.contains(&other_id)
+                                });
+                                if same_server && ui.button(format!("Client #{other_id}")).clicked() {
+                                    requested_chat_with = Some(other_id);
                                 }
                             }
                         }
-
-                        if let Some(peer_id) = start_chat_with {
-                            if let Some(server_id) = self.selected_server {
-                                on_send(client_id, server_id, format!("[ChatRequest]::{peer_id}"));
-                                self.client_status.insert(client_id, ClientStatus::Chatting(peer_id));
-                                self.client_status.insert(peer_id, ClientStatus::Chatting(client_id));
-                                self.active_chat_pair = Some((client_id, peer_id));
-                            }
-                        }
-
                     });
+
+                    if let Some(peer_id) = requested_chat_with {
+                        if let Some(server_id) = self.selected_server {
+                            self.pending_chat_request = Some((client_id, peer_id));
+                            on_send(client_id, server_id, format!("[ChatRequest]::{peer_id}"));
+                        }
+                    }
                 }
                 ClientStatus::Chatting(peer_id) => {
                     ui.horizontal(|ui| {
                         if ui.button("End Chat").clicked() {
-                            if let Some(server_id) = self.selected_server {
-                                on_send(client_id, server_id, "[ChatFinish]".to_string());
-                                self.client_status.insert(client_id, ClientStatus::Connected);
-                                self.client_status.insert(peer_id, ClientStatus::Connected);
-                                self.active_chat_pair = None;
-                            }
+                            self.pending_chat_termination = Some((client_id, peer_id));
                         }
                     });
                 }
             }
         }
 
+        if let Some((requester, target)) = self.pending_chat_request {
+            if Some(target) == self.selected_client {
+                egui::Window::new("Incoming Chat Request")
+                    .collapsible(false)
+                    .show(ui.ctx(), |ui| {
+                        ui.label(format!("Client #{} wants to start a chat.", requester));
+
+                        if ui.button("Accept").clicked() {
+                            self.client_status.insert(requester, ClientStatus::Chatting(target));
+                            self.client_status.insert(target, ClientStatus::Chatting(requester));
+                            self.active_chat_pair = Some((requester, target));
+                            self.selected_sender = Some(target);
+                            self.pending_chat_request = None;
+                        }
+
+                        if ui.button("Decline").clicked() {
+                            self.pending_chat_request = None;
+                        }
+                    });
+            }
+        }
+
+        if let Some((initiator, peer)) = self.pending_chat_termination {
+            if Some(peer) == self.selected_client {
+                egui::Window::new("Confirm End Chat")
+                    .collapsible(false)
+                    .show(ui.ctx(), |ui| {
+                        ui.label(format!("Client #{} wants to end the chat.", initiator));
+
+                        if ui.button("Confirm End").clicked() {
+                            if let Some(server_id) = self.selected_server {
+                                on_send(initiator, server_id, "[ChatFinish]".to_string());
+                            }
+                            self.client_status.insert(initiator, ClientStatus::Connected);
+                            self.client_status.insert(peer, ClientStatus::Connected);
+                            self.active_chat_pair = None;
+                            self.pending_chat_termination = None;
+                        }
+
+                        if ui.button("Cancel").clicked() {
+                            self.pending_chat_termination = None;
+                        }
+                    });
+            }
+        }
+
         ui.separator();
-        if let Some((from, to)) = self.active_chat_pair {
+        if let Some((a, b)) = self.active_chat_pair {
+            let options = [a, b];
             ui.horizontal(|ui| {
                 ui.label("From:");
-                egui::ComboBox::from_id_source("from_selector")
-                    .selected_text(format!("Client #{from}"))
+                egui::ComboBox::from_id_source("chat_from_selector")
+                    .selected_text(self.selected_sender.map_or("Select sender".into(), |id| format!("Client #{id}")))
                     .show_ui(ui, |ui| {
-                        ui.label(format!("Chat from Client #{from} to #{to}"));
+                        for &id in &options {
+                            if ui.selectable_label(self.selected_sender == Some(id), format!("Client #{id}")).clicked() {
+                                self.selected_sender = Some(id);
+                            }
+                        }
                     });
             });
 
             ui.horizontal(|ui| {
                 let lost_focus = ui.add(TextEdit::singleline(&mut self.chat_input).hint_text("Type message...")).lost_focus();
                 if ui.button("Send").clicked() || (lost_focus && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
-                    if !self.chat_input.trim().is_empty() {
-                        let msg = format!("[MessageTo]::{to}::{}", self.chat_input.trim());
-                        on_send(from, to, msg);
-                        self.chat_messages.push(ChatMessage { from, content: self.chat_input.clone() });
-                        self.chat_input.clear();
+                    if let Some(from) = self.selected_sender {
+                        let to = if from == a { b } else { a };
+                        if !self.chat_input.trim().is_empty() {
+                            let msg = format!("[MessageTo]::{to}::{}", self.chat_input.trim());
+                            on_send(from, to, msg);
+                            self.chat_messages.push(ChatMessage { from, content: self.chat_input.clone() });
+                            self.chat_input.clear();
+                        }
                     }
                 }
             });
@@ -174,3 +265,5 @@ impl ChatUIState {
         }
     }
 }
+
+//concerning the chat i still need to figure out the conditional print off he msg
