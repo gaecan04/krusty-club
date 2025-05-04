@@ -856,6 +856,7 @@ impl NetworkInitializer {
         });
     }
 
+
     pub fn create_drone_implementations(
         config: &ParsedConfig,
         controller_send: Sender<DroneEvent>,
@@ -884,10 +885,8 @@ impl NetworkInitializer {
                     packet_send.clone(),
                     pdr,
                 )) as Box<dyn DroneImplementation>;
-
                 implementations.push(drone_impl);
             }
-
             return implementations;
         }
 
