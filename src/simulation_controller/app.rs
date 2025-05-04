@@ -373,13 +373,7 @@ impl NetworkApp {
 
                     // Control panel for drone operations
                     ui.horizontal(|ui| {
-                        if ui.button("Sync Network").clicked() {
-                            if let Some(renderer) = &mut self.network_renderer {
-                                renderer.sync_with_simulation_controller();
-                                self.simulation_log.push("Network synchronized with controller".into());
-                            }
-                        }
-                        ui.add_space(10.0);
+
                         if ui.button("Flood Network").clicked() {
                             self.flood_network();
                         }
