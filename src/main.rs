@@ -76,6 +76,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         run_headless_simulation(simulation_duration, parsed_config.clone(), controller.clone());
     } else {
         println!("Starting GUI application");
+        SimulationController::start_background_thread(controller.clone());
         run_gui_application(event_sender.clone(), command_receiver, parsed_config, drone_factory,&config_path)?;
     }
 

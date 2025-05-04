@@ -26,7 +26,7 @@ pub struct SimulationController {
     network_config: Arc<Mutex<ParsedConfig>>,
     event_receiver: Receiver<DroneEvent>,
     event_sender: Sender<DroneEvent>,
-    command_senders: HashMap<NodeId, Sender<DroneCommand>>, // Map of NodeId -> CommandSender
+    pub(crate) command_senders: HashMap<NodeId, Sender<DroneCommand>>, // Map of NodeId -> CommandSender
     network_graph: HashMap<NodeId, HashSet<NodeId>>, // Adjacency list of the network
     packet_senders: HashMap<NodeId, Sender<Packet>>,
     drone_factory: Arc<dyn Fn(
@@ -165,6 +165,13 @@ impl SimulationController {
 
     pub fn register_packet_sender(&mut self, node_id: NodeId, sender: Sender<Packet>) {
         self.packet_senders.insert(node_id, sender);
+    }
+
+    pub fn start_background_thread(controller: Arc<Mutex<Self>>) {
+        std::thread::spawn(move || {
+            let mut c = controller.lock().unwrap();
+            c.run(); // Calls the existing event-processing loop
+        });
     }
 
 
@@ -357,6 +364,22 @@ impl SimulationController {
         true
     }
 
+    pub fn is_removal_allowed(&self, node_a: NodeId, node_b: NodeId) -> bool {
+        // Clone the current network graph
+        let mut test_graph = self.network_graph.clone();
+
+        // Simulate removal of the bidirectional link
+        if let Some(neighbors) = test_graph.get_mut(&node_a) {
+            neighbors.remove(&node_b);
+        }
+        if let Some(neighbors) = test_graph.get_mut(&node_b) {
+            neighbors.remove(&node_a);
+        }
+
+        // Reuse existing logic!
+        self.is_crash_allowed(&test_graph)
+    }
+
     fn get_node_type(&self, id: NodeId) -> Option<NodeType> {
         let cfg = self.config.lock().unwrap();
         if cfg.drone.iter().any(|d| d.id == id) {
@@ -369,6 +392,8 @@ impl SimulationController {
             None
         }
     }
+
+
 
 
     pub fn get_all_drone_ids(&self) -> Vec<NodeId> {

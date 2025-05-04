@@ -1515,12 +1515,78 @@ impl NetworkRenderer {
                                 if let Some(peer_id) = pending_connection {
                                     self.add_connection(node_id as usize, peer_id as usize);
                                 }
+
+                                // New: Remove Sender dropdown and button
+                                let mut selected_neighbor: Option<NodeId> = None;
+
+                                egui::ComboBox::from_label("Remove sender (neighbor):")
+                                    .selected_text("select neighbor")
+                                    .show_ui(ui, |ui| {
+                                        if let Some(cfg) = &self.config {
+                                            let cfg = cfg.lock().unwrap();
+                                            let neighbors = cfg.drone.iter()
+                                                .find(|d| d.id == node_id)
+                                                .map(|d| d.connected_node_ids.clone())
+                                                .unwrap_or_default();
+
+                                            for &neighbor in &neighbors {
+                                                if ui.selectable_label(false, format!("Node {}", neighbor)).clicked() {
+                                                    selected_neighbor = Some(neighbor);
+                                                    ui.close_menu();
+                                                }
+                                            }
+                                        }
+                                    });
+
+                                if let Some(neighbor_id) = selected_neighbor {
+                                    if let Some(ctrl_arc) = &self.simulation_controller {
+                                        let mut ctrl = ctrl_arc.lock().unwrap();
+
+                                        // ✅ Run removal constraint check
+                                        if ctrl.is_removal_allowed(node_id, neighbor_id) {
+                                            if let Some(sender) = ctrl.command_senders.get(&node_id) {
+                                                sender
+                                                    .send(DroneCommand::RemoveSender(neighbor_id))
+                                                    .expect("Failed to send RemoveSender");
+                                                println!("RemoveSender sent from {} to {}", node_id, neighbor_id);
+                                            }
+
+                                            // 🧠 Update config connections
+                                            if let Some(cfg_arc) = &self.config {
+                                                let mut cfg = cfg_arc.lock().unwrap();
+                                                if let Some(drone) = cfg.drone.iter_mut().find(|d| d.id == node_id) {
+                                                    drone.connected_node_ids.retain(|&id| id != neighbor_id);
+                                                }
+                                                if let Some(drone) = cfg.drone.iter_mut().find(|d| d.id == neighbor_id) {
+                                                    drone.connected_node_ids.retain(|&id| id != node_id);
+                                                }
+                                                drop(ctrl); // Drop before self mutation
+                                                drop(cfg);
+
+                                                self.build_from_config(cfg_arc.clone());
+                                            }
+                                        } else {
+                                            eprintln!(
+                                                "Refused to remove link {} <-> {}: violates constraints",
+                                                node_id, neighbor_id
+                                            );
+                                        }
+                                    }
+                                }
+
+
+
+
                             });
+
+
                         } else {
                             // 🚫 Read-only mode for inactive drone
                             ui.label("This drone is inactive (crashed). PDR and connections cannot be changed.");
                         }
                     }
+
+
 
                     if ui.button("Close").clicked() {
                         should_close = true;
