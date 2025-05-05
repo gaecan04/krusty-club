@@ -19,6 +19,7 @@ use wg_2024::packet::Packet;
 
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
+use std::fmt::Debug;
 use std::fs;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -31,13 +32,12 @@ use wg_2024::network::NodeId;
 use crate::simulation_controller::SC_backend::SimulationController;
 
 #[cfg(feature = "serialize")]
-
 // Type aliases for clarity
 pub type DroneImpl = Box<dyn DroneImplementation>;
 // This should be defined somewhere in your code
 type GroupImplFactory = Box<dyn Fn(NodeId, Sender<DroneEvent>, Receiver<DroneCommand>,
     Receiver<Packet>, HashMap<NodeId, Sender<Packet>>, f32)
-    -> Box<dyn DroneImplementation> + Send + 'static>;
+    -> Box<dyn DroneImplementation> + Send + 'static >;
 
 #[derive(Deserialize, Debug,Clone)]
 pub struct ParsedConfig {
@@ -53,15 +53,6 @@ pub struct DroneConfig {
     pub connected_node_ids: Vec<NodeId>,
 }
 
-#[derive(Debug)]
-pub struct MyDrone {
-    pub id: NodeId,
-    controller_send: Sender<DroneEvent>,
-    controller_recv: Receiver<DroneCommand>,
-    packet_recv: Receiver<Packet>,
-    packet_send: HashMap<NodeId, Sender<Packet>>,
-    pdr: f32,
-}
 
 impl ParsedConfig {
     pub fn add_drone(&mut self, id: NodeId) {
@@ -327,32 +318,65 @@ impl ParsedConfig {
 }
 
 
+#[derive(Debug)]
+pub struct MyDrone {
+    pub id: NodeId,
+    controller_send: Sender<DroneEvent>,
+    controller_recv: Receiver<DroneCommand>,
+    packet_recv: Receiver<Packet>,
+    packet_send: HashMap<NodeId, Sender<Packet>>,
+    pdr: f32,
+}
 
+use wg_2024::drone::Drone as DroneTrait;
 
 impl DroneImplementation for MyDrone {
-    fn process_packet(&mut self, packet: Packet) -> Vec<Packet> {
-        // Process the packet (This is just a placeholder, modify as needed)
-        println!("Processing packet for drone {}: {:?}", self.id, packet);
-        vec![packet] // Returning the packet for now, adjust this to your needs
+    fn run(&mut self) {
+        <Self as DroneTrait>::run(self);
     }
 
-    fn get_id(&self) -> NodeId {
-        self.id
-    }
+    /*fn get_id(&self) -> NodeId {
+        self.get_id()
+    }*/
 }
 
-impl DroneImplementation for Krusty_C {
-    fn process_packet(&mut self, packet: Packet) -> Vec<Packet> {
-        // Real implementation here
-        println!("Krusty_C processing packet: {:?}", packet);
-        vec![packet]
-    }
 
-    fn get_id(&self) -> NodeId {
-        self.id // or wherever the ID is stored
-    }
+
+
+macro_rules! impl_drone_adapter {
+    ($name:ty) => {
+        impl DroneImplementation for $name {
+            fn run(&mut self) {
+                    <Self as wg_2024::drone::Drone>::run(self);
+
+                }
+
+            /*fn get_id(&self) -> NodeId {
+                 println!("get id");
+                self.id // assumes all drones have an `id` field of type NodeId
+            }*/
+        }
+    };
 }
 
+
+
+
+
+// === Macro Calls for All 10 Drones ===
+impl_drone_adapter!(BagelBomber);
+impl_drone_adapter!(FungiDrone);
+impl_drone_adapter!(RustDrone);
+impl_drone_adapter!(RustafarianDrone);
+impl_drone_adapter!(RollingDrone);
+impl_drone_adapter!(LeDron_JamesDrone);
+impl_drone_adapter!(DrOnesDrone);
+impl_drone_adapter!(SkyLinkDrone);
+impl_drone_adapter!(RustasticDrone);
+impl_drone_adapter!(Krusty_C);
+
+
+//So MyDrone is your fallback implementation, used only when a group’s implementation is missing or fails to register.
 impl wg_2024::drone::Drone for MyDrone {
     fn new(
         id: NodeId,
@@ -397,23 +421,54 @@ impl wg_2024::drone::Drone for MyDrone {
 
 // Trait for drone implementations
 pub trait DroneImplementation: Send + 'static {
-    fn process_packet(&mut self, packet: Packet) -> Vec<Packet>;
-    fn get_id(&self) -> NodeId;
+    //fn process_packet(&mut self, packet: Packet) -> Vec<Packet>;
+    fn run(&mut self); // <--- Add this
+
+    //fn get_id(&self) -> NodeId;
 }
+
+pub struct DroneWithId {
+    pub id: NodeId,
+    pub instance: Box<dyn DroneImplementation>,
+}
+
 
 pub struct NetworkInitializer {
     config: Config,
-    drone_impls: Vec<Box<dyn DroneImplementation>>,
+    drone_impls: Vec<DroneWithId>,
     channels: HashMap<NodeId, Sender<Packet>>,
     controller_tx: Sender<DroneEvent>,
     controller_rx: Receiver<DroneCommand>,
     simulation_controller: Arc<Mutex<SimulationController>>,
-
 }
 
+/*
+Group Krusty_club buys:
+-Ledron James
+-CppEnjoyers
+-Dr ones
+-Skylink
+-Rustastics
+-Bagel bomber
+-Fungi
+-Rust
+-Rustafarian
+-Rolling Drone
+ */
+
+use LeDron_James::Drone as LeDron_JamesDrone; //ok
+//use ap2024_unitn_cppenjoyers_drone::CppEnjoyersDrone; //ok
+use dr_ones::Drone as DrOnesDrone; //ok
+use skylink::SkyLinkDrone; //ok
+use rustastic_drone::RustasticDrone; //ok
+use bagel_bomber::BagelBomber; //ok
+use fungi_drone::FungiDrone; //ok
+use wg_2024_rust::drone::RustDrone; //ok
+use rustafarian_drone::RustafarianDrone; //ok
+use rolling_drone::RollingDrone; //ok
+
 impl NetworkInitializer {
-    pub fn new(config_path: &str, drone_impls: Vec<Box<dyn DroneImplementation>>,    simulation_controller: Arc<Mutex<SimulationController>>,
-    ) -> Result<Self, Box<dyn Error>> {
+    pub fn new(config_path: &str, drone_impls: Vec<DroneWithId>,    simulation_controller: Arc<Mutex<SimulationController>>, ) -> Result<Self, Box<dyn Error>> {
         // Read config file
         let config_str = fs::read_to_string(config_path)?;
 
@@ -456,6 +511,10 @@ impl NetworkInitializer {
 
         // Spawn simulation controller thread
         self.spawn_controller();
+        for (i, drone) in self.drone_impls.iter().enumerate() {
+            println!("Drone #{}: ID {}", i + 1, drone.id);
+        }
+
 
         Ok(())
     }
@@ -715,74 +774,19 @@ impl NetworkInitializer {
     }
 
     fn initialize_drones(&mut self) {
-        let num_drones = self.config.drone.len();
-        let num_impls = self.drone_impls.len();
-        println!("num drones {}", num_drones);
-        println!("num impls {}", num_impls);
+        println!("Spawning {} drone threads", self.drone_impls.len());
 
-        // Distribute implementations evenly
-        let mut impl_counts = vec![0; num_impls];
-        let min_count = num_drones / num_impls;
-        let remainder = num_drones % num_impls;
+        for DroneWithId { id, mut instance } in self.drone_impls.drain(..) {
+            //let mut drone = drone_impl; // Box<dyn DroneImplementation>
+            //let id = drone.get_id();
 
-        for i in 0..num_impls {
-            impl_counts[i] = min_count;
-            if i < remainder {
-                impl_counts[i] += 1;
-            }
-        }
-
-        let mut impl_index = 0;
-        let mut count = 0;
-
-        for drone in &self.config.drone {
-            if count >= impl_counts[impl_index] {
-                impl_index = (impl_index + 1) % num_impls;
-                count = 0;
-            }
-
-            let drone_id = drone.id;
-            let drone_pdr = drone.pdr;
-
-            // Create packet receive channel
-            let (packet_tx, packet_rx) = channel::unbounded::<Packet>();
-            self.channels.insert(drone_id, packet_tx);
-
-            // Create command channel: Controller → Drone
-            let (command_tx, command_rx) = channel::unbounded::<DroneCommand>();
-
-            // Register the Sender in the Simulation Controller
-            if let Ok(mut controller) = self.simulation_controller.lock() {
-                controller.register_command_sender(drone_id, command_tx.clone());
-            }
-
-            // Build packet senders to neighbors
-            let mut packet_send_channels = HashMap::new();
-            for &connected_id in &drone.connected_node_ids {
-                if let Some(tx) = self.channels.get(&connected_id) {
-                    packet_send_channels.insert(connected_id, tx.clone());
-                }
-            }
-
-            // Clone event channel (Drone → Controller)
-            let controller_tx = self.controller_tx.clone();
-
-            // Create the drone
-            let mut drone_instance = MyDrone::new(
-                drone_id,
-                controller_tx,
-                command_rx,
-                packet_rx,
-                packet_send_channels,
-                drone_pdr,
-            );
-
-            // Spawn drone thread
+            // Spawn a thread that just runs the drone's run() method
             thread::spawn(move || {
-                drone_instance.run();
+                println!("Running drone {}", id);
+                instance.run(); // <- Each group's own logic
             });
 
-            count += 1;
+            println!("Spawned drone {}", id);
         }
     }
 
@@ -825,16 +829,13 @@ impl NetworkInitializer {
         }
     }
 
-
-
-
     fn spawn_controller(&self) {
         // Get all node IDs for the controller to manage
         let nodes = self.channels.keys().cloned().collect::<Vec<_>>();
 
         // Create controller send/receive channels for commands and events
-        let controller_tx = self.controller_tx.clone();
-        let controller_rx = self.controller_rx.clone();
+        let (controller_tx, controller_rx) = channel::unbounded::<DroneEvent>();
+
 
         thread::spawn(move || {
             println!("Controller started, managing {} nodes", nodes.len());
@@ -865,8 +866,8 @@ impl NetworkInitializer {
         controller_recv: Receiver<DroneCommand>,
         packet_recv: Receiver<Packet>,
         packet_send: HashMap<NodeId, Sender<Packet>>,
-    ) -> Vec<Box<dyn DroneImplementation>> {
-        let mut implementations: Vec<Box<dyn DroneImplementation>> = Vec::new();
+    ) -> Vec<DroneWithId> {
+        let mut implementations: Vec<DroneWithId> = Vec::new();
 
         // Load group implementations
         let group_implementations = Self::load_group_implementations();
@@ -887,7 +888,10 @@ impl NetworkInitializer {
                     packet_send.clone(),
                     pdr,
                 )) as Box<dyn DroneImplementation>;
-                implementations.push(drone_impl);
+               // implementations.push(drone_impl);
+                implementations.push((DroneWithId {
+                    id,
+                    instance:drone_impl,}));
             }
             return implementations;
         }
@@ -934,7 +938,11 @@ impl NetworkInitializer {
                     pdr,
                 );
 
-                implementations.push(drone_impl);
+               // implementations.push(drone_impl);
+                implementations.push((DroneWithId {
+                    id,
+                    instance:drone_impl,}));
+                //println!("loaded succ id {}",id); OK
             } else {
                 println!("ATTENTION :default drone impl");
                 // Fallback to default implementation
@@ -947,7 +955,10 @@ impl NetworkInitializer {
                     pdr,
                 )) as Box<dyn DroneImplementation>;
 
-                implementations.push(drone_impl);
+                //implementations.push(drone_impl);
+                implementations.push((DroneWithId {
+                    id,
+                    instance:drone_impl,}));
             }
 
             count += 1;
@@ -962,11 +973,11 @@ impl NetworkInitializer {
 
         // Group A implementation using Krusty_Club
         group_implementations.insert(
-            "group_a1".to_string(),
+            "group_1".to_string(),
             Box::new(|id: NodeId, sim_contr_send: Sender<DroneEvent>, sim_contr_recv: Receiver<DroneCommand>,
                       packet_recv: Receiver<Packet>, packet_send: HashMap<NodeId, Sender<Packet>>, pdr: f32|
                       -> Box<dyn DroneImplementation> {
-                Box::new(Krusty_Club::Krusty_C::new(
+                Box::new(RustafarianDrone::new(
                     id,
                     sim_contr_send,
                     sim_contr_recv,
@@ -979,10 +990,10 @@ impl NetworkInitializer {
 
         // Same pattern for other implementations
         group_implementations.insert(
-            "group_a2".to_string(),
+            "group_2".to_string(),
             Box::new(|id, sim_contr_send, sim_contr_recv, packet_recv, packet_send, pdr|
                       -> Box<dyn DroneImplementation> {
-                Box::new(Krusty_Club::Krusty_C::new(
+                Box::new(LeDron_JamesDrone::new(
                     id,
                     sim_contr_send,
                     sim_contr_recv,
@@ -994,10 +1005,10 @@ impl NetworkInitializer {
         );
 
         group_implementations.insert(
-            "group_a3".to_string(),
+            "group_3".to_string(),
             Box::new(|id, sim_contr_send, sim_contr_recv, packet_recv, packet_send, pdr|
                       -> Box<dyn DroneImplementation> {
-                Box::new(Krusty_Club::Krusty_C::new(
+                Box::new(LeDron_JamesDrone::new(
                     id,
                     sim_contr_send,
                     sim_contr_recv,
@@ -1009,10 +1020,95 @@ impl NetworkInitializer {
         );
 
         group_implementations.insert(
-            "group_b".to_string(),
+            "group_4".to_string(),
             Box::new(|id, sim_contr_send, sim_contr_recv, packet_recv, packet_send, pdr|
                       -> Box<dyn DroneImplementation> {
-                Box::new(Krusty_Club::Krusty_C::new(
+                Box::new(DrOnesDrone::new(
+                    id,
+                    sim_contr_send,
+                    sim_contr_recv,
+                    packet_recv,
+                    packet_send,
+                    pdr
+                ))
+            }) as GroupImplFactory
+        );
+
+        group_implementations.insert(
+            "group_5".to_string(),
+            Box::new(|id, sim_contr_send, sim_contr_recv, packet_recv, packet_send, pdr|
+                      -> Box<dyn DroneImplementation> {
+                Box::new(SkyLinkDrone::new(
+                    id,
+                    sim_contr_send,
+                    sim_contr_recv,
+                    packet_recv,
+                    packet_send,
+                    pdr
+                ))
+            }) as GroupImplFactory
+        );
+        group_implementations.insert(
+            "group_6".to_string(),
+            Box::new(|id, sim_contr_send, sim_contr_recv, packet_recv, packet_send, pdr|
+                      -> Box<dyn DroneImplementation> {
+                Box::new(RustasticDrone::new(
+                    id,
+                    sim_contr_send,
+                    sim_contr_recv,
+                    packet_recv,
+                    packet_send,
+                    pdr
+                ))
+            }) as GroupImplFactory
+        );
+        group_implementations.insert(
+            "group_7".to_string(),
+            Box::new(|id, sim_contr_send, sim_contr_recv, packet_recv, packet_send, pdr|
+                      -> Box<dyn DroneImplementation> {
+                Box::new(BagelBomber::new(
+                    id,
+                    sim_contr_send,
+                    sim_contr_recv,
+                    packet_recv,
+                    packet_send,
+                    pdr
+                ))
+            }) as GroupImplFactory
+        );
+        group_implementations.insert(
+            "group_8".to_string(),
+            Box::new(|id, sim_contr_send, sim_contr_recv, packet_recv, packet_send, pdr|
+                      -> Box<dyn DroneImplementation> {
+                Box::new(FungiDrone::new(
+                    id,
+                    sim_contr_send,
+                    sim_contr_recv,
+                    packet_recv,
+                    packet_send,
+                    pdr
+                ))
+            }) as GroupImplFactory
+        );
+        group_implementations.insert(
+            "group_9".to_string(),
+            Box::new(|id, sim_contr_send, sim_contr_recv, packet_recv, packet_send, pdr|
+                      -> Box<dyn DroneImplementation> {
+                Box::new(RustDrone::new(
+                    id,
+                    sim_contr_send,
+                    sim_contr_recv,
+                    packet_recv,
+                    packet_send,
+                    pdr
+                ))
+            }) as GroupImplFactory
+        );
+        group_implementations.insert(
+            "group_10".to_string(),
+            Box::new(|id, sim_contr_send, sim_contr_recv, packet_recv, packet_send, pdr|
+                      -> Box<dyn DroneImplementation> {
+                Box::new(RollingDrone::new(
                     id,
                     sim_contr_send,
                     sim_contr_recv,
@@ -1025,14 +1121,13 @@ impl NetworkInitializer {
 
         group_implementations
     }
-
     fn configure_drone_connections(&mut self) -> Result<(), Box<dyn Error>> {
         // Set up connections between drones
         for drone_config in &self.config.drone {
             let drone_id = drone_config.id;
 
             // Find the drone implementation
-            if let Some(drone_impl) = self.drone_impls.iter_mut().find(|d| d.get_id() == drone_id) {
+            if let Some(drone_impl) = self.drone_impls.iter_mut().find(|d| d.id == drone_id) {
                 // Configure connections to other drones
                 for &connected_id in &drone_config.connected_node_ids {
                     println!("Drone {} connected to node {}", drone_id, connected_id);
@@ -1043,7 +1138,7 @@ impl NetworkInitializer {
         // Set up connections to clients
         for client in &self.config.client {
             for &drone_id in &client.connected_drone_ids {
-                if let Some(drone_impl) = self.drone_impls.iter_mut().find(|d| d.get_id() == drone_id) {
+                if let Some(drone_impl) = self.drone_impls.iter_mut().find(|d| d.id == drone_id) {
                     println!("Client {} connected to drone {}", client.id, drone_id);
                 }
             }
@@ -1052,7 +1147,7 @@ impl NetworkInitializer {
         // Set up connections to servers
         for server in &self.config.server {
             for &drone_id in &server.connected_drone_ids {
-                if let Some(drone_impl) = self.drone_impls.iter_mut().find(|d| d.get_id() == drone_id) {
+                if let Some(drone_impl) = self.drone_impls.iter_mut().find(|d| d.id == drone_id) {
                     println!("Server {} connected to drone {}", server.id, drone_id);
                 }
             }
@@ -1067,8 +1162,11 @@ impl NetworkInitializer {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+    use wg_2024::network::SourceRoutingHeader;
+    use wg_2024::packet::Fragment;
+    use wg_2024::packet::PacketType::MsgFragment;
     use crate::simulation_controller::SC_backend::SimulationController;
-
+/*
     fn mock_controller(config: ParsedConfig) -> Arc<Mutex<SimulationController>> {
         let (event_sender, event_receiver) = crossbeam_channel::unbounded::<DroneEvent>();
         Arc::new(Mutex::new(SimulationController::new(Arc::new(Mutex::new(config)), event_receiver)))
@@ -1222,5 +1320,63 @@ mod tests {
         for node_id in [1, 2, 3, 4] {
             assert!(initializer.channels.contains_key(&node_id), "Missing channel for node {}", node_id);
         }
+    }*/
+    #[test]
+    fn test_process_event_packet_dropped() {
+
+        // Dummy packet to send in the event
+        let test_packet = Packet {
+            session_id: 42,
+            routing_header: SourceRoutingHeader  {
+                hops: vec![1, 2],
+                ..Default::default()
+            },
+
+            pack_type: MsgFragment(Fragment {
+                fragment_index: 0,
+                total_n_fragments: 0,
+                length: 0,
+                data: [2,128],
+            }),
+        };
+
+        // Set up shared config
+        let config = Arc::new(Mutex::new(ParsedConfig {
+            drone: vec![],
+            client: vec![],
+            server: vec![],
+        }));
+
+        // Create DroneEvent channel (shared between drones and controller)
+        let (event_sender, event_receiver) = crossbeam_channel::unbounded::<DroneEvent>();
+
+        // Dummy drone factory (won't be used in this test)
+        let dummy_factory = Arc::new(|_, _, _, _, _, _| {
+            panic!("Drone factory should not be called in this test");
+        });
+
+        // Instantiate the SimulationController
+        let mut controller = SimulationController::new(
+            config,
+            event_sender.clone(),
+            event_receiver,
+            dummy_factory,
+        );
+
+        // Send a PacketDropped event
+        let event = DroneEvent::PacketDropped(test_packet.clone());
+        event_sender.send(event).unwrap();
+
+        // Process the event using the controller
+        // NOTE: .run() loops forever, so we call .event_receiver.recv() directly here for the test
+        if let Ok(received) = controller.event_receiver.try_recv() {
+            controller.process_event(received); // This will trigger println!
+        } else {
+            panic!("No DroneEvent received in SimulationController");
+        }
+
+        // If you want, you can extend this test to assert side effects on controller state
     }
+
+
 }

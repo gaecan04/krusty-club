@@ -24,7 +24,7 @@ pub enum DroneEvent {
 
 pub struct SimulationController {
     network_config: Arc<Mutex<ParsedConfig>>,
-    event_receiver: Receiver<DroneEvent>,
+    pub(crate) event_receiver: Receiver<DroneEvent>,
     event_sender: Sender<DroneEvent>,
     pub(crate) command_senders: HashMap<NodeId, Sender<DroneCommand>>, // Map of NodeId -> CommandSender
     network_graph: HashMap<NodeId, HashSet<NodeId>>, // Adjacency list of the network
@@ -183,7 +183,7 @@ impl SimulationController {
     }
 
     // Process a drone event
-    fn process_event(&mut self, event: DroneEvent) {
+    pub(crate) fn process_event(&mut self, event: DroneEvent) {
         match event {
             DroneEvent::PacketSent(packet) => {
                 // Log packet sent event
