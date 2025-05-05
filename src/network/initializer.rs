@@ -782,10 +782,8 @@ impl NetworkInitializer {
 
             // Spawn a thread that just runs the drone's run() method
             thread::spawn(move || {
-                println!("Running drone {}", id);
                 instance.run(); // <- Each group's own logic
             });
-
             println!("Spawned drone {}", id);
         }
     }
