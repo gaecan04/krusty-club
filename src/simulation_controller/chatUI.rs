@@ -72,7 +72,27 @@ impl ChatUIState {
                     }
                 }
             }
-        });
+            //to show buffer
+            ui.separator();
+            ui.label(RichText::new("GUI Input Queue (per client)").strong());
+
+            if let Ok(map) = self.gui_input.lock() {
+                if map.is_empty() {
+                    ui.label("No pending messages.");
+                } else {
+                    for (client_id, messages) in map.iter() {
+                        ui.label(format!("Client #{} →", client_id));
+                        for msg in messages {
+                            ui.label(format!("    {:?}", msg.1.clone()));
+                        }
+                    }
+                }
+            } else {
+                ui.label("⚠️ Failed to lock GUI input buffer");
+            }
+
+
+    });
     }
 
     pub fn render(&mut self, ui: &mut egui::Ui, on_send: &mut impl FnMut(NodeId, NodeId, String)) {
@@ -124,7 +144,9 @@ impl ChatUIState {
                             if let Some(server_id) = self.selected_server {
                                 self.client_status.insert(client_id, ClientStatus::Connected);
                                 self.server_client_map.entry(server_id).or_default().push(client_id);
-                                on_send(client_id, server_id, "[Login]".to_string());
+                                //on_send(client_id, server_id, "[Login]".to_string());
+                                push_gui_message(&self.gui_input, client_id, server_id, "[Login]".to_string());
+
                             }
                         }
                     });
@@ -140,7 +162,9 @@ impl ChatUIState {
                                 if let Some(clients) = self.server_client_map.get_mut(&server_id) {
                                     clients.retain(|&c| c != client_id);
                                 }
-                                on_send(client_id, server_id, "[Logout]".to_string());
+                               //on_send(client_id, server_id, "[Logout]".to_string());
+                                push_gui_message(&self.gui_input, client_id, server_id, "[Logout]".to_string());
+
                             }
                         }
 
@@ -170,7 +194,9 @@ impl ChatUIState {
                     if let Some(peer_id) = requested_chat_with {
                         if let Some(server_id) = self.selected_server {
                             self.pending_chat_request = Some((client_id, peer_id));
-                            on_send(client_id, server_id, format!("[ChatRequest]::{peer_id}"));
+                            //on_send(client_id, server_id, format!("[ChatRequest]::{peer_id}"));
+                            push_gui_message(&self.gui_input, client_id, server_id, format!("[ChatRequest]::{peer_id}"));
+
                         }
                     }
                 }
@@ -215,7 +241,10 @@ impl ChatUIState {
 
                         if ui.button("Confirm End").clicked() {
                             if let Some(server_id) = self.selected_server {
-                                on_send(initiator, server_id, "[ChatFinish]".to_string());
+                                //on_send(initiator, server_id, "[ChatFinish]".to_string());
+                                push_gui_message(&self.gui_input, initiator, server_id, format!("[ChatFinish]::{peer}"));
+
+
                             }
                             self.client_status.insert(initiator, ClientStatus::Connected);
                             self.client_status.insert(peer, ClientStatus::Connected);
@@ -241,7 +270,7 @@ impl ChatUIState {
                         for &id in &options {
                             if ui.selectable_label(self.selected_sender == Some(id), format!("Client #{id}")).clicked() {
                                 self.selected_sender = Some(id);
-                                //here the sender of the msg
+
                             }
                         }
                     });
@@ -255,7 +284,7 @@ impl ChatUIState {
                         if !self.chat_input.trim().is_empty() {
                             let msg = format!("[MessageTo]::{to}::{}", self.chat_input.trim());
                             //on_send(from, to, msg);
-                            push_gui_message(&self.gui_input, from, msg);
+                            push_gui_message(&self.gui_input, from, to, msg);
 
                             self.chat_messages.push(ChatMessage { from, content: self.chat_input.clone() });
                             self.chat_input.clear();
