@@ -271,64 +271,6 @@ impl SimulationController {
         Ok(())
     }
 
-    // Validate that a drone crash won't violate network constraints
-    /* fn validate_drone_crash(&self, drone_id: NodeId) -> Result<bool, Box<dyn Error>> {
-         let config = self.network_config.lock().unwrap();
-
-         // Check if the drone exists
-         if !self.network_graph.contains_key(&drone_id) {
-             return Err("Drone does not exist".into());
-         }
-
-         // Create a copy of the graph without the drone to check connectivity
-         let mut test_graph = self.network_graph.clone();
-
-         // Remove the drone and its connections
-         if let Some(neighbors) = test_graph.remove(&drone_id) {
-             for &neighbor_id in &neighbors {
-                 if let Some(neighbor_neighbors) = test_graph.get_mut(&neighbor_id) {
-                     neighbor_neighbors.remove(&drone_id);
-                 }
-             }
-         }
-
-         // Check if the network remains connected
-         if !self.is_connected(&test_graph) {
-             println!("No connected graph found for drone {}", drone_id);
-             return Ok(false);
-         }
-
-         // Check client constraints
-         for client in &config.client {
-             let connected_drones: Vec<NodeId> = client.connected_drone_ids
-                 .iter()
-                 .filter(|&&id| id != drone_id)
-                 .cloned()
-                 .collect();
-
-             if connected_drones.is_empty() || connected_drones.len() > 2 {
-                 println!("client must be connected to at most 2 drones");
-
-                 return Ok(false);
-             }
-         }
-
-         // Check server constraints
-         for server in &config.server {
-             let connected_drones: Vec<NodeId> = server.connected_drone_ids
-                 .iter()
-                 .filter(|&&id| id != drone_id)
-                 .cloned()
-                 .collect();
-
-             if connected_drones.len() < 2 {
-                 println!("SERVER must be connected to at least 2 drones");
-                 return Ok(false);
-             }
-         }
-
-         Ok(true)
-     }*/
 
     fn is_crash_allowed(&self, test_graph: &HashMap<NodeId, HashSet<NodeId>>) -> bool {
         for server_id in self.get_all_server_ids() {
@@ -457,7 +399,6 @@ impl SimulationController {
                 }
             }
         }
-
         reachable_servers
     }
 

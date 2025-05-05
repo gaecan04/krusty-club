@@ -15,7 +15,7 @@ use simulation_controller::app::NetworkApp;
 use simulation_controller::SC_backend::SimulationController;
 use crate::network::TOML_parser;
 use crate::network::initializer::{DroneImplementation, MyDrone, NetworkInitializer, ParsedConfig};
-use utils::serialization_fix;
+use crate::simulation_controller::gui_input_queue::{push_gui_message, new_gui_input_queue, SharedGuiInput};
 
 fn main() -> Result<(), Box<dyn Error>> {
     // Config and duration
@@ -67,7 +67,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Initialize the network
     let mut initializer = NetworkInitializer::new(&config_path, drone_impls, controller.clone())?;
-    initializer.initialize()?;
+    let gui_input_queue = new_gui_input_queue();
+
+    initializer.initialize(gui_input_queue.clone())?;
     println!("Network initialized successfully");
 
     // Decide mode
@@ -77,7 +79,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     } else {
         println!("Starting GUI application");
         SimulationController::start_background_thread(controller.clone());
-        run_gui_application(event_sender.clone(), command_receiver, parsed_config, drone_factory,&config_path)?;
+        run_gui_application(event_sender.clone(), command_receiver, parsed_config, drone_factory,&config_path,gui_input_queue.clone())?;
     }
 
     Ok(())
@@ -106,21 +108,11 @@ fn run_gui_application(
     config: Arc<Mutex<ParsedConfig>>,
     drone_factory: Arc<dyn Fn(NodeId, Sender<DroneEvent>, Receiver<DroneCommand>, Receiver<Packet>, HashMap<NodeId, Sender<Packet>>, f32) -> Box<dyn Drone> + Send + Sync>,
     config_path: &str,
+    gui_input_queue: SharedGuiInput,
 ) -> Result<(), Box<dyn Error>> {
     let options = eframe::NativeOptions::default();
 
-    /*eframe::run_native(
-        "Drone Simulation",
-        options,
-        Box::new(|cc| {
-            Ok(Box::new(NetworkApp::new_with_network(
-                cc,
-                event_sender,
-                config,
-                drone_factory.clone(),
-            )))
-        }),
-    )?;*/
+
     eframe::run_native(
         "Drone Simulation",
         options,
@@ -131,6 +123,7 @@ fn run_gui_application(
                 config.clone(),
                 drone_factory.clone(),
                 config_path,
+                gui_input_queue.clone(),
             )))
         }),
     )?;

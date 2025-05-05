@@ -5,11 +5,14 @@ use rand::Rng;
 use wg_2024::network::NodeId;
 use wg_2024::packet::{Packet, PacketType, FloodRequest, FloodResponse};
 use wg_2024::packet::NodeType;
+use crate::simulation_controller::gui_input_queue::{pop_all_gui_messages, SharedGuiInput};
+
 
 pub fn start_client(
     client_id: NodeId,
     packet_rx: Receiver<Packet>,
     packet_senders: HashMap<NodeId, Sender<Packet>>,
+    gui_input: SharedGuiInput,
 ) {
     thread::spawn(move || {
         println!("Temp Client {} started", client_id);
@@ -46,6 +49,24 @@ pub fn start_client(
     });
 }
 
+/*
+let messages = pop_all_gui_messages(&self.gui_input, self.id);
+for msg in messages {
+    let fragment = make_fragment(&msg); // crea i fragment
+    let packet = Packet {
+        session_id: 0,
+        routing_header: SourceRoutingHeader {
+            hop_index: 0,
+            hops: vec![self.id, server_id], // dinamico se necessario
+        },
+        pack_type: PacketType::MsgFragment(fragment),
+    };
+    if let Some(sender) = self.packet_send.get(&server_id) {
+        let _ = sender.send(packet);
+    }
+}
+
+ */
 /*
 use std::collections::{HashMap, HashSet};
 use std::io;

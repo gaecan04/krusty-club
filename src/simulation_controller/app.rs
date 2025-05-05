@@ -14,6 +14,7 @@ use wg_2024::drone::Drone;
 use wg_2024::network::NodeId;
 use wg_2024::packet::Packet;
 use crate::simulation_controller::chatUI::{ChatMessage, ChatUIState, ClientStatus};
+use crate::simulation_controller::gui_input_queue::SharedGuiInput;
 
 enum AppState {
     Welcome,
@@ -688,6 +689,7 @@ impl NetworkApp {
         config: Arc<Mutex<ParsedConfig>>,
         arc: Arc<dyn Fn(NodeId, Sender<DroneEvent>, Receiver<DroneCommand>, Receiver<Packet>, HashMap<NodeId, Sender<Packet>>, f32) -> Box<dyn Drone> + Send + Sync>,
         config_path: &str,
+        arc0: SharedGuiInput,
     ) -> Self {
         let mut app = Self::new(cc);
 
@@ -777,7 +779,7 @@ impl Default for NetworkApp {
             new_drone_id: 0,
             new_drone_pdr: 0.0,
             new_drone_connections_str: String::new(),
-            chat_ui: ChatUIState::new(),
+            chat_ui: ChatUIState::new(Arc::new(Default::default())),
             packet_senders: HashMap::new(),
         }
     }

@@ -1,6 +1,8 @@
 use egui::{Color32, RichText, ScrollArea, TextEdit};
 use wg_2024::network::NodeId;
 use std::collections::HashMap;
+use crate::simulation_controller::gui_input_queue::{push_gui_message, new_gui_input_queue, SharedGuiInput};
+
 
 #[derive(Clone)]
 pub struct ChatMessage {
@@ -27,10 +29,11 @@ pub struct ChatUIState {
     pub selected_sender: Option<NodeId>,
     pub pending_chat_termination: Option<(NodeId, NodeId)>,
     pub server_client_map: HashMap<NodeId, Vec<NodeId>>, // new: server ID -> logged-in clients
+    pub gui_input: SharedGuiInput,
 }
 
 impl ChatUIState {
-    pub fn new() -> Self {
+    pub fn new(gui_input: SharedGuiInput) -> Self {
         ChatUIState {
             client_status: HashMap::new(),
             servers: vec![],
@@ -43,6 +46,7 @@ impl ChatUIState {
             selected_sender: None,
             pending_chat_termination: None,
             server_client_map: HashMap::new(),
+            gui_input,
         }
     }
 
@@ -237,6 +241,7 @@ impl ChatUIState {
                         for &id in &options {
                             if ui.selectable_label(self.selected_sender == Some(id), format!("Client #{id}")).clicked() {
                                 self.selected_sender = Some(id);
+                                //here the sender of the msg
                             }
                         }
                     });
@@ -249,7 +254,9 @@ impl ChatUIState {
                         let to = if from == a { b } else { a };
                         if !self.chat_input.trim().is_empty() {
                             let msg = format!("[MessageTo]::{to}::{}", self.chat_input.trim());
-                            on_send(from, to, msg);
+                            //on_send(from, to, msg);
+                            push_gui_message(&self.gui_input, from, msg);
+
                             self.chat_messages.push(ChatMessage { from, content: self.chat_input.clone() });
                             self.chat_input.clear();
                         }

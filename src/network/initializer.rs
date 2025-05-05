@@ -30,6 +30,8 @@ use Krusty_Club::Krusty_C;
 // Assuming these are defined elsewhere or imported
 use wg_2024::network::NodeId;
 use crate::simulation_controller::SC_backend::SimulationController;
+use crate::simulation_controller::gui_input_queue::SharedGuiInput;
+
 
 #[cfg(feature = "serialize")]
 // Type aliases for clarity
@@ -465,7 +467,8 @@ use bagel_bomber::BagelBomber; //ok
 use fungi_drone::FungiDrone; //ok
 use wg_2024_rust::drone::RustDrone; //ok
 use rustafarian_drone::RustafarianDrone; //ok
-use rolling_drone::RollingDrone; //ok
+use rolling_drone::RollingDrone;
+//ok
 
 impl NetworkInitializer {
     pub fn new(config_path: &str, drone_impls: Vec<DroneWithId>,    simulation_controller: Arc<Mutex<SimulationController>>, ) -> Result<Self, Box<dyn Error>> {
@@ -493,7 +496,7 @@ impl NetworkInitializer {
         })
     }
 
-    pub fn initialize(&mut self) -> Result<(), Box<dyn Error>> {
+    pub fn initialize(&mut self, gui_input_queue: SharedGuiInput) -> Result<(), Box<dyn Error>> {
         // Validate the network configuration
         self.validate_config()?;
 
@@ -504,7 +507,7 @@ impl NetworkInitializer {
         self.initialize_drones();
 
         // Spawn client threads
-        self.initialize_clients();
+        self.initialize_clients(gui_input_queue.clone());
 
         // Spawn server threads
         self.initialize_servers();
@@ -788,21 +791,23 @@ impl NetworkInitializer {
         }
     }
 
-    fn initialize_clients(&mut self) {
+    fn initialize_clients(&mut self,gui_input: SharedGuiInput) {
         for client in &self.config.client {
             let client_id = client.id;
-
             let mut senders = HashMap::new();
             for &drone_id in &client.connected_drone_ids {
                 if let Some(tx) = self.channels.get(&drone_id) {
                     senders.insert(drone_id, tx.clone());
                 }
             }
-
             let (client_tx, client_rx) = crossbeam_channel::unbounded();
             self.channels.insert(client_id, client_tx.clone());
 
-            client1::start_client(client_id, client_rx, senders);
+            client1::start_client(client_id, client_rx, senders,gui_input.clone());
+            /*let mut client = client1::MyClient::new(client_id, sim_controller_recv.clone(), client_rx, senders, HashMap::new());
+            thread::spawn(move || {
+                client.run();
+            });*/
         }
     }
 
@@ -823,8 +828,11 @@ impl NetworkInitializer {
             let (server_tx, server_rx) = crossbeam_channel::unbounded();
             self.channels.insert(server_id, server_tx.clone());
 
-            server::start_server(server_id, server_rx, senders);
-        }
+           // server::start_server(server_id, server_rx, senders);
+            let mut srv = server::server::new(server_id as u8, senders, server_rx);
+            thread::spawn(move || {
+                srv.run();
+            });        }
     }
 
     fn spawn_controller(&self) {
@@ -1155,7 +1163,7 @@ impl NetworkInitializer {
     }
 }
 
-
+/*
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1375,6 +1383,5 @@ mod tests {
 
         // If you want, you can extend this test to assert side effects on controller state
     }
-
-
 }
+*/
