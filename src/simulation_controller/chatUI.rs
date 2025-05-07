@@ -170,7 +170,9 @@ impl ChatUIState {
 
                         if ui.button("Request Client List").clicked() {
                             if let Some(server_id) = self.selected_server {
-                                on_send(client_id, server_id, "[ClientListRequest]".to_string());
+                                //on_send(client_id, server_id, "[ClientListRequest]".to_string());
+                                push_gui_message(&self.gui_input, client_id, server_id, "[ClientListRequest]".to_string());
+
                             }
                         }
                     });
