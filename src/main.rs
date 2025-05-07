@@ -18,6 +18,7 @@ use crate::network::initializer::{DroneImplementation, MyDrone, NetworkInitializ
 use crate::simulation_controller::gui_input_queue::{push_gui_message, new_gui_input_queue, SharedGuiInput};
 
 fn main() -> Result<(), Box<dyn Error>> {
+    env_logger::init();
     // Config and duration
     let config_path = std::env::args()
         .nth(1)

@@ -207,9 +207,9 @@ impl server {
     /// Run the server to process incoming packets and handle fragment assembly
     pub fn run(&mut self) {
         // Initialize logger (logging setup for your program)
-        if let Err(e) = env_logger::builder().try_init() {
+        /*if let Err(e) = env_logger::builder().try_init() {
             eprintln!("Failed to initialize logger: {}", e);
-        }
+        }*/
 
         info!("Server {} started running.", self.id);
 
