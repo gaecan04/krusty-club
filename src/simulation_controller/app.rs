@@ -152,7 +152,6 @@ impl NetworkApp {
 
             for server in &config.server {
                 self.simulation_log.push(format!("Sending flood request to server {}", server.id));
-                // Call server flood request function
             }
 
             for client in &config.client {
@@ -689,7 +688,7 @@ impl NetworkApp {
         config: Arc<Mutex<ParsedConfig>>,
         arc: Arc<dyn Fn(NodeId, Sender<DroneEvent>, Receiver<DroneCommand>, Receiver<Packet>, HashMap<NodeId, Sender<Packet>>, f32) -> Box<dyn Drone> + Send + Sync>,
         config_path: &str,
-        arc0: SharedGuiInput,
+        gui_input: SharedGuiInput,
     ) -> Self {
         let mut app = Self::new(cc);
 
