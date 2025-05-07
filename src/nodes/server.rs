@@ -8,6 +8,7 @@ COSE DA FARE :
 
 use petgraph::algo::dijkstra;
 use std::collections::HashMap;
+use std::mem::transmute;
 use crossbeam_channel::{Receiver, RecvError, Sender};
 use eframe::egui::accesskit::Node;
 use wg_2024::packet::{Ack, FloodRequest, FloodResponse, Fragment, Nack, NackType, NodeType, Packet, PacketType};
@@ -477,10 +478,19 @@ impl server {
             data: fragment_data,
         };
 
-        // Reverse route from original to find target
-        let mut hops = original_header.hops.clone();
-        hops.reverse();
-        hops.push(target_id); // may need more logic here later
+        //find the best path from server to receiver client, using network_graph: NetworkGraph
+        let source= self.id;
+        let destination= target_id;
+        let hops= match self.network_graph.best_path(source, target_id){
+
+            Some(path) => {path}
+            None => {
+                error!("No path found from server {} to client {}", source, destination);
+                return;
+            }
+        };
+
+
 
         let packet = Packet {
             session_id,
