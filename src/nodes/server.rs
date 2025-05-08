@@ -16,6 +16,8 @@ use wg_2024::network::{NodeId, SourceRoutingHeader};
 use log::{info, error, warn, debug};
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
+use std::collections::VecDeque;
+
 
 #[derive(Clone, Debug)]
 pub struct NetworkGraph {
@@ -115,7 +117,7 @@ impl NetworkGraph {
     }
 }
 
-
+const MAX_CHAT_HISTORY: usize = 50; //50 messagges max for the chronology
 #[derive(Debug, Clone)]
 pub struct server {
     pub id: u8, // Server ID
@@ -125,6 +127,7 @@ pub struct server {
     pub packet_receiver: Receiver<Packet>, // Channel to receive packets from clients/drones
     pub registered_clients: HashMap<NodeId,Vec<NodeId>>,
     pub network_graph: NetworkGraph,
+    pub chat_history: HashMap<(NodeId,NodeId), VecDeque<String>>,
     //recovery_in_progress:  HashMap<(u64, NodeId), bool>, // Tracks if recovery is already in progress for a session
     //drop_counts: HashMap<(u64, NodeId), usize>, // Track number of drops per session
 }
@@ -142,6 +145,7 @@ impl server {
             packet_receiver,
             registered_clients: HashMap::new(),
             network_graph: NetworkGraph::new(),
+            chat_history:HashMap::new(),
             //recovery_in_progress: HashMap::new(),
             //drop_counts: HashMap::new(),
         }
@@ -275,9 +279,28 @@ impl server {
                     {
                         let response = format!("[MessageFrom]::{}::{}", client_id, msg);
                         self.send_chat_message(session_id, target_id, response, routing_header);
+                        //now we store the messages to have the "CHRONOLOGY" feature:
+                        let entry= self.chat_history.entry((client_id.min(target_id), client_id.max(target_id))).or_insert_with(VecDeque::new);
+                        let chat_entry = format!("{}: {}", client_id, msg);
+                        entry.push_back(chat_entry);
+
+                        if entry.len() > MAX_CHAT_HISTORY {
+                            entry.pop_front(); // remove the oldest message
+                        }
                     } else {
                         self.send_chat_message(session_id, client_id, "error_wrong_client_id!".to_string(), routing_header);
                     }
+                }
+            }
+            ["[HistoryRequest]", target_id_str] => { //when client wants to see chronology
+                if let Ok(target_id) = target_id_str.parse::<NodeId>() {
+                    let key = (client_id.min(target_id), client_id.max(target_id));
+                    let history = self.chat_history.get(&key);
+                    let response = match history {
+                        Some(messages) => messages.iter().cloned().collect::<Vec<String>>().join("\n"),
+                        None => "No history available".to_string(),
+                    };
+                    self.send_chat_message(session_id, client_id, format!("[HistoryResponse]::{}", response), routing_header);
                 }
             }
             ["[ChatFinish]"] => {
@@ -438,7 +461,6 @@ impl server {
 
     }
 
-    //handle_flood_response is still to be checked properly and tested.
     fn handle_flood_response(&mut self, session_id: u64, flood_response: &FloodResponse, routing_header: SourceRoutingHeader) {
         info!("Received FloodResponse for flood_id {} in session {}", flood_response.flood_id, session_id);
         //obiettivo: fare tutta quella roba strana con il grafo.
