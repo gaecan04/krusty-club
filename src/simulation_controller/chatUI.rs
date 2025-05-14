@@ -38,7 +38,12 @@ pub struct ChatUIState {
     pub chat_history: HashMap<(NodeId, NodeId), Vec<ChatMessage>>,
     pub chat_type_map: HashMap<(NodeId, NodeId), ChatType>,
     pub pending_chat_type: Option<ChatType>,
-
+    pub client_server_codes: HashMap<(NodeId, NodeId), String>,
+    pub show_history_popup: bool,
+    pub history_code_input: String,
+    pub history_client_id_input: String,
+    pub history_code_failed: bool,
+    pub history_code_success: bool,
 }
 
 impl ChatUIState {
@@ -59,6 +64,12 @@ impl ChatUIState {
             chat_history: HashMap::new(),
             chat_type_map: HashMap::new(),
             pending_chat_type: None,
+            client_server_codes: HashMap::new(),
+            show_history_popup: false,
+            history_code_input: String::new(),
+            history_client_id_input: String::new(),
+            history_code_failed: false,
+            history_code_success: false,
         }
     }
 
@@ -74,7 +85,8 @@ impl ChatUIState {
                 } else {
                     ui.label("  Logged in clients:");
                     for cid in &clients {
-                        ui.label(format!("    - Client #{}", cid));
+                        let code = self.client_server_codes.get(&(*cid, server_id)).map_or("N/A", String::as_str);
+                        ui.label(format!("    - Client #{} [Code: {}]", cid, code));
                     }
                     if let Some((a, b)) = self.active_chat_pair {
                         if clients.contains(&a) && clients.contains(&b) {
@@ -88,7 +100,6 @@ impl ChatUIState {
                                 };
                                 ui.label(format!("    {}", label));
                             }
-
                         }
                     }
                 }
@@ -164,6 +175,8 @@ impl ChatUIState {
                                 self.client_status.insert(client_id, ClientStatus::Connected);
                                 self.server_client_map.entry(server_id).or_default().push(client_id);
                                 push_gui_message(&self.gui_input, client_id, server_id, "[Login]".to_string());
+                                let code = format!("{:06}", rand::random::<u32>() % 1_000_000);
+                                self.client_server_codes.insert((client_id, server_id), code);
                             }
                         }
                     });
@@ -212,12 +225,28 @@ impl ChatUIState {
                 }
                 ClientStatus::Chatting(peer_id) => {
                     ui.horizontal(|ui| {
-                        if ui.button("End Chat").clicked() {
-                            self.pending_chat_termination = Some((client_id, peer_id));
+                        if let Some((a, b)) = self.active_chat_pair {
+                            if ui.button("End Chat").clicked() {
+                                self.pending_chat_termination = Some((a, b));
+                            }
+
                         }
                     });
                 }
+
             }
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Show Chat History").clicked() {
+                    self.show_history_popup = true;
+                    self.history_code_input.clear();
+                    self.history_client_id_input.clear();
+                    self.history_code_failed = false;
+                    self.history_code_success = false;
+                }
+            });
+
+
         }
 
         if let Some((requester, target)) = self.pending_chat_request {
@@ -243,7 +272,6 @@ impl ChatUIState {
                         });
 
 
-
                         if ui.button("Accept").clicked() {
                             let chat_type = self.pending_chat_type.unwrap_or(ChatType::Normal);
                             let key = (requester.min(target), requester.max(target));
@@ -261,8 +289,6 @@ impl ChatUIState {
                             } else {
                                 self.chat_messages = self.chat_history.get(&key).cloned().unwrap_or_default();
                             }
-
-
                         }
 
                         if ui.button("Decline").clicked() {
@@ -345,8 +371,60 @@ impl ChatUIState {
                     ui.label(format!("From Client #{}: {}", msg.from, msg.content));
                 }
             });
+
+            if self.show_history_popup {
+                egui::Window::new("Retrieve Chat History").collapsible(false).show(ui.ctx(), |ui| {
+                    ui.label("Client ID:");
+                    ui.add(TextEdit::singleline(&mut self.history_client_id_input).hint_text("e.g. 101"));
+
+                    ui.label("Security Code:");
+                    ui.add(TextEdit::singleline(&mut self.history_code_input).hint_text("123456"));
+
+                    ui.horizontal(|ui| {
+                        if ui.button("Submit").clicked() {
+                            if let (Ok(client_id), Some(server_id)) = (
+                                self.history_client_id_input.parse::<NodeId>(),
+                                self.selected_server
+                            ) {
+                                let correct_code = self.client_server_codes.get(&(client_id, server_id));
+                                if correct_code == Some(&self.history_code_input) {
+                                    let peer = self.active_chat_pair
+                                        .map(|(a, b)| if client_id == a { b } else { a })
+                                        .unwrap_or(client_id); // fallback to self if no active chat
+
+                                    push_gui_message(&self.gui_input, client_id, peer, format!("[HistoryRequest]::{}", client_id));
+                                    self.history_code_success = true;
+                                    self.history_code_failed = false;
+                                    self.show_history_popup = false; // closes on success
+                                } else {
+                                    self.history_code_failed = true;
+                                    self.history_code_success = false;
+                                }
+                            } else {
+                                self.history_code_failed = true;
+                                self.history_code_success = false;
+                            }
+                        }
+
+                        if ui.button("Close").clicked() {
+                            self.show_history_popup = false;
+                            self.history_code_input.clear();
+                            self.history_client_id_input.clear();
+                            self.history_code_failed = false;
+                            self.history_code_success = false;
+                        }
+                    });
+
+                    if self.history_code_failed {
+                        ui.label(RichText::new("❌ Incorrect code or client ID").color(Color32::RED));
+                    } else if self.history_code_success {
+                        ui.label(RichText::new("✔ Code accepted. History request sent.").color(Color32::GREEN));
+                    }
+                });
+            }
         }
     }
+
 }
 
 
