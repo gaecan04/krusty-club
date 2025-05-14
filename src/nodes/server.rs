@@ -8,6 +8,7 @@ COSE DA FARE :
 
 use petgraph::algo::dijkstra;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::mem::transmute;
 use crossbeam_channel::{Receiver, RecvError, Sender};
 use eframe::egui::accesskit::Node;
@@ -17,7 +18,6 @@ use log::{info, error, warn, debug};
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
 use std::collections::VecDeque;
-
 
 #[derive(Clone, Debug)]
 pub struct NetworkGraph {
@@ -125,9 +125,12 @@ pub struct server {
     pub fragment_lengths: HashMap<(u64, NodeId), u8>, // Maps (session_id, src_id) to length of the last fragment
     pub packet_sender: HashMap<NodeId, Sender<Packet>>, // Hashmap containing each sender channel to the neighbors (channels to send packets to clients)
     pub packet_receiver: Receiver<Packet>, // Channel to receive packets from clients/drones
+
+    pub seen_floods:HashSet<(u64, NodeId)>,
     pub registered_clients: HashMap<NodeId,Vec<NodeId>>,
     pub network_graph: NetworkGraph,
     pub chat_history: HashMap<(NodeId,NodeId), VecDeque<String>>,
+
     //recovery_in_progress:  HashMap<(u64, NodeId), bool>, // Tracks if recovery is already in progress for a session
     //drop_counts: HashMap<(u64, NodeId), usize>, // Track number of drops per session
 }
@@ -143,6 +146,7 @@ impl server {
             fragment_lengths: HashMap::new(),
             packet_sender: packet_sender,
             packet_receiver,
+            seen_floods: HashSet::new(),
             registered_clients: HashMap::new(),
             network_graph: NetworkGraph::new(),
             chat_history:HashMap::new(),
@@ -330,13 +334,7 @@ impl server {
 
         match nack.nack_type {
             NackType::Dropped => { // the only case i recieve nack Dropped is when i am forwarding the fragments to the second client
-                // Nacktype: ErrorInRouting ---> floodRequest --> find crashed drone --> remove from graph --> calculate path to dijstra and keep sending
-                //put a limit of 5 dropped fragments, at the 6th the server will flood the network sending a floodrequest
-                // to the drone to whom it is connected.
-
-                //Modus Operandi client/server:
-                // prima operazione generale: floodRequest.
-                /* Riceverò delle flood_response e da queste mi costruisco il grafo.
+                /*
                     Una volta costruito il grafo ad ogni nack::Dropped che ricevo vado a modificare il peso di tutti i
                     collegamenti relativi a quel drone. Gli altri nack implicano che c'è qualche problema del tipo crashed Drone.
                     Come gestisco? Mando floodRequest, riceverò floodResponse che mi indicheranno il drone problematico, carpita
@@ -347,7 +345,7 @@ impl server {
 
                 // grafo fatto con pet_graph.
                 warn!("Server {}: Received Nack::Dropped", self.id);
-
+                //ricevo nack::Dropped --> modifico il costo nel grafo
                 if routing_header.hop_index >= 1 {
                     if let (Some(from), Some(to)) = (
                         routing_header.hops.get(routing_header.hop_index - 1),
@@ -358,8 +356,8 @@ impl server {
                     }
                 }
                 warn!("Received Nack::Dropped, modifying the costs in the graph")
-
             },
+
             NackType::ErrorInRouting(crashed_node_id) => {
                 warn!("Server detected a crashed node {} due to ErrorInRouting.", crashed_node_id);
 
@@ -369,6 +367,7 @@ impl server {
                 info!("Server updated network graph after detecting crash of node {}", crashed_node_id);
                 self.network_graph.print_graph(); // optional: print updated graph
             },
+
             _ => {
                     warn!("Received ErrorInRouting/DestinationIsDrone/UnexpectedRecipient NACK type, sending flood request");
                     let flood_request = FloodRequest {
@@ -439,26 +438,43 @@ impl server {
     }
 
     fn handle_flood_request(&mut self, session_id:u64, flood_request: &FloodRequest, source_routing_header: SourceRoutingHeader) {
-        info!("Received Flood request for session {} with flood id {}", session_id, flood_request.flood_id);
+        //info!("Received Flood request for session {} with flood id {}", session_id, flood_request.flood_id);
+        info!("Received FloodRequest from {} with ID {}", flood_request.initiator_id, flood_request.flood_id);
 
-        let flood_response= PacketType::FloodResponse(
-            FloodResponse {
-                flood_id: session_id,
-                path_trace: vec![(self.id,NodeType::Server)],
+        let flood_req= (flood_request.flood_id, flood_request.initiator_id);
+        //we have to check if it has already been received --> check in seen_floods HashSet
+        //if it contains the flood_req:
+        if self.seen_floods.contains(&flood_req){
+            let flood_response= flood_request.generate_response(session_id);
+            if let Some(sender)= self.packet_sender.get(&flood_response.routing_header.hops[1]){
+                sender.send(flood_response).unwrap_or_else(|e| { error!("Failed to send flood_response: {:?}, e");});
             }
-        );
-        let packet_flood_response= Packet{
-            routing_header: SourceRoutingHeader{
-                hop_index: 0,
-                hops: source_routing_header.hops.iter().rev().copied().collect(),
-            },
-            session_id,
-            pack_type: flood_response,
-        };
-        self.packet_sender.iter().for_each(|(_, sender)| {
-            sender.try_send(packet_flood_response.clone()).unwrap()
-        })
+            return
+        }
+        //if it doesn't contain it --> we got to insert the flood_req in the HashSet
+        self.seen_floods.insert(flood_req);
+        //we then forward it to all neighbors except to the one who sent it to server
+        let mut forwarded_request = flood_request.clone();
+        forwarded_request.path_trace.push((self.id, NodeType::Server)); //we push as last element in the path_trace the server.
 
+        for (&vicino, sender_channel) in &self.packet_sender {
+            // Avoid sending back to the one we received it from
+            if let Some(&(last_visited, _)) = flood_request.path_trace.last() {
+                //checking the last element of flood_request (note that it is different from forwarded_request , which will be forwarded by the server itself
+                if vicino == last_visited {
+                    continue;
+                }
+            }
+            //create the new flood_request packet from forwarded_request.
+            let packet = Packet::new_flood_request(
+                SourceRoutingHeader::empty_route(),
+                session_id,
+                forwarded_request.clone(),
+            );
+            if let Err(errore) = sender_channel.send(packet) {
+                error!("Failed to forward FloodRequest to {}: {}", vicino, errore);
+            }
+        }
     }
 
     fn handle_flood_response(&mut self, session_id: u64, flood_response: &FloodResponse, routing_header: SourceRoutingHeader) {
