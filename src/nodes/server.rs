@@ -117,6 +117,7 @@ impl NetworkGraph {
     }
 }
 
+
 const MAX_CHAT_HISTORY: usize = 50; //50 messagges max for the chronology
 #[derive(Debug, Clone)]
 pub struct server {
@@ -126,10 +127,10 @@ pub struct server {
     pub packet_sender: HashMap<NodeId, Sender<Packet>>, // Hashmap containing each sender channel to the neighbors (channels to send packets to clients)
     pub packet_receiver: Receiver<Packet>, // Channel to receive packets from clients/drones
 
-    pub seen_floods:HashSet<(u64, NodeId)>,
-    pub registered_clients: HashMap<NodeId,Vec<NodeId>>,
-    pub network_graph: NetworkGraph,
-    pub chat_history: HashMap<(NodeId,NodeId), VecDeque<String>>,
+    seen_floods:HashSet<(u64, NodeId)>,
+    registered_clients: HashMap<NodeId,Vec<NodeId>>,
+    network_graph: NetworkGraph,
+    chat_history: HashMap<(NodeId,NodeId), VecDeque<String>>,
 
     //recovery_in_progress:  HashMap<(u64, NodeId), bool>, // Tracks if recovery is already in progress for a session
     //drop_counts: HashMap<(u64, NodeId), usize>, // Track number of drops per session
@@ -150,20 +151,17 @@ impl server {
             registered_clients: HashMap::new(),
             network_graph: NetworkGraph::new(),
             chat_history:HashMap::new(),
-            //recovery_in_progress: HashMap::new(),
-            //drop_counts: HashMap::new(),
         }
     }
 
     /// Run the server to process incoming packets and handle fragment assembly
     pub fn run(&mut self) {
-        // Initialize logger (logging setup for your program)
+        // Initialize the logger
         if let Err(e) = env_logger::builder().try_init() {
             eprintln!("Failed to initialize logger: {}", e);
         }
 
         info!("Server {} started running.", self.id);
-
         loop {
             match self.packet_receiver.recv() {
                 Ok(mut packet) => {
@@ -177,15 +175,15 @@ impl server {
                         }
                         PacketType::Ack(ack) => {
                             // Process ACKs, needed for simulation controller to know when to print the message
-                            //self.handle_ack(packet.session_id, ack, packet.routing_header);
+                            //self.handle_ack(packet.session_id, ack, packet.routing_header); --> no need to do anything
                         }
                         PacketType::FloodRequest(flood_request) => {
                             // Process flood requests from clients trying to discover the network
-                            // Server should send back a flood response
+                            // Server should send back a flood response and forward the FloodRequest to its neighbors except the one sending it
                             self.handle_flood_request(packet.session_id, flood_request, packet.routing_header);
                         }
                         PacketType::FloodResponse(flood_response) => {
-                            // Process flood responses containing network information
+                            // Process flood responses containing network information --> used to modify the configuration of the netwrok graph.
                             self.handle_flood_response(packet.session_id, flood_response, packet.routing_header);
                         }
                         _ => {
@@ -193,6 +191,7 @@ impl server {
                         }
                     }
                 }
+                //server is non receiving any packet
                 Err(e) => {
                     warn!("Error receiving packet: {}", e);
                     break;
@@ -209,21 +208,18 @@ impl server {
         // Initialize storage for fragments if not already present
         let entry = self.received_fragments.entry(key).or_insert_with(|| vec![None; fragment.total_n_fragments as usize]);
 
-        // Check if the fragment is already received
-        if entry[fragment.fragment_index as usize].is_some() {
+        // Check if the fragment is already received --> if already received return and do nothing
+        if entry[fragment.fragment_index as usize].is_some() { //check if the option in the vec is Some(...)
             warn!("Duplicate fragment {} received for session {:?}", fragment.fragment_index, key);
             return;
         }
-
-        // Store the fragment data
+        //if not received yet --> Store the fragment data
         entry[fragment.fragment_index as usize] = Some(fragment.data);
-
         // Update the last fragment's length if applicable
-        if fragment.fragment_index == fragment.total_n_fragments - 1 {
+        if fragment.fragment_index == fragment.total_n_fragments - 1 { // in the case we are receiving the last fragment we have not to consider the max length but rather the fragment length itself.
             self.fragment_lengths.insert(key, fragment.length);
             info!("Last fragment received for session {:?} with length {}.", key, fragment.length);
         }
-
         // Check if all fragments have been received
         if entry.iter().all(Option::is_some) {
             // All fragments received, handle complete message
@@ -240,11 +236,12 @@ impl server {
             message.extend_from_slice(&fragment.unwrap());
         }
         message.truncate(total_length);
-
+        //now trasform the message to string.
         let message_string = String::from_utf8_lossy(&message).to_string();
         let session_id: u64 = key.0;
         let client_id = key.1;
 
+        //create a format to handle the
         let tokens: Vec<&str> = message_string.trim().splitn(3, "::").collect();
 
         match tokens.as_slice() {
@@ -296,9 +293,11 @@ impl server {
                     }
                 }
             }
-            ["[HistoryRequest]", target_id_str] => { //when client wants to see chronology
+            ["[HistoryRequest]", source_id, target_id_str,] => { //when client wants to see chronology
                 if let Ok(target_id) = target_id_str.parse::<NodeId>() {
-                    let key = (client_id.min(target_id), client_id.max(target_id));
+                    let client_1=source_id.parse::<NodeId>().unwrap();
+                    let client_2 = target_id;
+                    let key = (client_1, client_2);
                     let history = self.chat_history.get(&key);
                     let response = match history {
                         Some(messages) => messages.iter().cloned().collect::<Vec<String>>().join("\n"),
@@ -480,21 +479,7 @@ impl server {
     fn handle_flood_response(&mut self, session_id: u64, flood_response: &FloodResponse, routing_header: SourceRoutingHeader) {
         info!("Received FloodResponse for flood_id {} in session {}", flood_response.flood_id, session_id);
         //obiettivo: fare tutta quella roba strana con il grafo.
-
-        /*
-        // Extract the path from the response
-        let path = flood_response.path_trace
-            .iter()
-            .map(|(id, _)| *id)
-            .collect::<Vec<NodeId>>();
-
-        info!("New path discovered: {:?}", path);
-        //integrare tutti i collegamenti e nodi del path dentro il grado
-
-        // TODO: Use this path for future communications with this client
-        // You might want to store this path in a new field in your server struct*/
         let nodes: Vec<NodeId> = flood_response.path_trace.iter().map(|(id, _)| *id).collect();
-
         for pair in nodes.windows(2) {
             if let [a, b] = pair {
                 self.network_graph.add_link(*a, *b);
