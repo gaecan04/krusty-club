@@ -131,6 +131,7 @@ pub struct server {
     registered_clients: HashMap<NodeId,Vec<NodeId>>,
     network_graph: NetworkGraph,
     chat_history: HashMap<(NodeId,NodeId), VecDeque<String>>,
+    media_storage: HashMap<String, String> // media name --> associated base64 encoding as String
 
     //recovery_in_progress:  HashMap<(u64, NodeId), bool>, // Tracks if recovery is already in progress for a session
     //drop_counts: HashMap<(u64, NodeId), usize>, // Track number of drops per session
@@ -151,6 +152,7 @@ impl server {
             registered_clients: HashMap::new(),
             network_graph: NetworkGraph::new(),
             chat_history:HashMap::new(),
+            media_storage: HashMap::new(),
         }
     }
 
@@ -306,6 +308,26 @@ impl server {
                     self.send_chat_message(session_id, client_id, format!("[HistoryResponse]::{}", response), routing_header);
                 }
             }
+            ["[MediaUpload]", image_info] => {
+                let parts: Vec<&str> = image_info.splitn(2, "::").collect();
+                if parts.len() == 2 {
+                    let media_name = parts[0].to_string();
+                    let base64_data = parts[1].to_string();
+                    // Save the image media in the hashmap
+                    self.media_storage.insert(media_name.clone(), base64_data.clone());
+
+                    let confirm = format!("[MediaUploadAck]::{}", media_name);
+                    self.send_chat_message(session_id, client_id, confirm, routing_header);
+                }
+            }
+            ["[MediaDownloadRequest]", media_name] => {
+                let response = if let Some(base64_data) = self.media_storage.get(*media_name) {
+                    format!("[MediaDownloadResponse]::{}::{}", media_name, base64_data)
+                } else {
+                    "[MediaDownloadResponse]::ERROR::NotFound".to_string()
+                };
+                self.send_chat_message(session_id, client_id, response, routing_header);
+            }
             ["[ChatFinish]"] => {
                 if let Some(clients) = self.registered_clients.get_mut(&(session_id as NodeId)) {
                     clients.retain(|&id| id != client_id);
@@ -318,6 +340,7 @@ impl server {
                     info!("Client {} logged out from session {}", client_id, session_id);
                 }
             }
+
             _ => {
                 warn!("Unrecognized message: {}", message_string);
                 info!("Reassembled message for session {:?}: {:?}", key, message);
@@ -446,7 +469,7 @@ impl server {
         if self.seen_floods.contains(&flood_req){
             let flood_response= flood_request.generate_response(session_id);
             if let Some(sender)= self.packet_sender.get(&flood_response.routing_header.hops[1]){
-                sender.send(flood_response).unwrap_or_else(|e| { error!("Failed to send flood_response: {:?}, e");});
+                sender.send(flood_response).unwrap_or_else(|e| { error!("Failed to send flood_response: {:?}", e);});
             }
             return
         }
