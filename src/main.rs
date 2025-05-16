@@ -2,6 +2,7 @@ mod utils;
 mod network;
 mod nodes;
 mod gui;
+mod simulation_controller;
 
 use std::thread;
 use crate::gui::MyApp;

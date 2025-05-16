@@ -1,51 +1,32 @@
 use std::collections::{HashMap, HashSet};
+use rand::random;
+use std::time::Instant;
 use wg_2024::controller::{DroneCommand, DroneEvent};
 use wg_2024::network::{NodeId, SourceRoutingHeader};
 use wg_2024::packet::{Ack, FloodRequest, FloodResponse, Fragment, Nack, NackType, NodeType, Packet, PacketType};
-use wg_2024::packet::PacketType::{/*FloodRequest, FloodResponse,*/ MsgFragment};
+//use wg_2024::packet::PacketType::MsgFragment;
 use wg_2024::drone::Drone;
-//use crate::droneK::drone::MyDrone;
-use crossbeam_channel::{select, Receiver, Sender};
-use std::{fs, thread};
+use crossbeam_channel::{select, select_biased, Receiver, Sender};
+use crate::simulation_controller::gui_input_queue::{pop_all_gui_messages, SharedGuiInput};
 use petgraph::graph::{Graph, Node, NodeIndex};
-use petgraph::Undirected;
 use petgraph::stable_graph::StableGraph;
-use petgraph::algo::dijkstra;
+//use petgraph::algo::dijkstra;
 use petgraph::visit::EdgeRef;
-use wg_2024::controller::DroneCommand::SetPacketDropRate;
-/*
-
-WORKING ON:
-1.definizione della struct MyClient per gestire correttamente la mappa node_id_to_index con NodeId come chiave e il grafo network_graph con pesi sugli archi.
-2.definizione della struct NodeInfo per rimuovere il derive Hash.
-3.funzione create_topology per popolare il grafo con pesi iniziali sugli archi.
-4.implementazione di un metodo best_path per calcolare le rotte utilizzando l'algoritmo di Dijkstra di petgraph.
-5.implementazione di metodi per aggiornare dinamicamente il grafo in risposta ai NACK (increment_drop e remove_node_from_graph).
-6.integrazione della chiamata a best_path nella logica di invio dei messaggi di alto livello (come nell'esempio send_chat_message).
-7.modifica della funzione process_nack per invocare gli aggiornamenti del grafo.
-
-*/
-
-
-/*
-
-**********AGGIUNGERE LE FUNZIONI PER MANDARE I PACCHETTI***********
-
- */
-
 
 
 #[derive(Debug, Clone)]
 pub struct ReceivedMessageState {
     pub data : Vec<u8>,
     pub total_fragments : u64,
-    pub received_indeces : HashSet<u64>,
+    pub received_indices : HashSet<u64>,
 }
 
 #[derive(Debug, Clone)]
 pub struct SentMessageInfo {
     pub fragments : Vec<Fragment>,
     pub original_routing_header : SourceRoutingHeader,
+    pub received_ack_indices : HashSet<u64>,
+    pub route_needs_recalculation : bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,24 +42,30 @@ pub struct MyClient{
     pub packet_recv: Receiver<Packet>, // Receives packets from other nodes
     pub packet_send: HashMap<NodeId, Sender<Packet>>, // Sends packets to neighbors
     pub sim_contr_recv: Receiver<DroneCommand>,
+    pub sim_contr_send : Sender<DroneEvent>,
     pub sent_messages: HashMap<u64, SentMessageInfo>,
     pub received_messages : HashMap<u64, ReceivedMessageState>, //per determinare quando il messaggio è completo (ha tutti i frammenti)
-    network_graph : StableGraph<NodeInfo, usize>, //grafo per memorizzare info sui nodi
-    node_id_to_index : HashMap<NodeId, NodeIndex>, //mappatura da nodeid a indice interno del grafo
-    active_flood_discoveries: HashMap<u64, FloodDiscoveryState>, //struttura per tracciare floodrequest/response
+    pub network_graph : StableGraph<NodeInfo, usize>, //grafo per memorizzare info sui nodi
+    pub node_id_to_index : HashMap<NodeId, NodeIndex>, //mappatura da node_id a indice interno del grafo
+    pub active_flood_discoveries: HashMap<u64, FloodDiscoveryState>, //struttura per tracciare flood_request/response
+    pub gui_input : SharedGuiInput,
+    //pub finalized_flood_discoveries : bool,
 }
 
 #[derive(Debug, Clone)]
 struct FloodDiscoveryState {
     initiator_id : NodeId,
-    //possibile aggiunta di info sui nodi in attesa o timer
+    start_time : Instant,
+    received_responses : Vec<FloodResponse>,
+    //is_finalized : bool
 }
 
 impl MyClient{
-    pub fn new(id: NodeId, sim_contr_recv: Receiver<DroneCommand>, packet_recv: Receiver<Packet>, packet_send: HashMap<NodeId, Sender<Packet>>, sent_messages:HashMap<u64 , SentMessageInfo>) -> Self {
+    pub fn new(id: NodeId, sim_contr_recv: Receiver<DroneCommand>, sim_contr_send : Sender<DroneEvent>, packet_recv: Receiver<Packet>, packet_send: HashMap<NodeId, Sender<Packet>>, sent_messages:HashMap<u64 , SentMessageInfo>, gui_input: SharedGuiInput) -> Self {
         Self {
             id,
             sim_contr_recv,
+            sim_contr_send,
             packet_recv,
             packet_send,
             sent_messages,
@@ -86,15 +73,54 @@ impl MyClient{
             network_graph: StableGraph::new(),
             node_id_to_index: HashMap::new(),
             active_flood_discoveries: HashMap::new(),
+            gui_input,
+            //finalized_flood_discoveries : HashSet::new(),
         }
     }
 
     fn run (&mut self){
         let mut seen_flood_ids = HashSet::new();
         println!("Client {} starting run loop", self.id);
-        //implementa logica per quando avviare flood discovery (e.g. all'avvio o quando una rotta fallisce)
+        //Implementa logica per quando avviare flood discovery (e.g. all'avvio o quando una rotta fallisce)
+        if self.network_graph.node_count() == 0 {
+            println!("Client {} network graph is empty, starting flood discovery", self.id);
+            self.start_flood_discovery()
+        }
         loop{
-            select! {
+            let gui_messages = pop_all_gui_messages(&self.gui_input, self.id);
+            for (server_id, msg_string) in gui_messages {
+                self.process_gui_command(server_id, msg_string);
+            }
+            self.check_flood_discoveries_timeouts();
+            select_biased! {
+                recv(self.sim_contr_recv) -> command => {
+                    if let Ok(command) = command {
+                        println!("Command received by client {} : {:?}", self.id, command);
+                        //implementa gestione comandi dal SC (crash, add_sender, remove_sender, set_packet_drop_rate)
+                        match command {
+                            DroneCommand::AddSender(node_id, sender) => {
+                                println!("Client {} received AddSender command for node {}", self.id, node_id);
+                                self.packet_send.insert(node_id, sender);
+                                //riavvia flood discovery dato che è stato aggiunto un vicino
+                                println!("Client {} starting flood discovery after AddSender", self.id);
+                                self.start_flood_discovery();
+                            },
+                            DroneCommand::RemoveSender(node_id) => {
+                                println!("Client {} received RemoveSender command for node {}", self.id, node_id);
+                                self.packet_send.remove(&node_id);
+                                self.remove_node_from_graph(node_id);
+                                println!("Client {} starting flood discovery after RemoveSender", self.id);
+                                self.start_flood_discovery();
+                            },
+                            DroneCommand::Crash | DroneCommand::SetPacketDropRate(_) => {
+                                eprintln!("Client {} received unexpected command: {:?}", self.id, command);
+                            }
+                        }
+                    } else {
+                        println!("Simulation Controller channel closed for client {}. Exiting run loop.", self.id);
+                        break;
+                    }
+                },
                 recv(self.packet_recv) -> packet => {
                     println!("Checking for received packet by client {} ...", self.id);
                     if let Ok(packet) = packet {
@@ -102,29 +128,33 @@ impl MyClient{
                         self.process_packet(packet, &mut seen_flood_ids);
                     }
                 },
-                recv(self.sim_contr_recv) -> command => {
-                    if let Ok(command) = command {
-                        println!("Command received by client {} : {:?}", self.id, command);
-                        //implementa gestione comandi dal SC (crash, addsender, removesender, setpacketdroprate)
-                        match command {
-                            DroneCommand::AddSender(node_id, sender) => {
-                                println!("Client {} received AddSender command for node {}", self.id, node_id);
-                                self.packet_send.insert(node_id, sender);
-                                //riavvia flooddiscovery dato che è stato aggiunto un vicino
-                            },
-                            DroneCommand::RemoveSender(node_id) => {
-                                println!("Client {} received RemoveSender command for node {}", self.id, node_id);
-                                self.packet_send.remove(&node_id);
-                                self.remove_node_from_graph(node_id);
-                            },
-                            DroneCommand::Crash | DroneCommand::SetPacketDropRate(_) => {
-                                eprintln!("Client {} received unexpected command: {:?}", self.id, command);
-                            }
-                        }
-                    }
-                }
+                default => {
+                    //evita eccessivo consumo CPU
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                },
                 //aggiungere qui select branch per gui_input o altri eventi per invio messaggi
             }
+        }
+    }
+    
+    fn check_flood_discoveries_timeouts(&mut self) {
+        let now = Instant::now();
+        let timeout_duration = std::time::Duration::from_millis(5);
+        let floods_to_finalize : Vec<u64> = self.active_flood_discoveries.iter().filter(|(_flood_id, state)| now.duration_since(state.start_time) > timeout_duration).map(|(_flood_id, state)| *_flood_id).collect();
+        for flood_id in floods_to_finalize {
+            println!("Client {} finalizing flood discovery for ID {} due to timeout", self.id, flood_id);
+            self.finalize_flood_discovery_topology(flood_id);
+        }
+    }
+    
+    fn finalize_flood_discovery_topology(&mut self, flood_id: u64) {
+        if let Some(discovery_state) = self.active_flood_discoveries.remove(&flood_id) {
+            println!("Client {} processing {} collected responses for flood ID {}.", self.id, discovery_state.received_responses.len(), flood_id);
+            for response in discovery_state.received_responses {
+                self.create_topology(&response);
+            }
+        } else {
+            eprintln!("Client {} tried to finalize unknown flood discovery ID {}", self.id, flood_id);
         }
     }
 
@@ -136,8 +166,14 @@ impl MyClient{
                 self.process_flood_request(&request, seen_flood_ids , packet.routing_header.clone());
             },
             PacketType::FloodResponse(response) => {
-                self.create_topology(&response);
-                //implementa logica per tracciare floodresponses e finalizzare discovery per un determinato flood_id
+                println!("Client {} received FloodResponse for flood_id {}", self.id, response.flood_id);
+                if let Some(discovery_state) = self.active_flood_discoveries.get_mut(&response.flood_id) {
+                    discovery_state.received_responses.push(response.clone());
+                    println!("Client {} collected {} responses for flood ID {}.", self.id, discovery_state.received_responses.len(), response.flood_id);
+                } else {
+                    eprintln!("Client {} received FloodResponse for unknown or inactive flood ID {}. Processing path anyway.", self.id, response.flood_id);
+                    //self.create_topology(&response);
+                }
             },
             PacketType::MsgFragment(fragment) => {
                 self.send_ack(&mut packet , &fragment);
@@ -148,21 +184,23 @@ impl MyClient{
                 //quando ricevi ACK, segna come ricevuto in self.sent_messages
                 println!("Client {} received ACK for session {}, fragment {}", self.id, packet.session_id, ack.fragment_index);
                 if let Some(sent_msg_info) =  self.sent_messages.get_mut(&packet.session_id) {
-                    //segna come ricevuto in self.sent_messages e rimuovilo dalla lista di quelli in trasmissione
-                    //possibile necessità di modificare SentMessageInfo
+                    sent_msg_info.received_ack_indices.insert(ack.fragment_index);
+                    println!("Client {} marked fragment {} of session {} as ACKed. Received {}/{} ACKs", self.id, ack.fragment_index, packet.session_id, sent_msg_info.received_ack_indices.len(), sent_msg_info.fragments.len());
+                    /*
+                    if sent_msg_info.received_ack_indices-len() == sent_msg_info.fragments.len() {
+                        println!("Client {} received all ACKs for session {}. Message considered successfully sent.", self.id, packet.session_id);
+                        //self.sent_messages.remove(&packet.session_id);
+                    }
+                     */
+                } else {
+                    eprintln!("Client {} received ACK for unknown session {}", self.id, packet.session_id);
                 }
             },
             PacketType::Nack(nack ) => {
-                //implementa logica per gestire nack
                 self.process_nack(&nack , &mut packet);
             }
         }
     }
-
-    /*
-    i messaggi che vengono mandati vengono divisi in un vettore di frammenti associato al suo id e conservati in un hashmap
-    quando recuperiamo il messaggio cerchiamo l'id e troviamo il fragment index
-     */
 
     fn process_flood_request(&mut self, request: &FloodRequest, seen_flood_ids: &mut HashSet<u64>, header: SourceRoutingHeader){
         let mut updated_request = request.clone();
@@ -176,45 +214,95 @@ impl MyClient{
         response_routing_header.hops.reverse();
         response_routing_header.hop_index = 1;
         let reversed_hops = response_routing_header.hops.clone();
+        let final_destination_id = flood_response.path_trace.first().map(|(id, _)| *id);
         if response_routing_header.hops.len() > 1 {
             let next_hop = response_routing_header.hops[response_routing_header.hop_index];
+            let response_packet_to_send = Packet {
+                pack_type : PacketType::FloodResponse(flood_response.clone()),
+                routing_header : response_routing_header.clone(),
+                session_id : request.flood_id,
+            };
             if let Some(sender) = self.packet_send.get(&next_hop) {
-                let response_packet = Packet {
-                    pack_type : PacketType::FloodResponse(flood_response),
-                    routing_header : response_routing_header,
-                    session_id : request.flood_id,
-                };
-                match sender.send(response_packet) {
+                match sender.send(response_packet_to_send.clone()) {
                     Ok(()) => {
                         println!("Client {} sent FloodResponse {} back to {}", self.id, request.flood_id, next_hop);
                     }
                     Err(e) => {
                         eprintln!("Client {} failed to send FloodResponse {} back to {}: {}", self.id, request.flood_id, next_hop, e);
+                        if let Some(dest_id) = final_destination_id {
+                            let shortcut_header = SourceRoutingHeader {
+                                hop_index : 0,
+                                hops : vec![dest_id],
+                            };
+                            let shortcut_packet = Packet {
+                                pack_type : PacketType::FloodResponse(flood_response.clone()),
+                                routing_header : shortcut_header,
+                                session_id : request.flood_id,
+                            };
+                            match self.sim_contr_send.send(DroneEvent::ControllerShortcut(shortcut_packet)) {
+                                Ok(()) => println!("Client {} sent FloodResponse {} via ControllerShortcut to destination {}.", self.id, request.flood_id, dest_id),
+                                Err(e_sc) => eprintln!("Client {} FAILED to send FloodResponse {} via ControllerShortcut to {}: {}", self.id, request.flood_id, dest_id, e_sc),
+                            }
+                        } else {
+                            eprintln!("Client {} failed to send FloodResponse {} via ControllerShortcut: could not determine final destination.", self.id, request.flood_id);
+                        }
                     }
                 }
             } else {
-                eprintln!("Client {} error: no sender found for FloodResponse next hop {}", self.id, next_hop);
+                eprintln!("Client {} error: no sender found for FloodResponse next hop {}. Attempting ControllerShortcut", self.id, next_hop);
+                if let Some(dest_id) = final_destination_id {
+                    let shortcut_header = SourceRoutingHeader {
+                        hop_index : 0,
+                        hops : vec![dest_id],
+                    };
+                    let shortcut_packet = Packet {
+                        pack_type : PacketType::FloodResponse(flood_response.clone()),
+                        routing_header : shortcut_header,
+                        session_id : request.flood_id,
+                    };
+                    match self.sim_contr_send.send(DroneEvent::ControllerShortcut(shortcut_packet)) {
+                        Ok(()) => println!("Client {} sent FloodResponse {} via ControllerShortcut (neighbor not found).", self.id, request.flood_id),
+                        Err(e_sc) => eprintln!("Client {} FAILED to send FloodResponse via ControllerShortcut (neighbor not found) for flood_id {}: {}", self.id, request.flood_id, e_sc),
+                    }
+                } else {
+                    eprintln!("Client {} error: cannot send FloodResponse, inverted routing header hops too short {:?}. Cannot use normal path.", self.id, reversed_hops);
+                    if let Some(dest_id) = final_destination_id {
+                        eprintln!("Client {} attempting ControllerShortcut due to short reversed hops.", self.id);
+                        let shortcut_header = SourceRoutingHeader {
+                            hop_index: 0,
+                            hops: vec![dest_id],
+                        };
+
+                        let shortcut_packet = Packet {
+                            pack_type: PacketType::FloodResponse(flood_response.clone()),
+                            routing_header: shortcut_header,
+                            session_id: request.flood_id,
+                        };
+
+                        match self.sim_contr_send.send(DroneEvent::ControllerShortcut(shortcut_packet)) { // ASSUMENDO self.sim_contr_send ESISTA
+                            Ok(()) => println!("Client {} sent FloodResponse {} via ControllerShortcut (short hops).", self.id, request.flood_id),
+                            Err(e_sc) => eprintln!("Client {} FAILED to send FloodResponse via ControllerShortcut (short hops) for flood_id {}: {}", self.id, request.flood_id, e_sc),
+                        }
+                    } else {
+                        eprintln!("Client {} failed to send FloodResponse {} via ControllerShortcut: could not determine final destination (short hops case).", self.id, request.flood_id);
+                    }
+                }
             }
-        } else {
-            eprintln!("Client {} error: cannot send FloodResponse, inverted routing header hops too short {:?}", self.id, reversed_hops);
         }
-
-        //rivedi completamente logica (PROTOCOLLO)(?)
         seen_flood_ids.insert(request.flood_id);
-
     }
 
     fn start_flood_discovery(&mut self) {
         println!("Client {} starting flood discovery", self.id);
         //1.genera flood_id unico
-        let new_flood_id = rand::random::<u64>();
-        //2.crea floodrequest
+        let new_flood_id = random::<u64>();
+        //2.crea flood_request
         let flood_request = FloodRequest {
             flood_id : new_flood_id,
             initiator_id : self.id,
             path_trace : vec![(self.id, NodeType::Client)],
         };
-        //3.inivia floodrequest ai ngbh
+        //3.invia flood_request ai neighbor
         let flood_packet = Packet {
             pack_type : PacketType::FloodRequest(flood_request),
             routing_header : SourceRoutingHeader {
@@ -225,7 +313,7 @@ impl MyClient{
         };
 
         println!("Client {} sending FloodRequest {} to all neighbors", self.id, new_flood_id);
-        //4.invia floodrequest a tutti i ngbh
+        //4.invia flood_request a tutti i neighbor
         for (&neighbor_id, sender) in &self.packet_send {
             match sender.send(flood_packet.clone()) {
                 Ok(_) => println!("Client {} sent FloodRequest to neighbor {}",  self.id, neighbor_id),
@@ -233,7 +321,9 @@ impl MyClient{
             }
         }
         //implementa come mantenere traccia dei flood_id attivi e delle risposte attese/ricevute
-        self.active_flood_discoveries.insert(new_flood_id, FloodDiscoveryState{ initiator_id : self.id });
+        self.active_flood_discoveries.insert(new_flood_id, FloodDiscoveryState{
+            initiator_id : self.id, start_time : Instant::now(), received_responses : Vec::new()
+        });
     }
 
     fn reassemble_packet (&mut self, fragment: &Fragment, packet : &mut Packet){
@@ -250,59 +340,142 @@ impl MyClient{
             ReceivedMessageState {
                 data : vec![0u8; (fragment.total_n_fragments * 128) as usize],
                 total_fragments : fragment.total_n_fragments,
-                received_indeces : HashSet::new(),
+                received_indices : HashSet::new(),
             }
         });
-        if state.received_indeces.contains(&fragment.fragment_index) {
+        if state.received_indices.contains(&fragment.fragment_index) {
             println!("Received duplicate fragment {} for session {}. Ignoring", fragment.fragment_index, session_id);
             return;
         }
 
-        let fragment_data_slice = &fragment.data[..fragment_len];
-
         if offset + fragment_len <= state.data.len() {
             state.data[offset..offset + fragment_len].copy_from_slice(&fragment.data[..fragment_len]);
-            //let target_slice = &mut state.data[offset..offset + fragment_len];
-            //target_slice.copy_from_slice(fragment_data_slice);
-
-            state.received_indeces.insert(fragment.fragment_index);
-            println!("Client {} received fragment {} for session {}. Received {}/{} fragments.", self.id, fragment.fragment_index, session_id, state.received_indeces.len(), state.total_fragments);
-            if state.received_indeces.len() as u64 == state.total_fragments {
-                println!("Message for sesssion {} reassembled successfully", session_id);
+            
+            state.received_indices.insert(fragment.fragment_index);
+            println!("Client {} received fragment {} for session {}. Received {}/{} fragments.", self.id, fragment.fragment_index, session_id, state.received_indices.len(), state.total_fragments);
+            if state.received_indices.len() as u64 == state.total_fragments {
+                println!("Message for session {} reassembled successfully", session_id);
                 let full_message_data = state.data.clone();
                 self.received_messages.remove(&key);
-                //implementa logica per elaborare messaggio riassemblato (state.data) come messaggio di alto livello
-                let message_string = String::from_utf8_lossy(&full_message_data);
-                println!("Client {} reassembled message content: {:?}", self.id, message_string);
-            }
+                
+                let message_string = String::from_utf8_lossy(&full_message_data).to_string();
+                self.process_received_high_level_message(message_string, src_id, session_id);
+                }
         } else {
             eprintln!("Received fragment {} for session {} with offset {} and length {} which exceeds excepted message size {}. Ignoring fragment", fragment.fragment_index, session_id, offset, fragment_len, state.data.len());
+        }
+    }
+
+    fn process_received_high_level_message(&mut self, message_string: String, source_id: NodeId, session_id: u64) { 
+        println!("Client {} processing high-level message for session {} from source {}: {}", self.id, session_id, source_id, message_string);
+        let tokens: Vec<&str> = message_string.trim().splitn(3, "::").collect();
+        if tokens.is_empty() {
+            eprintln!("Client {} received empty high-level message for session {}", self.id, session_id);
+            return;
+        }
+
+        match tokens.as_slice() {
+            ["[MessageFrom]", sender_id_str, content_str] => {
+                // formato: [MessageFrom]::sender_id::message_content 
+                if let Ok(sender_id) = sender_id_str.parse::<NodeId>() {
+                    let content = *content_str;
+                    println!("Client {} RECEIVED CHAT MESSAGE from client {}: {}", self.id, sender_id, content);
+                } else {
+                        eprintln!("Client {} received MessageFrom with invalid sender_id: {}", self.id, sender_id_str);
+                }
+            },
+            ["[ClientListResponse]", list_str] => {
+                //formato: [ClientListResponse]::[client1_id, client2_id, ...]
+                let client_ids : Vec<NodeId> = list_str.trim_start_matches('[').trim_end_matches(']').split(',').filter(|s| !s.trim().is_empty()).filter_map(|s| s.trim().parse::<NodeId>().ok()).collect();
+                println!("Client {} RECEIVED CLIENT LIST: {:?}", self.id, client_ids);
+            },
+            ["[ChatStart]", status_str] => {
+                //formato: [ChatStart]::bool
+                match status_str.to_lowercase().as_str() {
+                    "true" => {
+                        println!("Client {} CHAT REQUEST ACCEPTED. Chat started.", self.id);
+                    },
+                    "false" => {
+                        println!("Client {} CHAT REQUEST DENIED.", self.id);
+                    },
+                    _ => eprintln!("Client {} received ChatStart with invalid boolean value: {}", self.id, status_str),
+                }
+            },
+            ["[ChatFinish]"] => {
+                //formato: [ChatFinish]
+                println!("Client {} CHAT TERMINATED.", self.id);
+            },
+            ["[ChatRequest]", peer_id_str] => {
+                //formato: [ChatRequest]::{peer_id}
+                if let Ok(requester_id) = peer_id_str.parse::<NodeId>() {
+                    println!("Client {} RECEIVED INCOMING CHAT REQUEST from client {}.", self.id, requester_id);
+                } else {
+                    eprintln!("Client {} received ChatRequest with invalid requester_id: {}", self.id, peer_id_str);
+                }
+            },
+            ["[HistoryResponse]", content_str] => {
+                //formato: [HistoryResponse]::message_content
+                let history_content = *content_str;
+                println!("Client {} RECEIVED CHAT HISTORY: {}", self.id, history_content);
+            },
+            [type_tag, ..] => {
+                eprintln!("Client {} received unrecognized high-level message type: {}", self.id, type_tag);
+            },
+            [] => {
+                eprintln!("Client {} received empty high-level message for session {}", self.id, session_id);
+            },
         }
     }
 
     fn send_ack (&mut self, packet: &mut Packet , fragment: &Fragment) {
         let mut ack_routing_header = packet.routing_header.clone();
         ack_routing_header.hops.reverse();
-        ack_routing_header.hop_index = 1;
-
-        let mut ack_packet = Packet {
-            pack_type: PacketType::Ack(Ack { fragment_index : fragment.fragment_index }),
-            routing_header: ack_routing_header,
-            session_id: packet.session_id,
-        };
-
-        if ack_packet.routing_header.hops.len() > 1 {
-            let next_hop_for_ack = ack_packet.routing_header.hops[ack_packet.routing_header.hop_index];
+        //ack_routing_header.hop_index = 1;
+        
+        let destination_node_id = ack_routing_header.hops.first().copied();
+        let next_hop_for_ack_option = ack_routing_header.hops.get(1).copied();
+        if let (Some(next_hop_for_ack), Some(_destination_node_id)) = (next_hop_for_ack_option, destination_node_id) {
+            let ack_packet_to_send = Packet {
+                pack_type : PacketType::Ack(Ack { fragment_index: fragment.fragment_index }),
+                routing_header : ack_routing_header,
+                session_id : packet.session_id,
+            };
             if let Some(sender) = self.packet_send.get(&next_hop_for_ack) {
-                match sender.send(ack_packet) {
+                match sender.send(ack_packet_to_send.clone()) {
                     Ok(()) => println!("Client {} sent ACK for session {} fragment {} to neighbor {}", self.id, packet.session_id, fragment.fragment_index, next_hop_for_ack),
-                    Err(e) => eprintln!("Client {} error sending ACK packet for session {}: {:?}", self.id, packet.session_id, e),
+                    Err(e) => {
+                        eprintln!("Client {} error sending ACK packet for session {} to neighbor {}: {}. Using ControllerShortcut.", self.id, packet.session_id, next_hop_for_ack, e);
+                        let mut shortcut_header = ack_packet_to_send.routing_header.clone();
+                        shortcut_header.hop_index = 0;
+                        shortcut_header.hops = vec![destination_node_id.unwrap()];
+                        let shortcut_packet = Packet {
+                            pack_type : ack_packet_to_send.pack_type,
+                            routing_header : shortcut_header,
+                            session_id : ack_packet_to_send.session_id,
+                        };
+                        match self.sim_contr_send.send(DroneEvent::ControllerShortcut(shortcut_packet)) {
+                            Ok(()) => println!("Client {} sent ACK for session {} fragment {} via ControllerShortcut.", self.id, packet.session_id, fragment.fragment_index),
+                            Err(e_sc) => eprintln!("Client {} FAILED to send ACK via ControllerShortcut for session {}: {}", self.id, packet.session_id, e_sc),
+                        }
+                    }
                 }
             } else {
-                eprintln!("Client {} error: no sender found for ACK next hop {}", self.id, next_hop_for_ack);
+                eprintln!("Client {} error: no sender found for ACK next hop {}. Attempting to use ControllerShortcut.", self.id, next_hop_for_ack);
+                let mut shortcut_header = ack_packet_to_send.routing_header.clone();
+                shortcut_header.hop_index = 0;
+                shortcut_header.hops = vec![destination_node_id.unwrap()];
+                let shortcut_packet = Packet {
+                    pack_type : ack_packet_to_send.pack_type,
+                    routing_header : shortcut_header,
+                    session_id : ack_packet_to_send.session_id,
+                };
+                match self.sim_contr_send.send(DroneEvent::ControllerShortcut(shortcut_packet)) {
+                    Ok(()) => println!("Client {} sent ACK for session {} fragment {} via ControllerShortcut (neighbor not found).", self.id, packet.session_id, fragment.fragment_index),
+                    Err(e_sc) => eprintln!("Client {} FAILED to send ACK via ControllerShortcut (neighbor not found) for session {}: {}", self.id, packet.session_id, e_sc),
+                }
             }
         } else {
-            eprintln!("Client {} error: cannot send ACK, original routing header hops too short: {:?}", self.id, packet.routing_header.hops);
+            eprintln!("Client {} error: cannot send ACK, original routing header hops too short: {:?}. Cannot use ControllerShortcut.", self.id, packet.routing_header.hops);
         }
     }
 
@@ -311,20 +484,29 @@ impl MyClient{
         match &nack.nack_type {
             NackType::ErrorInRouting(problem_node_id) => {
                 eprintln!("Client {} received Nack::ErrorInRouting for session {} at node {}", self.id, packet.session_id, problem_node_id);
-                //implementa logica per informare il modulo routing che il nodo "problem_node_id" o il link verso di esso sono inaffidabili
-                //possibile dover ricalcolare la rotta
                 self.remove_node_from_graph(*problem_node_id);
                 println!("Client {} removed node {} from graph due to ErrorInRouting", self.id, problem_node_id);
-                //implementa invalidazione rotta usata per questa sessione o avviare ricalcolo
+                let sent_msg_info = self.sent_messages.get_mut(&packet.session_id);
+                if let Some(info) =  sent_msg_info {
+                    info.route_needs_recalculation = true;
+                    println!("Client {} marked route for session {} for recalculation due to ErrorInRouting.", self.id, packet.session_id);
+                } else {
+                    eprintln!("Client {} received ErrorInRouting NACK for unknown session {}", self.id, packet.session_id);
+                }
             }
             NackType::DestinationIsDrone => {
                 eprintln!("Client {} received Nack::DestinationIsDrone for session {}. Route calculation error?", self.id, packet.session_id);
-                //implemeta logica per segnalare che la rotta calcolata potrebbe essere errata
-                //implementa invalidazione rotta usata
+                let sent_msg_info = self.sent_messages.get_mut(&packet.session_id);
+                if let Some(info) = sent_msg_info {
+                    info.route_needs_recalculation = true;
+                    println!("Client {} marked route for session {} for recalculation due to DestinationIsDrone.", self.id, packet.session_id);
+                } else {
+                    eprintln!("Client {} received DestinationIsDrone NACK for unknown session {}", self.id, packet.session_id);
+                }
+                //self.start_flood_discovery();
             }
             NackType::UnexpectedRecipient(received_at_node_id) => {
                 eprintln!("Client {} received Nack::UnexpectedRecipient for session {}: packet arrived at node {} but expected a different one. Route mismatch or topology error?", self.id, packet.session_id, received_at_node_id);
-                //implementa logica per segnalare disallineamento della rotta o errore di topologia
                 let nack_route = &packet.routing_header.hops;
                 let nack_hop_index = packet.routing_header.hop_index;
                 if nack_hop_index > 0 && nack_hop_index < nack_route.len() {
@@ -336,39 +518,50 @@ impl MyClient{
                 } else {
                     eprintln!("Client {} received UnexpectedRecipient NACK with invalid routing header/hop index {:?}", self.id, packet.routing_header);
                 }
+                let sent_msg_info = self.sent_messages.get_mut(&packet.session_id);
+                if let Some(info) = sent_msg_info {
+                    info.route_needs_recalculation = true;
+                    println!("Client {} marked route for session {} for recalculation due to UnexpectedRecipient.", self.id, packet.session_id);
+                } else {
+                    eprintln!("Client {} received UnexpectedRecipient NACK for unknown session {}", self.id, packet.session_id);
+                }
             }
             NackType::Dropped=>{
                 eprintln!("Client {} received Nack::Dropped for session {}, fragment {}", self.id, packet.session_id, nack.fragment_index);
-                if let Some(original_packet_info) = self.sent_messages.get(&packet.session_id) { //original_packet_info dovrebbe contenere i frammenti E l'header di routing originale
-                    if let Some(fragment_to_resend) = original_packet_info.fragments.iter().find(|f| f.fragment_index == nack.fragment_index) {
-                        let original_header = &original_packet_info.original_routing_header;
-                        let nack_route = &packet.routing_header.hops;
-                        let nack_hop_index = packet.routing_header.hop_index;
-                        if nack_hop_index > 0 && nack_hop_index < nack_route.len() {
-                            let from_node = nack_route[nack_hop_index - 1];
-                            let dropped_at_node = nack_route[nack_hop_index];
-                            println!("Client {} penalizing link {} -> {} due to Dropped NACK", self.id, from_node, dropped_at_node);
-                            self.increment_drop(from_node, dropped_at_node);
-                            self.increment_drop(dropped_at_node, from_node);
-                            //implementa politica di ritrasmissione
-                            /*let packet_to_resend = Packet {
-                                pack_type : PacketType::MsgFragment(fragment_to_resend.clone()),
-                                routing_header : original_header.clone(),
-                                session_id : packet.session_id,
-                            };
-                            let first_hop = original_header.hops[original_header.hop_index];
-                            match self.send_to_neighbor(first_hop, packet_to_resend) {
-                                Ok(_) => println!("Client {} resent fragment {} for session {} to {}", self.id, fragment_to_resend.fragment_index, packet.session_id, first_hop),
-                                Err(e) => eprintln!("Client {} failed to resend fragment {} for session {} to {}: {}", self.id, fragment_to_resend.fragment_index, packet.session_id, first_hop, e),
-                            }*/
-                        } else {
-                            eprintln!("Client {} cannot determine dropping link: Original routing header hop_index is out of bounds for session {}", self.id, packet.session_id); // [59, 60]
+                let resend_info = self.sent_messages.get(&packet.session_id).and_then(|original_packet_info| {
+                    original_packet_info.fragments.iter().find(|f| f.fragment_index == nack.fragment_index).map(|fragment_to_resend| {
+                        (fragment_to_resend.clone(), original_packet_info.original_routing_header.clone())
+                    })
+                });
+                if let Some((fragment_to_resend, original_header)) = resend_info {
+                    let nack_route = &packet.routing_header.hops;
+                    let nack_hop_index = packet.routing_header.hop_index;
+                    if nack_hop_index > 0 && nack_hop_index < nack_route.len() {
+                        let from_node = nack_route[nack_hop_index - 1];
+                        let dropped_at_node = nack_route[nack_hop_index];
+                        println!("Client {} penalizing link {} -> {} due to Dropped NACK", self.id, from_node, dropped_at_node);
+                        self.increment_drop(from_node, dropped_at_node);
+                        self.increment_drop(dropped_at_node, from_node);
+
+                    } else {
+                        eprintln!("Client {} cannot determine dropping link: Original routing header hop_index is out of bounds for session {}", self.id, packet.session_id);
+                    }
+                    let packet_to_resend = Packet {
+                        pack_type : PacketType::MsgFragment(fragment_to_resend.clone()),
+                        routing_header : original_header,
+                        session_id : packet.session_id,
+                    };
+                    if packet_to_resend.routing_header.hops.len() > packet_to_resend.routing_header.hop_index {
+                        let first_hop = packet_to_resend.routing_header.hops[packet_to_resend.routing_header.hop_index];
+                        match self.send_to_neighbor(first_hop, packet_to_resend) {
+                            Ok(_) => println!("Client {} resent fragment {} for session {} to {}", self.id, fragment_to_resend.fragment_index, packet.session_id, first_hop),
+                            Err(e) => eprintln!("Client {} failed to resend fragment {} for session {} to {}: {}", self.id, fragment_to_resend.fragment_index, packet.session_id, first_hop, e),
                         }
                     } else {
-                        eprintln!("Client {} received dropped nack for session {}, fragment {} but could not find fragment in sent_messages", self.id, packet.session_id, nack.fragment_index); // [32, 34]
+                        eprintln!("Client {} cannot resend fragment {}: Original routing header has no valid first hop for session {}", self.id, fragment_to_resend.fragment_index, packet.session_id);
                     }
                 } else {
-                    eprintln!("Client {} received dropped nack for session {}, but original packet info not found in sent_messages", self.id, packet.session_id); // [32, 34]
+                    eprintln!("Client {} received dropped nack for session {}, fragment {} but could not find fragment in sent_messages", self.id, packet.session_id, nack.fragment_index); // [32, 34]
                 }
             }
         }
@@ -381,71 +574,232 @@ impl MyClient{
             println!("Received empty path_trace in FloodResponse for flood_id {}", flood_response.flood_id);
             return;
         }
+        let (initiator_id, initiator_type) = path.first().cloned().unwrap();
+        if let std::collections::hash_map::Entry::Vacant(e) = self.node_id_to_index.entry(initiator_id) {
+            let node_index = self.network_graph.add_node(NodeInfo { id : initiator_id, node_type : initiator_type});
+            e.insert(node_index);
+            println!("Client {} added initiator node {} ({:?}) to graph.", self.id, initiator_id, initiator_type);
+        }
         for i in 0..path.len() {
             let (current_node_id, current_node_type) = path[i];
-            let current_node_idx = *self.node_id_to_index.entry(current_node_id).or_insert_with(|| {
+            if let std::collections::hash_map::Entry::Vacant(e) = self.node_id_to_index.entry(current_node_id) {
+                let node_index = self.network_graph.add_node(NodeInfo { id: current_node_id, node_type: current_node_type });
+                e.insert(node_index);
+                println!("Client {} added node {} ({:?}) to graph.", self.id, current_node_id, current_node_type);
+            }
+            /*let current_node_idx = *self.node_id_to_index.entry(current_node_id).or_insert_with(|| {
                 println!("Client {} adding node {} ({:?}) to graph", self.id, current_node_id, current_node_type);
                 self.network_graph.add_node(NodeInfo { id : current_node_id, node_type : current_node_type } )
-            });
+            });*/
             if i > 0 {
-                let (prev_node_id, prev_node_type) = path[i - 1];
-                if let Some(&prev_node_idx) = self.node_id_to_index.get(&prev_node_id) {
-                    let edge_exists_fwd = self.network_graph.contains_edge(prev_node_idx, current_node_idx);
-                    let edge_exists_bwd = self.network_graph.contains_edge(current_node_idx, prev_node_idx);
-                    if !edge_exists_fwd {
-                        println!("Client {} adding edge: {} -> {}", self.id, prev_node_id, current_node_id);
-                        self.network_graph.add_edge(prev_node_idx, current_node_idx, 0);
-                    }
-                    if !edge_exists_bwd {
-                        println!("Client {} adding edge: {} -> {}", self.id, current_node_id, prev_node_id);
-                        self.network_graph.add_edge(current_node_idx, prev_node_idx, 0);
-                    }
-                    else {
+                let (prev_node_id, _) = path[i - 1];
+                if let Some(&current_node_idx) = self.node_id_to_index.get(&current_node_id) {
+                    if let Some(&prev_node_idx) = self.node_id_to_index.get(&prev_node_id) {
+                        let edge_exists = self.network_graph.contains_edge(current_node_idx, prev_node_idx) || self.network_graph.contains_edge(prev_node_idx, current_node_idx);
+                        if !edge_exists {
+                            println!("Client {} adding edge: {} -> {}", self.id, prev_node_id, current_node_id);
+                            self.network_graph.add_edge(prev_node_idx, current_node_idx, 0);
+                            self.network_graph.add_edge(current_node_idx, prev_node_idx, 0);
+                        } else {
+                            println!("Client {} edge {} -> {} already exists.", self.id, prev_node_id, current_node_id);
+                        }
+                    } else {
                         eprintln!("Client {} error: previous node id {} not found in node_id_to_index map while processing path trace", self.id, prev_node_id);
                     }
+                } else {
+                    eprintln!("Client {} error: current node id {} not found in node_id_to_index map while processing path trace", self.id, current_node_id);
                 }
             }
         }
-        //raccogli tutte FloodResponse (per flood_id), dopo finalizza topologia per quel ciclo
     }
 
-    fn best_path(&self, source: NodeId, target: NodeId) -> Option<Vec<NodeId>> {
-        let &source_idx = self.node_id_to_index.get(&source)?;
-        let &target_idx = self.node_id_to_index.get(&target)?;
-        let predecessors = dijkstra(&self.network_graph, source_idx, Some(target_idx), |e| *e.weight());
-        let mut predecessors_map: HashMap<NodeIndex, NodeIndex> = HashMap::new();
-        let path_result = petgraph::algo::astar(
-            &self.network_graph,
-            source_idx,
-            |n| n == target_idx, // Goal condition: Is node n the target node?
-            |e| *e.weight(),     // Edge cost: Use the weight of the edge (usize)
-            |_| 0                // Heuristic: Use 0 for all nodes (makes A* equivalent to Dijkstra)
-        );
-        match path_result {
-            Some((cost, node_indices_path)) => {
-                println!("Client {} found path from {} to {} with cost {}", self.id, source, target, cost);
-                let node_ids_path : Vec<NodeId> = node_indices_path.iter().filter_map(|&idx| self.network_graph.node_weight(idx).map(|node_info| node_info.id)).collect();
-                Some(node_ids_path)
+    fn process_gui_command(&mut self, destination_server_id: NodeId, command_string: String) {
+        println!("Client {} processing GUI command '{}' for server {}", self.id, command_string, destination_server_id);
+        let tokens: Vec<&str> = command_string.trim().split("::").collect();
+        let command_type = tokens.first().unwrap_or(&"");
+        let high_level_message_info: Option<(String, NodeId)> = match *command_type {
+            "[Login]" => {
+                println!("Client {} processing Login command", self.id);
+                Some(("[Login]".to_string(), destination_server_id))
+            },
+            "[Logout]" => {
+                println!("Client {} processing Logout command", self.id);
+                Some(("[Logout]".to_string(), destination_server_id))
+            },
+            "[ClientListRequest]" => {
+                println!("Client {} processing ClientListRequest command", self.id);
+                Some(("[ClientListRequest]".to_string(), destination_server_id))
+            },
+            "[MessageTo]" => {
+                if tokens.len() >= 3 {
+                    let target_id_str = tokens[3];
+                    let message_content = tokens[4];
+                    if let Ok(target_client_id) = target_id_str.parse::<NodeId>() {
+                        println!("Client {} processing MessageTo command for client {} with content {}", self.id, target_client_id, message_content);
+                        Some((format!("[MessageTo]::{target_client_id}::{message_content}"), destination_server_id))
+                    } else {
+                        eprintln!("Client {} received MessageTo command with invalid target_id: {}", self.id, target_id_str);
+                        None
+                    }
+                } else {
+                    eprintln!("Client {} received invalid MessageTo command format: {}", self.id, command_string);
+                    None
+                }
+            },
+            "[ChatRequest]" => {
+                if tokens.len() >= 2 {
+                    let peer_id_str = tokens[3];
+                    if let Ok(peer_id) = peer_id_str.parse::<NodeId>() {
+                        println!("Client {} processing ChatRequest command for peer {}", self.id, peer_id);
+                        Some((format!("[ChatRequest]::{peer_id}"), destination_server_id))
+                    } else {
+                        eprintln!("Client {} received ChatRequest command with invalid peer_id: {}", self.id, peer_id_str);
+                        None
+                    }
+                } else {
+                    eprintln!("Client {} received invalid ChatRequest command format: {}", self.id, command_string);
+                    None 
+                }
+            },
+            "[ChatFinish]" => {
+                if tokens.len() >= 2 {
+                    let peer_id_str = tokens[3];
+                    if let Ok(peer_id) = peer_id_str.parse::<NodeId>() {
+                        println!("Client {} processing ChatFinished command for peer {}", self.id, peer_id);
+                        Some((format!("[ChatFinish]::{peer_id}"), destination_server_id))
+                    } else {
+                        eprintln!("Client {} received ChatFinish command with invalid peer_id: {}", self.id, peer_id_str);
+                        None
+                    }
+                } else {
+                    eprintln!("Client {} received invalid ChatFinish command format: {}", self.id, command_string);
+                    None
+                }
+            },
+            _ => {
+                eprintln!("Client {} received unrecognized GUI command: {}", self.id, command_string);
+                None
             }
-            None => {
-                println!("Client {} could not find a path from {} to {}", self.id, source, target);
+        };
+        //- - - - calcolo rotta verso destination server - - - -
+        if let Some((high_level_message_content, target_destination_id)) = high_level_message_info {
+            let route_option = self.best_path(self.id, destination_server_id);
+            let route = match route_option {
+                Some(path) => {
+                    println!("Client {} computed route to server {}: {:?}", self.id, destination_server_id, path);
+                    path
+                },
+                None => {
+                    eprintln!("Client {} could not compute route to server {}. Starting flood discovery.", self.id, destination_server_id);
+                    self.start_flood_discovery();
+                    return;
+                }
+            };
+            let routing_header = SourceRoutingHeader {
+                hops: route.clone(),
+                hop_index: 1,
+            };
+            let message_data_bytes = high_level_message_content.into_bytes();
+            const FRAGMENT_SIZE : usize = 128;
+            let total_fragments = (message_data_bytes.len() + FRAGMENT_SIZE - 1) / FRAGMENT_SIZE;
+            let mut fragments = Vec::new();
+            let session_id = random::<u64>();
+            for i in 0..total_fragments {
+                let start = i * FRAGMENT_SIZE;
+                let end = (start + FRAGMENT_SIZE).min(message_data_bytes.len());
+                let fragment_data_slice = &message_data_bytes[start..end];
+                let mut data : [u8; FRAGMENT_SIZE] = [0; FRAGMENT_SIZE];
+                data[..fragment_data_slice.len()].copy_from_slice(fragment_data_slice);
+                let len = fragment_data_slice.len();
+                fragments.push(Fragment {
+                    fragment_index : i as u64,
+                    total_n_fragments : total_fragments as u64,
+                    length : len as u8,
+                    data,
+                });
+            }
+            //println!("Client {} fragmented message into {} fragments for session {}", self.id, total_fragments, session_id);
+            self.sent_messages.insert(session_id, SentMessageInfo {
+                fragments : fragments.clone(),
+                original_routing_header : routing_header.clone(),
+                received_ack_indices : HashSet::new(),
+                route_needs_recalculation : false,
+            });
+            println!("Client {} stored message info for session {}", self.id, session_id);
+            if routing_header.hops.len() > routing_header.hop_index {
+                let first_hop = routing_header.hops[routing_header.hop_index];
+                println!("Client {} sending message fragments for session {} starting with hop {}", self.id, session_id, first_hop);
+                for fragment in fragments {
+                    let packet = Packet {
+                        pack_type : PacketType::MsgFragment(fragment.clone()),
+                        routing_header : routing_header.clone(),
+                        session_id,
+                    };
+                    match self.send_to_neighbor(first_hop, packet) {
+                        Ok(()) => println!("Client {} sent fragment {} for session {} to  {}", self.id, fragment.fragment_index, session_id, first_hop),
+                        Err(e) => eprintln!("Client {} Failed to send fragment {} for session {} to {}: {}", self.id, fragment.fragment_index, session_id, first_hop, e),
+                        //implementa gestione errori di invio
+                    }
+                }
+            } else {
+                eprintln!("Client {} has no valid first hop in computed route {:?} to send the message to!", self.id, route);
+                //implementa avvio flood discovery se non si conosce vicini/rotta non può essere calcolata
+                self.start_flood_discovery();
+            }
+        }
+    }
+    
+    fn best_path(&self, from: NodeId, to: NodeId) -> Option<Vec<NodeId>> {
+        println!("Client {} calculating path from {} to {}", self.id, from, to);
+        let start_node_idx = self.node_id_to_index.get(&from).copied();
+        let end_node_idx = self.node_id_to_index.get(&to).copied();
+        match (start_node_idx, end_node_idx) {
+            (Some(start_idx), Some(end_idx)) => {
+                let path_result = petgraph::algo::astar(
+                    &self.network_graph,
+                    start_idx,
+                    |n| n == end_idx, // Goal condition: Is node n the target node?
+                    |e| *e.weight(),     // Edge cost: Use the weight of the edge (usize)
+                    |_| 0                // Heuristic: Use 0 for all nodes (makes A* equivalent to Dijkstra)
+                );
+                match path_result {
+                    Some((_cost, node_indices_path)) => {
+                        let node_ids_path : Vec<NodeId> = node_indices_path.iter().filter_map(|&idx| self.network_graph.node_weight(idx).map(|node_info| node_info.id)).collect();
+                        println!("Client {} found path from {} to {}: {:?}", self.id, from, to, node_ids_path);
+                        if node_ids_path.is_empty() || node_ids_path.first().copied() != Some(from) || node_ids_path.last().copied() != Some(to) {
+                            eprintln!("Client {} computed an invalid path structure from {} to {}: {:?}", self.id, from, to, node_ids_path);
+                            None
+                        } else {
+                            Some(node_ids_path)
+                        }
+                    },
+                    None => {
+                        println!("Client {} could not find a path from {} to {}", self.id, from, to);
+                        None
+                    }
+                }
+            },
+            _ => {
+                eprintln!("Client {} cannot calculate path: source ({}) or destination ({}) node not found in graph.", self.id, from, to);
                 None
             }
         }
     }
 
     fn increment_drop(&mut self, from: NodeId, to: NodeId) {
-        if let (Some(&from_idx), Some(&to_idx)) = (&self.node_id_to_index.get(&from), &self.node_id_to_index.get(&to)) {
+        println!("Client {} incrementing drop count for link {} -> {}", self.id, from, to);
+        let from_node_idx = self.node_id_to_index.get(&from).copied();
+        let to_node_idx = self.node_id_to_index.get(&to).copied();
+        if let (Some(from_idx), Some(to_idx)) = (from_node_idx, to_node_idx) {
             if let Some(edge_index) = self.network_graph.find_edge(from_idx, to_idx) {
-                if let Some(weight) = self.network_graph.edge_weight_mut(edge_index) {
-                    *weight = weight.saturating_add(1); //incrementa evitando overflow
-                    println!("Client {} incremented drop cost on link {} -> {} to {}", self.id, from, to, *weight);
-                }
+                let current_weight = *self.network_graph.edge_weight(edge_index).unwrap();
+                *self.network_graph.edge_weight_mut(edge_index).unwrap() = current_weight.saturating_add(1);
+                println!("Client {} incremented weight for link {} -> {} to {}", self.id, from, to, current_weight.saturating_add(1));
             } else {
-                println!("Client {} tried to increment drop on non-existent edge {} -> {}", self.id, from, to);
+                println!("Client {} cannot increment drop: link {} -> {} not found in graph", self.id, from, to);
             }
         } else {
-            println!("Client {} tried to increment drop, but nodes {} or {} not found in graph.", self.id, from, to);
+            println!("Client {} cannot increment drop: one or both nodes ({}, {}) not found in node_id_to_index map", self.id, from, to);
         }
     }
 
@@ -458,7 +812,6 @@ impl MyClient{
         }
     }
 
-    #[allow(dead_code)] //non usa la funzione per ora
     fn send_chat_message(&mut self, destination_server_id: NodeId, target_client_id: NodeId, message_text: String) {
         println!("Client {} preparing to send chat message to client {} via server {}", self.id, target_client_id, destination_server_id);
         //- - - - route computation - - - -
@@ -472,7 +825,6 @@ impl MyClient{
                 eprintln!("Client {} could not compute route to server {}", self.id, destination_server_id);
                 //implementa:cosa fare se non si trova una rotta
                 //1.avviare flood discovery
-                //2.segnalare errore alla GUI
                 return;
             }
         };
@@ -490,7 +842,7 @@ impl MyClient{
         const FRAGMENT_SIZE: usize = 128;
         let total_fragments = (message_data_bytes.len() + FRAGMENT_SIZE - 1) / FRAGMENT_SIZE;
         let mut fragments : Vec<Fragment> = Vec::new();
-        let session_id = rand::random::<u64>();
+        let session_id = random::<u64>();
         for i in 0..total_fragments {
             let start = i * FRAGMENT_SIZE;
             let end = std::cmp::min(start + FRAGMENT_SIZE, message_data_bytes.len());
@@ -510,6 +862,8 @@ impl MyClient{
         self.sent_messages.insert(session_id, SentMessageInfo {
             fragments : fragments.clone(),
             original_routing_header : routing_header.clone(),
+            received_ack_indices : HashSet::new(),
+            route_needs_recalculation : false,
         });
 
         //- - - - invio messaggi frammentati - - - -
@@ -532,7 +886,6 @@ impl MyClient{
         }
     }
 
-    #[allow(dead_code)] //non usa la funzione per ora
     fn get_node_info(&self, node_id : NodeId) -> Option<&NodeInfo> {
         self.node_id_to_index.get(&node_id).and_then(|&idx| self.network_graph.node_weight(idx))
     }
@@ -547,19 +900,4 @@ impl MyClient{
             Err(format!("Neighbor {} not found in packet_send map.", neighbor_id))
         }
     }
-
-
-    //chiarire la questione degli ack
-
-    //implemanta funzioni per logica alto livello (login, logout, messageto, messagefrom, clientlistrequest, clientlistresponse(Vec<NodeId>), chatrequest(NodeId), chatstart(bool), charfinish)
-    //le funzioni devono:
-    //1.calcolare rotta verso server (Dijkstra)
-    //2.crea header di source routing con rotta calcolata
-    //3.frammentare messaggio di alto livello in MsgFragment
-    //4.inviare frammenti al primo hop della rotta usando la funzione send_to_neighbor
-    //5.memorizzare infos del messaggio in self.sent_messages (per i nack)
-    
-    //implementa gestione comandi simulation controller (addsender, removesender)
-    
-
 }
