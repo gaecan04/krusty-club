@@ -6,6 +6,7 @@ version = 4
 name = "Krusty_Club_Project"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "config",
  "crossbeam",
  "crossbeam-channel",
