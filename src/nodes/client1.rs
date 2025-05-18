@@ -183,12 +183,10 @@ impl MyClient {
                 if let Some(sent_msg_info) = self.sent_messages.get_mut(&packet.session_id) {
                     sent_msg_info.received_ack_indices.insert(ack.fragment_index);
                     println!("Client {} marked fragment {} of session {} as ACKed. Received {}/{} ACKs", self.id, ack.fragment_index, packet.session_id, sent_msg_info.received_ack_indices.len(), sent_msg_info.fragments.len());
-                    /*
-                    if sent_msg_info.received_ack_indices-len() == sent_msg_info.fragments.len() {
+                    if sent_msg_info.received_ack_indices.len() == sent_msg_info.fragments.len() {
                         println!("Client {} received all ACKs for session {}. Message considered successfully sent.", self.id, packet.session_id);
                         //self.sent_messages.remove(&packet.session_id);
                     }
-                     */
                 } else {
                     eprintln!("Client {} received ACK for unknown session {}", self.id, packet.session_id);
                 }
@@ -223,6 +221,7 @@ impl MyClient {
                 match sender.send(response_packet_to_send.clone()) {
                     Ok(()) => {
                         println!("Client {} sent FloodResponse {} back to {}", self.id, request.flood_id, next_hop);
+                        self.sim_contr_send.send(DroneEvent::PacketSent(response_packet_to_send.clone())).unwrap_or_else(|err|{eprintln!("Client {} failed to send PacketSent event to sim_controller for packet sent to {:?}: {}", self.id, final_destination_id, err)});
                     }
                     Err(e) => {
                         eprintln!("Client {} failed to send FloodResponse {} back to {}: {}", self.id, request.flood_id, next_hop, e);
@@ -313,7 +312,10 @@ impl MyClient {
         //4.sending flood_request to all neighbors
         for (&neighbor_id, sender) in &self.packet_send {
             match sender.send(flood_packet.clone()) {
-                Ok(_) => println!("Client {} sent FloodRequest to neighbor {}", self.id, neighbor_id),
+                Ok(_) => {
+                    println!("Client {} sent FloodRequest to neighbor {}", self.id, neighbor_id);
+                    self.sim_contr_send.send(DroneEvent::PacketSent(flood_packet.clone())).unwrap_or_else(|err|{eprintln!("Client {} failed to send PacketSent event for FloodRequest to sim_controller: {}", self.id, err)});
+                },
                 Err(e) => eprintln!("Client {} failed to send FloodRequest to neighbor {}: {}", self.id, neighbor_id, e),
             }
         }
@@ -511,7 +513,10 @@ impl MyClient {
             };
             if let Some(sender) = self.packet_send.get(&next_hop_for_ack) {
                 match sender.send(ack_packet_to_send.clone()) {
-                    Ok(()) => println!("Client {} sent ACK for session {} fragment {} to neighbor {}", self.id, packet.session_id, fragment.fragment_index, next_hop_for_ack),
+                    Ok(()) => {
+                        println!("Client {} sent ACK for session {} fragment {} to neighbor {}", self.id, packet.session_id, fragment.fragment_index, next_hop_for_ack);
+                        self.sim_contr_send.send(DroneEvent::PacketSent(ack_packet_to_send)).unwrap_or_else(|err|{eprintln!("Client {} failed to send PacketSent event for ACK to sim_controller: {}", self.id, err)});
+                    },
                     Err(e) => {
                         eprintln!("Client {} error sending ACK packet for session {} to neighbor {}: {}. Using ControllerShortcut.", self.id, packet.session_id, next_hop_for_ack, e);
                         let mut shortcut_header = ack_packet_to_send.routing_header.clone();
@@ -978,12 +983,594 @@ impl MyClient {
 
     fn send_to_neighbor(&mut self, neighbor_id: NodeId, packet: Packet) -> Result<(), String> {
         if let Some(sender) = self.packet_send.get(&neighbor_id) {
-            match sender.send(packet) {
-                Ok(()) => Ok(()),
+            match sender.send(packet.clone()) {
+                Ok(()) => {
+                    self.sim_contr_send.send(DroneEvent::PacketSent(packet)).unwrap_or_else(|err|{eprintln!("Client {} failed to send PacketSent event to sim_controller for packet sent to {}: {}", self.id, neighbor_id, err)});
+                    Ok(())
+                },
                 Err(e) => Err(format!("Failed to send packet to neighbor {}: {}", neighbor_id, e)),
             }
         } else {
             Err(format!("Neighbor {} not found in packet_send map.", neighbor_id))
         }
     }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossbeam_channel::{unbounded, Receiver, Sender};
+    use std::collections::HashMap;
+    use wg_2024::packet::{Fragment, Packet, PacketType, Nack, NackType, FloodRequest, FloodResponse, NodeType as PktNodeType};
+    use wg_2024::controller::{DroneCommand, DroneEvent};
+    use wg_2024::network::{NodeId, SourceRoutingHeader};
+    use crate::simulation_controller::gui_input_queue::{new_gui_input_queue, SharedGuiInput};
+    use petgraph::stable_graph::{StableGraph};
+    use std::time::Duration;
+
+    //helper function to create MyClient in mock channels
+    fn setup_client(client_id: NodeId) -> (MyClient, Sender<DroneCommand>, Receiver<DroneEvent>, Sender<Packet>, HashMap<NodeId, Receiver<Packet>>, SharedGuiInput) {
+        let (sim_contr_send_tx, sim_contr_send_rx) = unbounded::<DroneEvent>();
+        let (sim_contr_recv_tx, sim_contr_recv_rx) = unbounded::<DroneCommand>();
+        let (packet_recv_tx, packet_recv_rx) = unbounded::<Packet>();
+        let mut packet_send_map = HashMap::new();
+        let (neighbor_1_recv_tx, neighbor_1_recv_rx) = unbounded::<Packet>();
+        packet_send_map.insert(10 as NodeId, neighbor_1_recv_tx); //client near drone 10
+        let (neighbor_2_recv_tx, neighbor_2_recv_rx) = unbounded::<Packet>();
+        packet_send_map.insert(5 as NodeId, neighbor_2_recv_tx); //client near drone 5
+
+        let mut neighbor_receivers = HashMap::new();
+        neighbor_receivers.insert(10, neighbor_1_recv_rx);
+        neighbor_receivers.insert(20, neighbor_2_recv_rx);
+
+        let gui_input = new_gui_input_queue();
+
+        let client = MyClient::new(
+            client_id,
+            sim_contr_recv_rx,
+            sim_contr_send_tx.clone(),
+            packet_recv_rx,
+            packet_send_map,
+            HashMap::new(),
+            gui_input.clone(),
+        );
+
+        (client, sim_contr_recv_tx, sim_contr_send_rx, packet_recv_tx, neighbor_receivers, gui_input)
+    }
+
+    //- - - - unit tests - - - -
+
+    /*
+    //unit test: [Login] token
+    #[test]
+    fn test_process_gui_command_login() {
+        let client_id = 1;
+        let server_id = 100;
+        let (mut client, _sim_contr_tx, _sim_contr_rx, _packet_tx, _neighbor_rx, gui_input) = setup_client(client_id);
+
+        push_gui_message(&gui_input, client_id, server_id, "[Login]".to_string());
+
+        let gui_messages = pop_all_gui_messages(&client.gui_input, client_id);
+        for (dest_server_id, msg_string) in gui_messages {
+            //mock best_path function for this test
+            let original_best_path = client.best_path;
+            client.best_path = |src, dest| {
+                if src == client_id && dest == server_id {
+                    Some(vec![client_id, 10, 50, server_id])
+                } else {
+                    None
+                }
+            };
+            client.process_gui_command(dest_server_id, msg_string);
+            //ripristina funzione originale o ridefinisci per ogni test
+        }
+        //verifica l'output: un pacchetto MsgFragment dovrebbe essere inviato
+        //non possiamo leggere direttamente dai senders in packet_send_map qui
+        //questo test unitario isolato è difficile perché process_gui_command chiama send logic
+        //è meglio fare un test di integrazione per questo scenario
+        //
+        //alternativa per test unitario: verifica solo il parsing e la preparazione del messaggio
+        //modifica process_gui_command per restituire il messaggio di alto livello preparato
+        //
+        //dato che `process_gui_command` chiama direttamente la logica di invio, un test unitario puro è difficile
+        //spostiamo questo allo scenario di integrazione
+    }
+    */
+
+    /*
+    //unit test: handling receiving MsgFragment and reassembling
+    #[test]
+    fn test_reassemble_packet() {
+        let client_id = 1;
+        let (mut client, _sim_contr_tx, _sim_contr_rx, _packet_tx, _neighbor_rx, _gui_input) = setup_client(client_id);
+
+        let session_id = 123;
+        let source_id = 2; //the other client
+
+        let fragment1 = Fragment { fragment_index : 0, total_n_fragments : 3, length : 5, data : [1, 2, 3, 4, 5, 0, ..; 128] };
+        let fragment2 = Fragment { fragment_index : 1, total_n_fragments : 3, length : 5, data : [6, 7, 8, 9, 10, 0, ..; 128] };
+        let fragment3 = Fragment { fragment_index : 2, total_n_fragments : 3, length : 5, data : [11, 12, 13, 14, 15, 0, ..; 128] };
+
+        let rh = SourceRoutingHeader { hops : vec![], hop_index : 0 };
+
+        let mut packet1 = Packet { pack_type : PacketType::MsgFragment(fragment1.clone()), routing_header : rh.clone(), session_id };
+        let mut packet2 = Packet { pack_type :  PacketType::MsgFragment(fragment2.clone()), routing_header : rh.clone(), session_id };
+        let mut packet3 = Packet { pack_type :   PacketType::MsgFragment(fragment3.clone()), routing_header : rh.clone(), session_id };
+
+        client.reassemble_packet(&fragment1, &mut packet1);
+        assert!(client.received_messages.contains_key(&session_id));
+        let state = client.received_messages.get(&session_id).unwrap();
+        assert_eq!(state.received_indices.len(), 1);
+        assert_eq!(state.data.len(), (fragment1.total_n_fragments * fragment1.length as u64) as usize);
+        assert_eq!(&state.data[0..fragment1.length as usize], &fragment1.data[0..fragment1.length as usize]);
+
+        client.reassemble_packet(&fragment2, &mut packet2);
+        let state = client.received_messages.get(&session_id).unwrap();
+        assert_eq!(state.received_indices.len(), 2);
+        assert_eq!(&state.data.[fragment1.length as usize..(fragment1.length +fragment2.length) as usize], &fragment2.data[0..fragment2.length as usize]);
+
+        //mock process_received_high_level_message
+        let mut high_level_message_processed = false;
+        let original_process = client.process_received_high_level_message;
+        client.process_received_high_level_message = |_, msg_string, stc_id, sess_id| {
+            println!("Mocked processing high-level message: '{}' from {} (session {})", msg_string, source_id, sess_id);
+            high_level_message_processed = true;
+            //possibile aggiunta asserzioni messaggio riassemblato
+            let expected_message = "AABBCCDD".to_string();
+            //in questo test unitario, i byte sono {1..15} quindi il messaggio decodificato sarebbe "0102030405060708090a0b0c0d0e0f" in hex
+            //dobbiamo testare che 'data' contenga i byte corretti e che 'process_received_high_level_message' venga chiamata
+            let expected_bytes : Vec<u8> = vec![20-34];
+            //testiamo che la funzione mock venga chiamata. il test sul contenuto decodificato dipende dalla logica di decodifica del client
+        };
+
+        client.reassemble_packet(&fragment3, &mut packet3);
+        assert!(!client.received_messages.contains_key(&session_id));
+        //verifica che la funzione di processamento del messaggio di livello si stata chiamata
+        //se la mock non ha effetti esterni, si può solo dedurre che sarebbe stata chiamata se non fosse mockata
+
+        //ripristina funzione originale o ridefinisci per ogni test
+    }
+    */
+
+    //unit test: handling NACK (ErrorInRouting)
+    #[test]
+    fn test_process_nack_error_in_routing() {
+        let client_id = 1;
+        let (mut client, _sim_contr_tx, _sim_contr_rx, _packet_tx, _neighbor_rx, _gui_input) = setup_client(client_id);
+
+        let session_id = 456;
+        let nack_packet_id = 0;
+        let bad_node_id = 99;
+        let nack_type = NackType::ErrorInRouting(bad_node_id);
+        let nack = Nack { fragment_index : nack_packet_id, nack_type : nack_type.clone() };
+        let rh = SourceRoutingHeader { hops: vec![client_id, 10, bad_node_id, 50, 100], hop_index: 2 };
+
+        let mut packet = Packet { pack_type : PacketType::Nack(nack.clone()), routing_header : rh.clone(), session_id };
+
+        //simulation: client sent message with this session_id and route
+        client.sent_messages.insert(session_id, SentMessageInfo {
+            fragments : vec![],
+            original_routing_header : rh.clone(),
+            received_ack_indices : HashSet::new(),
+            route_needs_recalculation : false,
+        });
+
+        client.process_nack(&nack, &mut packet);
+
+        //verify that route for this session has been marked for recalculation
+        assert!(client.sent_messages.get(&session_id).unwrap().route_needs_recalculation);
+        println!("Client {} marked route for session {} for recalculation due to ErrorInRouting.", client_id, session_id);
+
+        //verify that flood discovery hasn't been initialized automatically from process_nack
+    }
+
+    //unit test: handling ANCK (Dropped)
+    #[test]
+    fn test_process_nack_dropped() {
+        let client_id = 1;
+        let (mut client, _sim_contr_tx, _sim_contr_rx, _packet_tx, _neighbor_rx, _gui_input) = setup_client(client_id);
+
+        let session_id = 789;
+        let nack_packet_id = 5;
+        let nack_type = NackType::Dropped;
+        let nack = Nack { fragment_index : nack_packet_id, nack_type };
+        //we have to penalize the problematic link
+        //mock raph
+        client.network_graph = StableGraph::new();
+        let client_idx = client.network_graph.add_node(NodeInfo { id : client_id, node_type : PktNodeType::Client });
+        client.node_id_to_index.insert(client_id, client_idx);
+        let drone10_idx = client.network_graph.add_node(NodeInfo { id : 10, node_type : PktNodeType::Drone });
+        client.node_id_to_index.insert(10, drone10_idx);
+        let drone5_idx = client.network_graph.add_node(NodeInfo { id : 5, node_type : PktNodeType::Drone });
+        client.node_id_to_index.insert(5, drone5_idx);
+        let edge_idx = client.network_graph.add_edge(client_idx, drone10_idx, 1);
+
+        let rh = SourceRoutingHeader { hops : vec![10, client_id], hop_index : 1 };
+        let mut packet = Packet { pack_type : PacketType::Nack(nack.clone()), routing_header : rh.clone(), session_id };
+
+        let initial_weight = client.network_graph.edge_weight(edge_idx).unwrap().clone();
+
+        client.process_nack(&nack, &mut packet);
+
+        //verify that the weight changed
+        let new_weight = client.network_graph.edge_weight(edge_idx).unwrap();
+        println!("Initial weight: {}, New weight: {}", initial_weight, new_weight);
+        assert!(*new_weight > initial_weight);
+    }
+
+    //unit test: creation and updating topology from FloodResponse
+    #[test]
+    fn test_create_topology() {
+        let client_id = 1;
+        let (mut client, _sim_contr_tx, _sim_contr_rx, _packet_tx, _neighbor_rx, _gui_input) = setup_client(client_id);
+
+        //simulation FloodResponse tracking a path
+        let path_trace: Vec<(NodeId, PktNodeType)> = vec![
+            (10, PktNodeType::Drone),
+            (20, PktNodeType::Drone),
+            (30, PktNodeType::Drone),
+            (100, PktNodeType::Drone),
+        ];
+        let flood_response = FloodResponse { flood_id : 99, path_trace : path_trace.clone() };
+        client.create_topology(&flood_response);
+
+        //verify nodes in path_trace are added to the graph
+        for &(node_id, _) in path_trace.iter() {
+            assert!(client.node_id_to_index.contains_key(&node_id));
+            let node_index = client.node_id_to_index.get(&node_id).unwrap();
+            assert!(client.network_graph.node_weight(*node_index).is_some());
+            assert_eq!(client.network_graph.node_weight(*node_index).unwrap().id, node_id);
+        }
+
+        //verify edges between consecutive nodes in path_trace are added
+        for i in 0..path_trace.len() - 1 {
+            let (node_a_id, _) = path_trace[i];
+            let (node_b_id, _) = path_trace[i+1];
+            let node_a_idx = client.node_id_to_index.get(&node_a_id).unwrap();
+            let node_b_idx = client.node_id_to_index.get(&node_b_id).unwrap();
+
+            //verify the existence of an edge between node_a_idx and node_b_idx (or vice versa)
+            let edge_exists = client.network_graph.contains_edge(*node_a_idx, *node_b_idx);
+            assert!(edge_exists, "Edge tra {} e {} non trovato nel grafo", node_a_id, node_b_id);
+
+            //verify initial weight of the link = 1
+            let edge_weight = client.network_graph.find_edge(*node_a_idx, *node_b_idx)
+                .or_else(|| client.network_graph.find_edge(*node_b_idx, *node_a_idx));
+            assert!(edge_weight.is_some());
+            assert_eq!(*client.network_graph.edge_weight(edge_weight.unwrap()).unwrap(), 1); // Peso iniziale atteso 1
+        }
+
+        let path_trace2: Vec<(NodeId, PktNodeType)> = vec![
+            (10, PktNodeType::Drone),
+            (40, PktNodeType::Drone),
+            (100, PktNodeType::Drone),
+        ];
+        let flood_response2 = FloodResponse { flood_id : 100, path_trace : path_trace2.clone() };
+        client.create_topology(&flood_response2);
+
+        //verify node '40' is added
+        assert!(client.node_id_to_index.contains_key(&40));
+        //verify link 10<->40 is added
+        let node_10_idx = client.node_id_to_index.get(&10).unwrap();
+        let node_40_idx = client.node_id_to_index.get(&40).unwrap();
+        assert!(client.network_graph.contains_edge(*node_10_idx, *node_40_idx));
+        //verify link 40<->100 is added
+        let node_100_idx = client.node_id_to_index.get(&100).unwrap();
+        assert!(client.network_graph.contains_edge(*node_40_idx, *node_100_idx));
+    }
+
+    //unit test: best_path
+    #[test]
+    fn test_best_path() {
+        let client_id = 1;
+        let (mut client, _sim_contr_tx, _sim_contr_rx, _packet_tx, _neighbor_rx, _gui_input) = setup_client(client_id);
+
+        //mock graph
+        client.network_graph = StableGraph::new();
+        client.node_id_to_index.clear();
+        let c_idx = client.network_graph.add_node(NodeInfo { id: client_id, node_type: PktNodeType::Client });
+        client.node_id_to_index.insert(client_id, c_idx);
+        let d1_idx = client.network_graph.add_node(NodeInfo { id: 10, node_type: PktNodeType::Drone });
+        client.node_id_to_index.insert(10, d1_idx);
+        let d2_idx = client.network_graph.add_node(NodeInfo { id: 20, node_type: PktNodeType::Drone });
+        client.node_id_to_index.insert(20, d2_idx);
+        let d3_idx = client.network_graph.add_node(NodeInfo { id: 30, node_type: PktNodeType::Drone });
+        client.node_id_to_index.insert(30, d3_idx);
+        let s_idx = client.network_graph.add_node(NodeInfo { id: 100, node_type: PktNodeType::Server });
+        client.node_id_to_index.insert(100, s_idx);
+        client.network_graph.add_edge(c_idx, d1_idx, 1);
+        client.network_graph.add_edge(c_idx, d2_idx, 2); //undesired path
+        client.network_graph.add_edge(d1_idx, d3_idx, 1);
+        client.network_graph.add_edge(d2_idx, d3_idx, 1);
+        client.network_graph.add_edge(d3_idx, s_idx, 1);
+
+        //shortest path
+        let expected_path = vec![client_id, 10, 30, 100];
+        let computed_path = client.best_path(client_id, 100);
+
+        assert!(computed_path.is_some());
+        assert_eq!(computed_path.unwrap(), expected_path);
+
+        //testing path towards itself
+        let self_path = client.best_path(client_id, client_id);
+        assert!(self_path.is_some());
+        assert_eq!(self_path.unwrap(), vec![client_id]);
+    }
+
+    //- - - - integration tests - - - -
+
+    /*
+    //integration test: gui messages
+    #[test]
+    fn integration_gui_message_to_packet_sent() {
+        let client_id = 1;
+        let server_id = 100;
+        let neighbor_drone_id = 10;
+        let (mut client, sim_contr_tx, sim_contr_rx, _packet_recv_tx, mut neighbor_receivers, gui_input) = setup_client(client_id);
+
+        //mock graph
+        client.network_graph = StableGraph::new();
+        client.node_id_to_index.clear();
+        let c_idx = client.network_graph.add_node(NodeInfo { id: client_id, node_type: PktNodeType::Client });
+        client.node_id_to_index.insert(client_id, c_idx);
+        let d1_idx = client.network_graph.add_node(NodeInfo { id: neighbor_drone_id, node_type: PktNodeType::Drone });
+        client.node_id_to_index.insert(neighbor_drone_id, d1_idx);
+        let s_idx = client.network_graph.add_node(NodeInfo { id: server_id, node_type: PktNodeType::Server });
+        client.node_id_to_index.insert(server_id, s_idx);
+        //C->D->S
+        client.network_graph.add_edge(c_idx, d1_idx, 1);
+        client.network_graph.add_edge(d1_idx, s_idx, 1);
+
+        //mock best_path function
+        let original_best_path = client.best_path;
+        client.best_path = |src, dest| {
+            if src == client_id && dest == server_id {
+                Some(vec![client_id, neighbor_drone_id, server_id]) // Percorso simulato
+            } else {
+                None
+            }
+        };
+
+        //simulation GUI command
+        let gui_cmd = "[MessageTo]::target_client_id::Message content here".to_string();
+        push_gui_message(&gui_input, client_id, server_id, gui_cmd.clone());
+
+        let gui_messages = pop_all_gui_messages(&client.gui_input, client.id);
+        for (dest_server_id, msg_string) in gui_messages {
+            client.process_gui_command(dest_server_id, msg_string);
+        }
+
+        //1.packet (or fragment) should be sent to D via packet_send
+        let sent_packet = neighbor_receivers.get_mut(&neighbor_drone_id).unwrap().recv_timeout(Duration::from_secs(1));
+        assert!(sent_packet.is_ok(), "Client did not send a packet to neighbor after GUI command");
+        let packet = sent_packet.unwrap();
+        //verify packet type (it should be MsgFragment)
+        match &packet.pack_type {
+            PacketType::MsgFragment(_) => println!("✅ Client sent MsgFragment"),
+            _ => panic!("Expected MsgFragment, but sent {:?}", packet.pack_type),
+        }
+        //verify routing header
+        assert_eq!(packet.routing_header.hops, vec![client_id, neighbor_drone_id, server_id]);
+        assert_eq!(packet.routing_header.hop_index, 1);
+
+        //2. PacketSent event should be sent to SC
+        let packet_sent_event = sim_contr_rx.recv_timeout(Duration::from_secs(1));
+        assert!(packet_sent_event.is_ok(), "Client did not send PacketSent event to SC");
+        match packet_sent_event.unwrap() {
+            DroneEvent::PacketSent(p) => {
+                println!("✅ Client sent PacketSent event for session {}", p.session_id);
+                assert_eq!(p.session_id, packet.session_id);
+            },
+            _ => panic!("Expected PacketSent event, but received something else"),
+        }
+
+        client.best_path = original_best_path;
+    }
+    */
+
+    //integration test: receiving fragments and sending ACKs
+    #[test]
+    fn integration_receive_fragment_and_send_ack() {
+        let client_id = 1;
+        let neighbor_drone_id = 10;
+        let (mut client, sim_contr_tx, sim_contr_rx, packet_recv_tx, mut neighbor_receivers, _gui_input) = setup_client(client_id);
+
+        let (ack_dest_recv_tx, ack_dest_recv_rx) = unbounded::<Packet>();
+        let sender_from_neighbor = ack_dest_recv_tx;
+        client.packet_send.insert(neighbor_drone_id, sender_from_neighbor);
+        
+        let session_id = 456;
+        let fragment_index = 0;
+        let total_fragments = 1;
+        let mut fragment_data: [u8; 128] = [0; 128];
+        let initial_data :[u8; 3] = [10, 11, 12];
+        fragment_data[..initial_data.len()].copy_from_slice(&initial_data);
+        let fragment = Fragment { fragment_index, total_n_fragments : total_fragments, length: 3, data : fragment_data };
+        let original_route = vec![100, 20, neighbor_drone_id, client_id];
+        let received_rh = SourceRoutingHeader { hops: original_route.clone(), hop_index: 3 };
+
+        let packet = Packet { pack_type: PacketType::MsgFragment(fragment.clone()), routing_header: received_rh.clone(), session_id };
+
+        packet_recv_tx.send(packet.clone()).expect("Failed to send packet to client");
+        println!("Sent MsgFragment to client {}", client_id);
+
+        let mut seen_flood_ids = HashSet::new();
+        client.process_packet(packet, &mut seen_flood_ids);
+        
+        //verify output:
+        //1.an ACK packet should be sent to D10
+        let ack_packet_result = ack_dest_recv_rx.recv_timeout(Duration::from_secs(1));
+        assert!(ack_packet_result.is_ok(), "Client did not send ACK packet back");
+        let ack_packet = ack_packet_result.unwrap();
+        match ack_packet.pack_type {
+            PacketType::Ack(ack) => {
+                println!("✅ Client sent ACK for fragment {} session {}", ack.fragment_index, ack_packet.session_id);
+                assert_eq!(ack.fragment_index, fragment_index);
+                assert_eq!(ack_packet.session_id, session_id);
+                let mut expected_hops: Vec<NodeId> = original_route.into_iter().rev().collect();
+                //expected hops [20, 29, 48, 49]
+                assert_eq!(ack_packet.routing_header.hops, expected_hops);
+                assert_eq!(ack_packet.routing_header.hop_index, 1);
+            },
+            _ => panic!("Expected ACK packet, but sent {:?}", ack_packet.pack_type),
+        }
+        
+        //2.PacketSent event for ACK should be sent to SC
+        let packet_sent_event = sim_contr_rx.recv_timeout(Duration::from_secs(1));
+        assert!(packet_sent_event.is_ok(), "Client did not send PacketSent event for ACK to SC");
+        match packet_sent_event.unwrap() {
+            DroneEvent::PacketSent(p) => {
+                println!("✅ Client sent PacketSent event for ACK session {}", p.session_id);
+                assert_eq!(p.session_id, session_id);
+                //verify PacketSent event contains sent ACK
+                match p.pack_type {
+                    PacketType::Ack(_) => assert!(true),
+                    _ => panic!("PacketSent event should contain an ACK"),
+                }
+            },
+            _ => panic!("Expected PacketSent event for ACK, but received something else"),
+        }
+        
+        //3.fragment should be added to received_messages
+        assert!(client.received_messages.contains_key(&session_id));
+        let state = client.received_messages.get(&session_id).unwrap();
+        assert_eq!(state.received_indices.len(), 1);
+        assert!(state.received_indices.contains(&fragment_index));
+        assert_eq!(&state.data[0..fragment.length as usize], &fragment.data[0..fragment.length as usize]);
+    }
+    
+    //integration test: add sender command
+    #[test]
+    fn integration_handle_add_sender_command() {
+        let client_id = 1;
+        let new_neighbor_id = 30;
+        let (mut client, sim_contr_tx, sim_contr_rx, _packet_recv_tx, mut neighbor_receivers, _gui_input) = setup_client(client_id);
+
+        assert!(!client.packet_send.contains_key(&new_neighbor_id));
+        
+        //simulation AddSender command from SC
+        let (new_neighbor_recv_tx, new_neighbor_recv_rx) = unbounded::<Packet>();
+        let add_sender_command = DroneCommand::AddSender(new_neighbor_id, new_neighbor_recv_tx.clone());
+        sim_contr_tx.send(add_sender_command.clone()).expect("Failed to send AddSender command");
+        println!("Sent AddSender command for node {} to client {}", new_neighbor_id, client_id);
+
+        let command_result = sim_contr_rx.recv_timeout(Duration::from_secs(1));
+        assert!(command_result.is_ok(), "Client did not receive AddSender command");
+        let command = command_result.unwrap();
+        match add_sender_command {
+            DroneCommand::AddSender(node_id, sender) => {
+                println!("Client {} received AddSender command for node {}", client.id, node_id);
+                client.packet_send.insert(node_id, sender);
+                println!("Client {} starting flood discovery after AddSender", client.id);
+                client.start_flood_discovery();
+            },
+            _ => {
+                eprintln!("Test received unhandled command: {:?}", command);
+            }
+        }
+        
+        //verify output:
+        //1.new sender should be added to packet_send
+        assert!(client.packet_send.contains_key(&new_neighbor_id));
+        let test_packet = Packet {
+            pack_type : PacketType::FloodRequest(FloodRequest {
+                flood_id : 0,
+                initiator_id : client_id,
+                path_trace : vec![],
+            }),
+            routing_header : SourceRoutingHeader {
+                hop_index : 0,
+                hops : vec![],
+            },
+            session_id : 0,
+        };
+        client.packet_send.get(&new_neighbor_id).unwrap().send(test_packet).expect("Failed to send packet via new sender");
+        let received_packet = new_neighbor_recv_rx.recv_timeout(Duration::from_secs(1));
+        assert!(received_packet.is_ok(), "Packet not received via the new sender channel");
+        
+        //2.new flood discovery should be initialized
+        assert_eq!(client.active_flood_discoveries.len(), 1, "Client should have started a new flood discovery");
+        let (flood_id, _state) = client.active_flood_discoveries.iter().next().unwrap();
+        println!("Client {} started Flood Discovery with ID {}", client_id, flood_id);
+    }
+    
+    /*
+    //integration test: loop in run function
+    fn integration_client_run_loop() {
+        let client_id = 1;
+        let server_id = 100;
+        let neighbor_drone_id = 10;
+        let (mut client, sim_contr_tx, sim_contr_rx, packet_recv_tx, mut neighbor_receivers, gui_input) = setup_client(client_id);
+
+        //mock graph
+        client.network_graph = StableGraph::new();
+        client.node_id_to_index.clear();
+        let c_idx = client.network_graph.add_node(NodeInfo { id: client_id, node_type: PktNodeType::Client });
+        client.node_id_to_index.insert(client_id, c_idx);
+        let d1_idx = client.network_graph.add_node(NodeInfo { id: neighbor_drone_id, node_type: PktNodeType::Drone });
+        client.node_id_to_index.insert(neighbor_drone_id, d1_idx);
+        let s_idx = client.network_graph.add_node(NodeInfo { id: server_id, node_type: PktNodeType::Server });
+        client.node_id_to_index.insert(server_id, s_idx);
+        //C->D->S
+        client.network_graph.add_edge(c_idx, d1_idx, 1);
+        client.network_graph.add_edge(d1_idx, s_idx, 1);
+        
+        //mock best_path function
+        let original_best_path = client.best_path;
+        client.best_path = |src, dest| {
+            if src == client_id && dest == server_id {
+                Some(vec![client_id, neighbor_drone_id, server_id])
+            } else {
+                None
+            }
+        };
+
+        let client_thread = thread::spawn(move || {
+            client.run();
+        });
+        
+        //1.simulation of a GUI command to send a message
+        let gui_cmd = "[MessageTo]::target_client_id::Hello from GUI".to_string();
+        push_gui_message(&gui_input, client_id, server_id, gui_cmd.clone());
+        println!("Pushed GUI command '{}' for client {}", gui_cmd, client_id);
+        //verify output: packet sent to D and PacketSent event to SC
+        match sent_packet.pack_type {
+            PacketType::MsgFragment(_) => println!("✅ Client sent MsgFragment"),
+            _ => panic!("Expected MsgFragment"),
+        }
+        let packet_sent_event = sim_contr_rx.recv_timeout(Duration::from_secs(1)).expect("Client did not send PacketSent event");
+        match packet_sent_event {
+            DroneEvent::PacketSent(_) => println!("✅ Client sent PacketSent event"),
+            _ => panic!("Expected PacketSent event"),
+        }
+        
+        //2.simulation of receiving a fragment from D
+        let (client_packet_tx_from_drone, _client_packet_rx_for_drone) = unbounded::<Packet>();
+        let session_id = 789;
+        let fragment_index = 0;
+        let total_fragments = 1;
+        let fragment_data: [u8; 80] = [b'A', b'B', b'C', ..; 80];
+        let fragment = Fragment { fragment_index, total_n_fragments, length: 3, data: fragment_data };
+        let received_rh = SourceRoutingHeader { hops: vec![neighbor_drone_id, client_id], hop_index: 1 };
+        let incoming_packet = Packet { pack_type: PacketType::MsgFragment(fragment.clone()), routing_header: received_rh.clone(), session_id };
+
+        client_packet_tx_from_drone.send(incoming_packet.clone()).expect("Failed to send incoming packet to client");
+        println!("Sent incoming MsgFragment to client {}", client_id);
+
+        let ack_packet_result = neighbor_receivers.get_mut(&neighbor_drone_id).unwrap().recv_timeout(Duration::from_secs(1)).expect("Client did not send ACK packet back");
+        match ack_packet_result.pack_type {
+            PacketType::Ack(_) => println!("✅ Client sent ACK back"),
+            _ => panic!("Expected ACK packet"),
+        }
+
+        let packet_sent_event_ack = sim_contr_rx.recv_timeout(Duration::from_secs(1)).expect("Client did not send PacketSent event for ACK");
+        match packet_sent_event_ack {
+            DroneEvent::PacketSent(_) => println!("✅ Client sent PacketSent event for ACK"),
+            _ => panic!("Expected PacketSent event for ACK"),
+        }
+        
+        //cleanup
+    }
+    */
 }

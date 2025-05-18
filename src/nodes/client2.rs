@@ -3,7 +3,7 @@ use std::io;
 use std::io::Write;
 use wg_2024::controller::{DroneCommand, DroneEvent};
 use wg_2024::network::{NodeId, SourceRoutingHeader};
-use wg_2024::packet::{Ack, FloodRequest, FloodResponse, Fragment, Nack, NackType, NodeType, Packet, PacketType};
+use wg_2024::packet::{Ack, FloodRequest, FloodResponse, Fragment, Nack, NodeType, NackType,  Packet, PacketType};
 use wg_2024::packet::PacketType::MsgFragment;
 use wg_2024::drone::Drone;
 use crossbeam_channel::{select, Receiver, Sender};
@@ -14,24 +14,7 @@ use petgraph::algo::dijkstra;
 use petgraph::data::Build;
 use petgraph::prelude::EdgeRef;
 use petgraph::Undirected;
-use wg_2024::packet::NodeType::{Client, Server};
-
-
-
-/*
-rendere il codice più leggibile: aggiungere commenti e mettere in ordine
-mettere le funzioni già implementate nel wgl dove possibile
-*/
-
-
-
-
-
-
-
-
-
-
+use wg_2024::packet::NodeType::Client;
 
 #[derive(Debug,Clone)]
 pub struct MyClient{
@@ -41,14 +24,14 @@ pub struct MyClient{
     pub sim_contr_recv: Receiver<DroneCommand>,
     pub sent_messages: HashMap<u64, Vec<Fragment>>,
     pub net_graph: Graph<u8, u8, Undirected>,
-    pub node_map: HashMap<(NodeId , NodeType), NodeIndex>,
+    pub node_map: HashMap<NodeId , NodeIndex>,
     pub received_packets: HashMap<u64 , Vec<u8>>,
     pub seen_flood_ids : HashSet<u64>,
     pub received_messages : HashMap<u64 , Vec<u8>>,
 }
 
 impl MyClient{
-    fn new(id: NodeId, sim_contr_recv: Receiver<DroneCommand>, packet_recv: Receiver<Packet>, packet_send: HashMap<NodeId, Sender<Packet>>, sent_messages:HashMap<u64 , Vec<Fragment>>, net_graph: Graph<u8, u8, Undirected>, node_map: HashMap<(u8 , NodeType), NodeIndex>, received_packets: HashMap<u64 , Vec<u8>>, seen_flood_ids : HashSet<u64>, received_messages : HashMap<u64 , Vec<u8>>) -> Self {
+    fn new(id: NodeId, sim_contr_recv: Receiver<DroneCommand>, packet_recv: Receiver<Packet>, packet_send: HashMap<NodeId, Sender<Packet>>, sent_messages:HashMap<u64 , Vec<Fragment>>, net_graph: Graph<u8, u8, Undirected>, node_map: HashMap<u8 , NodeIndex>, received_packets: HashMap<u64 , Vec<u8>>, seen_flood_ids : HashSet<u64>, received_messages : HashMap<u64 , Vec<u8>>) -> Self {
         Self {
             id,
             sim_contr_recv,
@@ -82,22 +65,22 @@ impl MyClient{
 
     fn process_packet (&mut self, mut packet: Packet) {
 
-        match &packet.pack_type {
+        match &mut (packet.clone()).pack_type {
             PacketType::FloodRequest(request) => {
                 self.process_flood_request(request, packet.routing_header.clone());
             },
             PacketType::FloodResponse(response) => {
-                self.create_topology(response);
+                self.process_flood_response(response);
             },
             PacketType::MsgFragment(fragment) => {
-                self.send_ack(&mut packet , fragment);
-                self.reassemble_packet(fragment , &mut packet);
+                self.send_ack(&mut (packet.clone()) , fragment);
+                self.reassemble_packet(fragment , &mut (packet.clone()));
             },
             PacketType::Ack(_ack) => {
                 //ok.
             },
             PacketType::Nack(nack ) => {
-                self.process_nack(nack , &mut packet);
+                self.process_nack(nack , &mut (packet.clone()));
             }
         }
     }
@@ -105,18 +88,20 @@ impl MyClient{
     fn process_nack(&mut self, nack: &Nack, packet: &mut Packet) {
         match nack.nack_type {
             NackType::Dropped=>{
-                Self::increase_cost(self ,packet.routing_header.hops[0]);
+                self.increase_cost(packet.routing_header.hops[0]);
                 if let Some(fragments) = self.sent_messages.get(&packet.session_id){
                     for  fragment in fragments{
                         if fragment.fragment_index == nack.fragment_index{
-                            self.send(fragment);
+                            let sender_id = &packet.routing_header.hops[packet.routing_header.hops.len()-2];
+                            let sender = self.packet_send.get(sender_id).unwrap();
+                            (*sender).send(packet.clone()).unwrap();
                         }
                     }
                 }
             },
             NackType::ErrorInRouting(NodeId)=>{
-                self.node_map.remove(NodeId);
-                Self::remove_all_edges_with_node(self , NodeId);
+                self.node_map.remove(&NodeId);
+                self.remove_all_edges_with_node(NodeId);
                 self.send_flood_request();
             }
             _ => {
@@ -126,23 +111,21 @@ impl MyClient{
     }
 
     fn send_packet(&self){
-        print!("Enter message type: ");
-        io::stdout().flush().unwrap();
-        let mut message_type = String::new();
-        io::stdin().read_line(&mut message_type).expect("Failed to read line");
         let mut input = String::new();
-        io::stdin().read_line(&mut input).expect("Failed to read line");
         let bytes = input.trim_end();
-        let chunks: Vec<Vec<u8>> = bytes.chunks(127).map(|chunk| chunk.to_vec()).collect();
-        for i in 0..chunks.len()-1 {
-            let mut fragment:Fragment = Fragment {
+        let chunks: Vec<Vec<u8>> = bytes.as_bytes().chunks(128).map(|chunk| chunk.to_vec()).collect();
+        for i in 0..chunks.len() {
+            let mut data:[u8;128] = [0;128];
+            for j in 0..chunks[i].len(){
+                data[i] = chunks[i][j];
+            };
+            let fragment:Fragment = Fragment {
                 fragment_index: i as u64,
                 total_n_fragments: chunks.len() as u64,
                 length: chunks[i].len() as u8,
                 data,
             };
-            fragment.data[1 .. 127] = *chunks[i];
-            fragment.data[0] = message_type.as_bytes()[0];
+
             let  packet = Packet{
                 routing_header: SourceRoutingHeader{
                     hop_index : 0,
@@ -168,7 +151,7 @@ impl MyClient{
     }
 
     fn send_flood_request(&mut self){
-        let flood_request  = FloodRequest :: initialize(100 , self.id , Client);
+        let flood_request  = FloodRequest :: initialize(100 , self.id , NodeType::Client);
         let packet = Packet {
             pack_type: PacketType::FloodRequest(flood_request),
             session_id: 0,
@@ -177,8 +160,9 @@ impl MyClient{
                 hops: [self.id].to_vec(),
             }
         };
-        for  sender in self.packet_send.iter() {
-            sender.send(packet.clone()).unwrap()
+        for  sender_tuple in self.packet_send.iter() {
+            let sender = sender_tuple.1.clone();
+            sender.send(packet.clone()).unwrap();
         }
 
     }
@@ -186,9 +170,8 @@ impl MyClient{
     fn reassemble_packet (&mut self, fragment: &Fragment, packet : &mut Packet){
         let session_id = packet.session_id;
         if let Some(mut content)= self.received_packets.get(&session_id){
-            content.len()+= fragment.data.len();
             for i in 0..fragment.data.len() {
-                content.insert( (fragment.fragment_index*128+(i as u64) ) as usize , fragment.data[i]);
+                content.clone().insert( (fragment.fragment_index*128+(i as u64) ) as usize , fragment.data[i]);
             }
             if content.len() > ((fragment.total_n_fragments - 1) as usize)*128{
                 self.send_ack(packet, fragment);
@@ -196,13 +179,12 @@ impl MyClient{
         }
         else {
             let mut content = vec![];
-            content.len()+= fragment.data.len();
             for i in 1..fragment.data.len() {
                 content.insert( (fragment.fragment_index*127+(i as u64) ) as usize , fragment.data[i]);
             }
             if content.len() > ((fragment.total_n_fragments - 1) as usize)*127{
                 self.send_ack(packet, fragment);
-                self.packet_command_handling(content);
+                self.packet_command_handling(content.clone());
             }
             self.received_packets.insert(session_id ,content.clone());
         }
@@ -227,12 +209,12 @@ impl MyClient{
     fn process_flood_request(&mut self, request: &FloodRequest, header: SourceRoutingHeader){
         let mut updated_request = request.clone();
         if self.seen_flood_ids.contains(&request.flood_id) || self.packet_send.len() == 1{
-            updated_request.path_trace.push((self.id ,Client));
+            updated_request.path_trace.push((self.id , Client) );
             //send flood response
         }
         else {
             self.seen_flood_ids.insert(request.flood_id);
-            updated_request.path_trace.push((self.id, Client));
+            updated_request.path_trace.push((self.id , Client));
             let sender_id = if updated_request.path_trace.len() > 1 {
                 Some(updated_request.path_trace[updated_request.path_trace.len() - 2].0)
             } else {
@@ -247,8 +229,8 @@ impl MyClient{
                 routing_header: header.clone(),
                 session_id: 0,
             };
-            let response_sender = self.packet_send.get(&updated_request.initiator_id);
-            response_sender.send(response_packet).unwrap();
+            let response_sender = self.packet_send.get(&updated_request.initiator_id).unwrap();
+            (*response_sender).send(response_packet).unwrap();
             //keeping the flood going
             for (neighbor_id, sender) in self.packet_send.iter() {
                 let packet = Packet{
@@ -295,18 +277,15 @@ impl MyClient{
     }
 
     fn process_flood_response (&mut self, response: &FloodResponse) {
+        let mut graph_copy = self.net_graph.clone();
+        let mut map_copy = self.node_map.clone();
         for i in 0 .. response.path_trace.len()-1{
-            let node1 = Self::add_node_no_duplicate(&mut self.net_graph, &mut self.node_map, response.path_trace[i].clone());
-            let node2 = Self::add_node_no_duplicate(&mut self.net_graph, &mut self.node_map, response.path_trace[i+1].clone());
-            Self::add_edge_no_duplicate(&mut self.net_graph , node1 , node2 , 1.0);
+            let node1 = self.add_node_no_duplicate(&mut graph_copy, &mut map_copy, response.path_trace[i].clone().0);
+            let node2 = self.add_node_no_duplicate(&mut graph_copy, &mut map_copy, response.path_trace[i+1].clone().0);
+            self.add_edge_no_duplicate(&mut self.net_graph.clone(), node1, node2, 1);
         }
     }
-    fn add_edge_no_duplicate<N, E>(
-        graph: &mut UnGraph<N, E>,
-        a: NodeIndex,
-        b: NodeIndex,
-        weight: f64
-    ) -> bool {
+    fn add_edge_no_duplicate(&mut self, graph: &mut Graph<u8, u8, Undirected>, a: NodeIndex, b: NodeIndex, weight: u8) -> bool {
         if !graph.contains_edge(a, b) {
             graph.add_edge(a, b, weight);
             true
@@ -314,11 +293,7 @@ impl MyClient{
             false
         }
     }
-    fn add_node_no_duplicate<N: Eq + std::hash::Hash + Copy, E>(
-        graph: &mut UnGraph<N, E>,
-        node_map: &mut HashMap<(u8 , NodeType), NodeIndex>,
-        value: (u8 , NodeType)
-    ) -> NodeIndex {
+    fn add_node_no_duplicate(&mut self, graph: &mut Graph<u8, u8, Undirected>, node_map: &mut HashMap<u8 , NodeIndex>, value: u8) -> NodeIndex {
         if let Some(&idx) = node_map.get(&value) {
             // Node with this value already exists
             idx
@@ -329,8 +304,9 @@ impl MyClient{
             idx
         }
     }
+
     fn remove_all_edges_with_node(&mut self, crash_id: NodeId) {
-        let index = self.node_map.get(&(crash_id, NodeType::Drone)).unwrap();
+        let index = self.node_map.get(&crash_id).unwrap();
         let mut edges_to_remove =  Vec::new();
         edges_to_remove = self.net_graph.edges(*index).filter_map(|edge_ref| {
             // Get the source and target of the edge
@@ -351,9 +327,10 @@ impl MyClient{
     }
 
     fn increase_cost(&mut self , dropper_id: NodeId) {
-        let index = self.node_map.get(&(dropper_id, NodeType::Drone)).unwrap();
+        let index = self.node_map.get(&dropper_id).unwrap();
         let mut edges_to_increase =  Vec::new();
-        edges_to_increase = self.net_graph.edges(*index).filter_map(|edge_ref| {
+        let mut graph_copy = self.net_graph.clone();
+        edges_to_increase = graph_copy.edges(*index).filter_map(|edge_ref| {
             // Get the source and target of the edge
             let source = edge_ref.source();
             let target = edge_ref.target();
@@ -372,8 +349,8 @@ impl MyClient{
     }
 
     fn best_path(&self, source: NodeId, target: NodeId) -> Option<Vec<NodeId>> {
-        let source_idx = *self.node_map.get(&(source,Client))?;
-        let target_idx = *self.node_map.get(&(target,Server))?;
+        let source_idx = *self.node_map.get(&source)?;
+        let target_idx = *self.node_map.get(&target)?;
 
         // Dijkstra: restituisco anche da dove vengo (predecessore)
         let mut predecessors: HashMap<NodeIndex, NodeIndex> = HashMap::new();
@@ -406,10 +383,11 @@ impl MyClient{
         Some(path)
     }
     fn get_server_id(&self) -> NodeId {
-        while let Some (ids) = self.node_map.keys().next(){
-            if *ids.1 == Server {
-                return ids.0;
-            }
+        while let Some(_ids) = self.node_map.keys().next(){
+            //if ids.1 == Server {
+            //  return ids.0;
+            //}
         }
+        0
     }
 }
