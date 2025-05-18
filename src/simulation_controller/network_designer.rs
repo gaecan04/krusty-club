@@ -1707,7 +1707,73 @@ impl NetworkRenderer {
             self.next_position_x = 50.0;
             self.next_position_y += 50.0;
         }
+        self.reposition_hosts();
     }
+    fn reposition_hosts(&mut self) {
+        // 1) Collect all drone positions
+        let drones: Vec<&Node> = self
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.node_type, NodeType::Drone))
+            .collect();
+        if drones.is_empty() {
+            return;
+        }
+
+        // 2) Compute drone bounding‐box
+        let min_x = drones.iter().map(|n| n.position.0).fold(f32::INFINITY, f32::min);
+        let max_x = drones.iter().map(|n| n.position.0).fold(f32::NEG_INFINITY, f32::max);
+        let min_y = drones.iter().map(|n| n.position.1).fold(f32::INFINITY, f32::min);
+        let max_y = drones.iter().map(|n| n.position.1).fold(f32::NEG_INFINITY, f32::max);
+
+        // 3) Margin between drones and hosts
+        let margin = 40.0;
+
+        // 4) Reposition servers (above = min_y - margin)
+        let servers: Vec<usize> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, n)| if matches!(n.node_type, NodeType::Server) { Some(i) } else { None })
+            .collect();
+        let s_count = servers.len() as f32;
+        if s_count > 0.0 {
+            let h_step = (max_x - min_x) / (s_count + 1.0);
+            let y_ser = min_y - margin;
+            for (i, &idx) in servers.iter().enumerate() {
+                let x = min_x + h_step * ((i + 1) as f32);
+                self.nodes[idx].position.0 = x;
+                self.nodes[idx].position.1 = y_ser;
+                self.manual_positions.insert(
+                    self.nodes[idx].id as NodeId,
+                    (x, y_ser),
+                );
+            }
+        }
+
+        // 5) Reposition clients (below = max_y + margin)
+        let clients: Vec<usize> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, n)| if matches!(n.node_type, NodeType::Client) { Some(i) } else { None })
+            .collect();
+        let c_count = clients.len() as f32;
+        if c_count > 0.0 {
+            let h_step = (max_x - min_x) / (c_count + 1.0);
+            let y_cli = max_y + margin;
+            for (i, &idx) in clients.iter().enumerate() {
+                let x = min_x + h_step * ((i + 1) as f32);
+                self.nodes[idx].position.0 = x;
+                self.nodes[idx].position.1 = y_cli;
+                self.manual_positions.insert(
+                    self.nodes[idx].id as NodeId,
+                    (x, y_cli),
+                );
+            }
+        }
+    }
+
 
 
 }
