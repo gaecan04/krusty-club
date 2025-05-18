@@ -1569,18 +1569,21 @@ impl NetworkRenderer {
                 };
 
                 if crash_allowed {
-                    // ✅ Now it's safe to mutably borrow self
+                    // 1) mark the node inactive (so it won’t show controls or draw edges)
                     self.nodes[idx].active = false;
 
+                    // 2) remove all UI‐edges to/from that node index
+                    self.edges.retain(|&(u, v)| u != idx && v != idx);
+
+                    // 3) update the config so no new edges reference it
                     if let Some(cfg_arc) = &self.config {
-                        let mut cfg = cfg_arc.lock().unwrap();
-                        cfg.remove_drone_connections(node_id as NodeId);
+                        cfg_arc.lock().unwrap().remove_drone_connections(node_id);
                     }
 
-                    if let Some(cfg_arc) = &self.config {
-                        self.build_from_config(cfg_arc.clone());
-                    }
+                    // 4) (optional) reflow your servers/clients if you need to
+                    self.reposition_hosts();
                 }
+
             }
 
 
