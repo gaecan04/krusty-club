@@ -2,6 +2,8 @@ use egui::{Color32, RichText, ScrollArea, TextEdit};
 use wg_2024::network::NodeId;
 use std::collections::HashMap;
 use crate::simulation_controller::gui_input_queue::{push_gui_message, new_gui_input_queue, SharedGuiInput};
+use std::fs;
+use std::path::PathBuf;
 
 #[derive(Clone)]
 pub struct ChatMessage {
@@ -45,6 +47,13 @@ pub struct ChatUIState {
     pub history_target_id_input: String,
     pub history_code_failed: bool,
     pub history_code_success: bool,
+
+    pub media_files: Vec<(String, String)>, // (media_name, full_path)
+    pub show_server_popup: Option<NodeId>,
+    pub show_upload_media_list: bool,
+    pub download_media_name_input: String,
+    pub download_result_message: Option<String>,
+
 }
 
 impl ChatUIState {
@@ -72,15 +81,41 @@ impl ChatUIState {
             history_target_id_input: String::new(),
             history_code_failed: false,
             history_code_success: false,
+            media_files: load_media_files(),
+            show_server_popup: None,
+            show_upload_media_list: false,
+            download_media_name_input: String::new(),
+            download_result_message: None,
+
         }
     }
 
-    fn render_server_info(&self, ui: &mut egui::Ui) {
+    fn render_server_info(&mut self, ui: &mut egui::Ui) {
         ui.group(|ui| {
             ui.label(RichText::new("Server Overview").strong());
+
             for &server_id in &self.servers {
                 ui.separator();
-                ui.label(format!("Server #{server_id}"));
+
+                let is_logged_in = if let Some(cid) = self.selected_client {
+                    self.server_client_map
+                        .get(&server_id)
+                        .map_or(false, |clients| clients.contains(&cid))
+                } else {
+                    false
+                };
+
+                let mut button = egui::Button::new(format!("Server #{}", server_id));
+                if !is_logged_in {
+                    button = button.sense(egui::Sense::hover());
+                }
+
+                let response = ui.add(button);
+                if is_logged_in && response.clicked() {
+                    self.show_server_popup = Some(server_id);
+                    self.show_upload_media_list = false;
+                }
+
                 let clients = self.server_client_map.get(&server_id).cloned().unwrap_or_default();
                 if clients.is_empty() {
                     ui.label("  No clients logged in");
@@ -117,7 +152,19 @@ impl ChatUIState {
                     for (client_id, messages) in map.iter() {
                         ui.label(format!("Client #{} →", client_id));
                         for msg in messages {
-                            ui.label(format!("    {:?}", msg.1.clone()));
+                            let short_msg = if msg.1.starts_with("[MediaUpload]:") {
+                                let parts: Vec<&str> = msg.1.splitn(3, ':').collect();
+                                if parts.len() == 3 {
+                                    format!("[MediaUpload]:{}:{}...", parts[1], &parts[2][..5.min(parts[2].len())])
+                                } else {
+                                    msg.1.clone()
+                                }
+                            } else {
+                                msg.1.clone()
+                            };
+
+                            ui.label(format!("    {}", short_msg));
+
                         }
                     }
                 }
@@ -184,24 +231,6 @@ impl ChatUIState {
                     });
                 }
                 ClientStatus::Connected => {
-                    ui.horizontal(|ui| {
-                        if ui.button("Logout").clicked() {
-                            if let Some(server_id) = self.selected_server {
-                                self.client_status.insert(client_id, ClientStatus::Offline);
-                                if let Some(clients) = self.server_client_map.get_mut(&server_id) {
-                                    clients.retain(|&c| c != client_id);
-                                }
-                                push_gui_message(&self.gui_input, client_id, server_id, "[Logout]".to_string());
-                            }
-                        }
-
-                        if ui.button("Request Client List").clicked() {
-                            if let Some(server_id) = self.selected_server {
-                                push_gui_message(&self.gui_input, client_id, server_id, "[ClientListRequest]".to_string());
-                            }
-                        }
-                    });
-
                     let mut requested_chat_with: Option<NodeId> = None;
 
                     ui.horizontal(|ui| {
@@ -224,7 +253,122 @@ impl ChatUIState {
                             push_gui_message(&self.gui_input, client_id, server_id, format!("[ChatRequest]::{peer_id}"));
                         }
                     }
+
+                    ui.horizontal(|ui| {
+
+                        ui.label("Interact with server:");
+                        for &server_id in &self.servers {
+                            // Only display the server the selected client is logged into
+                            let is_logged_in = if let Some(cid) = self.selected_client {
+                                self.server_client_map
+                                    .get(&server_id)
+                                    .map_or(false, |clients| clients.contains(&cid))
+                            } else {
+                                false
+                            };
+
+                            if !is_logged_in {
+                                continue; // Skip servers the selected client is not connected to
+                            }
+
+                            let button = egui::Button::new(format!("Server #{}", server_id));
+                            let response = ui.add(button);
+
+                            if response.clicked() {
+                                self.show_server_popup = Some(server_id);
+                                self.show_upload_media_list = false;
+                            }
+                        }
+
+                        if let Some(server_id) = self.show_server_popup {
+                            egui::Window::new(format!("Server #{} Options", server_id))
+                                .collapsible(false)
+                                .resizable(false)
+                                .show(ui.ctx(), |ui| {
+                                    if ui.button("Request Client List").clicked() {
+                                        if let Some(client_id) = self.selected_client {
+                                            push_gui_message(&self.gui_input, client_id, server_id, "[ClientListRequest]".to_string());
+                                        }
+                                    }
+
+                                    ui.separator();
+                                    if ui.button("Upload Media").clicked() {
+                                        self.show_upload_media_list = !self.show_upload_media_list;
+                                    }
+
+                                    if self.show_upload_media_list {
+                                        ui.label("Available Media Files:");
+                                        for (media_name, path) in &self.media_files {
+                                            if ui.button(media_name).clicked() {
+                                                if let Some(client_id) = self.selected_client {
+                                                    match std::fs::read(path) {
+                                                        Ok(bytes) => {
+                                                            let base64_data = base64::encode(bytes);
+                                                            let msg = format!("[MediaUpload]:{}:{}", media_name, base64_data);
+                                                            push_gui_message(&self.gui_input, client_id, server_id, msg);
+                                                        }
+                                                        Err(e) => {
+                                                            eprintln!("Error reading image file '{}': {}", path, e);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    ui.separator();
+                                    ui.label("Download Media:");
+                                    ui.horizontal(|ui| {
+                                        ui.label("File name:");
+                                        ui.text_edit_singleline(&mut self.download_media_name_input);
+
+                                        if ui.button("Download").clicked() {
+                                            if let Some(client_id) = self.selected_client {
+                                                let trimmed = self.download_media_name_input.trim();
+                                                if !trimmed.is_empty() {
+                                                    let msg = format!("[MediaDownloadRequest]:{}", trimmed);
+                                                    push_gui_message(&self.gui_input, client_id, server_id, msg);
+                                                    self.download_result_message = Some(format!("Requested \"{}\"", trimmed));
+                                                    self.download_media_name_input.clear();
+                                                }
+                                            }
+                                        }
+                                    });
+
+                                    if let Some(msg) = &self.download_result_message {
+                                        ui.label(egui::RichText::new(msg).color(egui::Color32::LIGHT_GREEN));
+                                    }
+                                    ui.separator();
+
+                                    if ui.button("Logout").clicked() {
+                                        if let Some(server_id) = self.selected_server {
+                                            self.client_status.insert(client_id, ClientStatus::Offline);
+                                            if let Some(clients) = self.server_client_map.get_mut(&server_id) {
+                                                clients.retain(|&c| c != client_id);
+                                            }
+                                            push_gui_message(&self.gui_input, client_id, server_id, "[Logout]".to_string());
+                                        }
+                                    }
+                                    ui.separator();
+
+                                    if ui.button("Close").clicked() {
+                                        self.show_server_popup = None;
+                                        self.show_upload_media_list = false;
+                                        self.download_result_message = None;
+                                    }
+
+
+
+
+                                    ui.separator();
+                                });
+                        }
+                    });
+
                 }
+
+
+
                 ClientStatus::Chatting(peer_id) => {
                     ui.horizontal(|ui| {
                         if let Some((a, b)) = self.active_chat_pair {
@@ -451,6 +595,25 @@ impl ChatUIState {
             });
         }
     }
+}
+
+
+fn load_media_files() -> Vec<(String, String)> {
+    let media_dir = "assets"; // relative path
+    let mut files = Vec::new();
+    if let Ok(entries) = fs::read_dir(media_dir) {
+        for entry in entries.flatten() {
+            let path: PathBuf = entry.path();
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                if ["jpg", "jpeg", "png"].contains(&ext.to_lowercase().as_str()) {
+                    if let Some(fname) = path.file_name().and_then(|f| f.to_str()) {
+                        files.push((fname.to_string(), path.to_string_lossy().to_string()));
+                    }
+                }
+            }
+        }
+    }
+    files
 }
 
 
