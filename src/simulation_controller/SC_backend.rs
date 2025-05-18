@@ -436,55 +436,74 @@ impl SimulationController {
     }
 
     // Spawn a new drone in the network
-    pub fn spawn_drone(&mut self, id: NodeId, pdr: f32, connections: Vec<NodeId>) -> Result<(), Box<dyn Error>> {
-        // Validate the new drone's connections
+    pub fn spawn_drone(
+        &mut self,
+        id: NodeId,
+        pdr: f32,
+        connections: Vec<NodeId>,
+    ) -> Result<(), Box<dyn Error>> {
+        // 1) Validate
         if !self.validate_new_drone(id, &connections)? {
             return Err("New drone configuration violates network constraints".into());
         }
 
-        // Update internal config
+        // 2) Update the shared ParsedConfig (TOML model)
         {
-            let mut config = self.network_config.lock().unwrap();
-            config.add_drone(id);
-            config.set_drone_connections(id, connections.clone());
-        }
+            let mut cfg = self.network_config.lock().unwrap();
 
-        // Update network graph
-        let mut neighbors = HashSet::new();
-        for &conn_id in &connections {
-            neighbors.insert(conn_id);
-            self.network_graph.entry(conn_id).or_default().insert(id);
-        }
-        self.network_graph.insert(id, neighbors);
+            // Only add if it's not already there
+            if !cfg.drone.iter().any(|d| d.id == id) {
+                cfg.add_drone(id);
+            }
 
-        // Create command channel (controller → drone)
-        let (command_tx, command_rx) = crossbeam_channel::unbounded();
-        self.command_senders.insert(id, command_tx.clone());
+            // Record its PDR
+            cfg.set_drone_pdr(id, pdr);
 
-        // Create packet channel (to drone)
-        let (packet_tx, packet_rx) = crossbeam_channel::unbounded();
-        self.packet_senders.insert(id, packet_tx.clone());
+            // Record its outgoing links
+            cfg.set_drone_connections(id, connections.clone());
 
-        // Create packet senders map for this drone (to neighbors)
-        let mut packet_send_map = HashMap::new();
-        for &conn_id in &connections {
-            if let Some(sender) = self.packet_senders.get(&conn_id) {
-                packet_send_map.insert(conn_id, sender.clone());
+            // And append the reverse on each peer
+            for &peer in &connections {
+                cfg.append_drone_connection(peer, id);
             }
         }
 
-        // Clone for drone thread
-        let controller_send = self.event_sender.clone();
-        let factory = Arc::clone(&self.drone_factory);
+        // 3) Update the in-memory graph
+        let mut neigh = HashSet::new();
+        for &peer in &connections {
+            neigh.insert(peer);
+            self.network_graph.entry(peer).or_default().insert(id);
+        }
+        self.network_graph.insert(id, neigh);
 
-        // Spawn drone in its own thread
+        // 4) Create & register the controller-to-drone channel
+        let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
+        self.command_senders.insert(id, cmd_tx);
+
+        // 5) Create & register the packet channel
+        let (pkt_tx, pkt_rx) = crossbeam_channel::unbounded();
+        self.packet_senders.insert(id, pkt_tx.clone());
+
+        // 6) Build this drone’s packet-send map
+        let mut packet_send_map = HashMap::new();
+        for &peer in &connections {
+            if let Some(tx) = self.packet_senders.get(&peer) {
+                packet_send_map.insert(peer, tx.clone());
+            }
+        }
+
+        // 7) Spawn the drone thread
+        let factory = Arc::clone(&self.drone_factory);
+        let controller_send = self.event_sender.clone();
         std::thread::spawn(move || {
-            let mut drone = factory(id, controller_send, command_rx, packet_rx, packet_send_map, pdr);
+            let mut drone =
+                factory(id, controller_send, cmd_rx, pkt_rx, packet_send_map, pdr);
             drone.run();
         });
 
         Ok(())
     }
+
 
 
     // Validate that adding a new drone won't violate network constraints

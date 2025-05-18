@@ -480,8 +480,23 @@ impl NetworkApp {
                                     .push("Cannot spawn: invalid connection IDs".into());
                             } else {
                                 // 3) spawn + rebuild
-                                self.spawn_drone(self.new_drone_id, self.new_drone_pdr, connections.clone());
+                                //self.spawn_drone(self.new_drone_id, self.new_drone_pdr, connections.clone());
                                 self.show_spawn_drone_popup = false;
+
+                                // 3a) spawn in the simulation controller
+                                        if let Some(ctrl) = &self.simulation_controller {
+                                            let mut lock = ctrl.lock().unwrap();
+                                        if let Err(e) = lock.spawn_drone(self.new_drone_id, self.new_drone_pdr, connections.clone()) {
+                                            self.simulation_log.push(format!("Failed to spawn drone: {}", e));
+                                return;
+                            }
+                        }
+
+                        // 3b) immediately update the UI renderer
+                        if let Some(renderer) = self.network_renderer.as_mut() {
+                            renderer.add_drone(self.new_drone_id, self.new_drone_pdr, connections.clone());
+                        }
+
                                 self.new_drone_connections_str.clear();
                                 ctx.request_repaint();
                             }
