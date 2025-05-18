@@ -112,7 +112,7 @@ fn run_gui_application(
     gui_input_queue: SharedGuiInput,
 ) -> Result<(), Box<dyn Error>> {
     let options = eframe::NativeOptions::default();
-
+    
 
     eframe::run_native(
         "Drone Simulation",

@@ -48,8 +48,8 @@ pub fn start_client(
         println!("Client {} finished flood test", client_id);
     });
 }
-
 /*
+
 let messages = pop_all_gui_messages(&self.gui_input, self.id);
 for msg in messages {
     let fragment = make_fragment(&msg); // crea i fragment
@@ -65,7 +65,7 @@ for msg in messages {
         let _ = sender.send(packet);
     }
 }
- */
+*/
 
 /*
 use std::collections::{HashMap, HashSet};

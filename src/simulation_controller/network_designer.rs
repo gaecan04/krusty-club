@@ -17,7 +17,7 @@ pub enum NodeType {
     Drone,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Node {
     pub id: usize,
     pub node_type: NodeType,
@@ -165,6 +165,7 @@ impl NetworkRenderer {
         // Initialize the node_id_to_index map
         for (index, node) in network.nodes.iter().enumerate() {
             network.node_id_to_index.insert(node.id as NodeId, index);
+
         }
 
         network
@@ -393,6 +394,8 @@ impl NetworkRenderer {
         // Now process the rest of the nodes with normal layout
         if let Some(ref topo) = self.current_topology.clone() {
             println!("🔄 Rebuilding using saved topology: {}", topo);
+
+
             self.build_topology_layout(&topo, &config, &previous_states, &previous_nodes);
         } else {
             println!("⚠️ No saved topology, falling back to grid layout");
@@ -678,7 +681,7 @@ impl NetworkRenderer {
             }
         }
 
-        // 👇 Add clients after drones are placed
+        // Add clients after drones are placed
         for client in &config.client {
             if let Some(drone_id) = client.connected_drone_ids.first() {
                 if let Some(&drone_index) = self.node_id_to_index.get(drone_id) {
@@ -688,120 +691,82 @@ impl NetworkRenderer {
                     let cy = dy + 60.0 * angle.sin();
                     self.nodes.push(Node::client(client.id as usize, cx, cy));
                     self.node_id_to_index.insert(client.id, self.nodes.len() - 1);
-
-
-                }
-
-                // 👇 Add smarter server placement
-                for server in &config.server {
-                    let mut sum_x = 0.0;
-                    let mut min_y = f32::INFINITY;
-                    let mut count = 0.0;
-
-                    for drone_id in &server.connected_drone_ids {
-                        if let Some(&drone_index) = self.node_id_to_index.get(drone_id) {
-                            let (dx, dy) = self.nodes[drone_index].position;
-                            sum_x += dx;
-                            min_y = min_y.min(dy);
-                            count += 1.0;
-                        }
-                    }
-
-                    if count > 0.0 {
-                        let sx = sum_x / count;
-                        let sy = min_y - 80.0;
-                        self.nodes.push(Node::server(server.id as usize, sx, sy));
-                        self.node_id_to_index.insert(server.id, self.nodes.len() - 1);
-                    }
                 }
             }
-
-            if self.nodes.is_empty() {
-                let total_nodes = config.drone.len() + config.client.len() + config.server.len();
-                let grid_size = (total_nodes as f32).sqrt().ceil() as usize;
-                let cell_width = WINDOW_WIDTH / (grid_size as f32 + 1.0);
-                let cell_height = WINDOW_HEIGHT / (grid_size as f32 + 1.0);
-
-                let mut node_index = 0;
-                for drone in &config.drone {
-                    let x = (node_index % grid_size) as f32 * cell_width + cell_width;
-                    let y = (node_index / grid_size) as f32 * cell_height + cell_height;
-
-                    let active = previous_states.get(&(drone.id as usize)).copied().unwrap_or(true);
-
-                    self.nodes.push(Node {
-                        id: drone.id as usize,
-                        node_type: NodeType::Drone,
-                        pdr: drone.pdr,
-                        active,
-                        position: (x, y),
-                        manual_position:false,
-                    });
-                    self.node_id_to_index.insert(drone.id, self.nodes.len() - 1);
-                    node_index += 1;
-                }
-
-                for client in &config.client {
-                    let x = (node_index % grid_size) as f32 * cell_width + cell_width;
-                    let y = (node_index / grid_size) as f32 * cell_height + cell_height;
-
-                    self.nodes.push(Node::client(client.id as usize, x, y));
-                    self.node_id_to_index.insert(client.id, self.nodes.len() - 1);
-                    node_index += 1;
-                }
-
-                for server in &config.server {
-                    let x = (node_index % grid_size) as f32 * cell_width + cell_width;
-                    let y = (node_index / grid_size) as f32 * cell_height + cell_height;
-
-                    self.nodes.push(Node::server(server.id as usize, x, y));
-                    self.node_id_to_index.insert(server.id, self.nodes.len() - 1);
-                    node_index += 1;
-                }
-            }
-
-            for drone in &config.drone {
-                if let Some(&source_index) = self.node_id_to_index.get(&drone.id) {
-                    for &target_id in &drone.connected_node_ids {
-                        if let Some(&target_index) = self.node_id_to_index.get(&target_id) {
-                            self.edges.push((source_index, target_index));
-                        }
-                    }
-                }
-            }
-
-            for client in &config.client {
-                if let Some(&source_index) = self.node_id_to_index.get(&client.id) {
-                    for &target_id in &client.connected_drone_ids {
-                        if let Some(&target_index) = self.node_id_to_index.get(&target_id) {
-                            self.edges.push((source_index, target_index));
-                        }
-                    }
-                }
-            }
-
-            for server in &config.server {
-                if let Some(&source_index) = self.node_id_to_index.get(&server.id) {
-                    for &target_id in &server.connected_drone_ids {
-                        if let Some(&target_index) = self.node_id_to_index.get(&target_id) {
-                            self.edges.push((source_index, target_index));
-                        }
-                    }
-                }
-            }
-
-            self.next_position_x = 50.0;
-            self.next_position_y = WINDOW_HEIGHT - 50.0;
-
-
-
         }
+
+        // ✅ Server placement moved outside client loop
+        for server in &config.server {
+            if self.node_id_to_index.contains_key(&server.id) {
+                continue; // Skip if already added
+            }
+
+            let mut sum_x = 0.0;
+            let mut min_y = f32::INFINITY;
+            let mut count = 0.0;
+
+            for drone_id in &server.connected_drone_ids {
+                if let Some(&drone_index) = self.node_id_to_index.get(drone_id) {
+                    let (dx, dy) = self.nodes[drone_index].position;
+                    sum_x += dx;
+                    min_y = min_y.min(dy);
+                    count += 1.0;
+                }
+            }
+
+            if count > 0.0 {
+                let sx = sum_x / count;
+                let sy = min_y - 80.0;
+                self.nodes.push(Node::server(server.id as usize, sx, sy));
+                self.node_id_to_index.insert(server.id, self.nodes.len() - 1);
+            }
+        }
+
+        // Fallback to grid if nothing placed
+        if self.nodes.is_empty() {
+            self.build_grid(config, previous_states);
+        }
+
+        // Add edges
+        for drone in &config.drone {
+            if let Some(&source_index) = self.node_id_to_index.get(&drone.id) {
+                for &target_id in &drone.connected_node_ids {
+                    if let Some(&target_index) = self.node_id_to_index.get(&target_id) {
+                        self.edges.push((source_index, target_index));
+                    }
+                }
+            }
+        }
+
+        for client in &config.client {
+            if let Some(&source_index) = self.node_id_to_index.get(&client.id) {
+                for &target_id in &client.connected_drone_ids {
+                    if let Some(&target_index) = self.node_id_to_index.get(&target_id) {
+                        self.edges.push((source_index, target_index));
+                    }
+                }
+            }
+        }
+
+        for server in &config.server {
+            if let Some(&source_index) = self.node_id_to_index.get(&server.id) {
+                for &target_id in &server.connected_drone_ids {
+                    if let Some(&target_index) = self.node_id_to_index.get(&target_id) {
+                        self.edges.push((source_index, target_index));
+                    }
+                }
+            }
+        }
+
+        self.next_position_x = 50.0;
+        self.next_position_y = WINDOW_HEIGHT - 50.0;
     }
 
 
     // Add a new node to the network
     // "I don't know neighbors, just drop node somewhere."
     fn add_new_node(&mut self, node_type: NodeType) -> usize {
+
         // Find the next available ID
         let max_id = self.nodes.iter().map(|n| n.id).max().unwrap_or(0);
         let new_id = max_id + 1;

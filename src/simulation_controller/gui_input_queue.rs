@@ -14,7 +14,9 @@ pub fn new_gui_input_queue() -> SharedGuiInput {
 /// Push a message from the GUI into the buffer for a given client
 pub fn push_gui_message(queue: &SharedGuiInput, from: NodeId, to: NodeId, msg: String) {
     if let Ok(mut map) = queue.lock() {
-        map.entry(from).or_default().push((to, msg));
+        //map.entry(from).or_default().push((to, msg));
+        map.entry(from).or_default().push((to,msg));
+
     }
 }
 

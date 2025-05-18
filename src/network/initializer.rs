@@ -814,6 +814,7 @@ impl NetworkInitializer {
 
     fn initialize_servers(&mut self) {
         for server in &self.config.server {
+            println!("server initi");
             let server_id = server.id;
 
             // Gather packet senders to connected drones
@@ -831,6 +832,7 @@ impl NetworkInitializer {
            // server::start_server(server_id, server_rx, senders);
             let mut srv = server::server::new(server_id as u8, senders, server_rx);
             thread::spawn(move || {
+                println!("server spawned");
                 srv.run();
             });        }
     }
