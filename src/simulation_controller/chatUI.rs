@@ -1,6 +1,7 @@
 use egui::{Color32, RichText, ScrollArea, TextEdit};
 use wg_2024::network::NodeId;
 use std::collections::HashMap;
+use crate::simulation_controller::gui_input_queue::{push_gui_message, new_gui_input_queue, SharedGuiInput};
 
 #[derive(Clone)]
 pub struct ChatMessage {
@@ -15,6 +16,12 @@ pub enum ClientStatus {
     Chatting(NodeId),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ChatType {
+    Normal,
+    Temporary,
+}
+
 pub struct ChatUIState {
     pub client_status: HashMap<NodeId, ClientStatus>,
     pub servers: Vec<NodeId>,
@@ -26,11 +33,22 @@ pub struct ChatUIState {
     pub pending_chat_request: Option<(NodeId, NodeId)>,
     pub selected_sender: Option<NodeId>,
     pub pending_chat_termination: Option<(NodeId, NodeId)>,
-    pub server_client_map: HashMap<NodeId, Vec<NodeId>>, // new: server ID -> logged-in clients
+    pub server_client_map: HashMap<NodeId, Vec<NodeId>>,
+    pub gui_input: SharedGuiInput,
+    pub chat_history: HashMap<(NodeId, NodeId), Vec<ChatMessage>>,
+    pub chat_type_map: HashMap<(NodeId, NodeId), ChatType>,
+    pub pending_chat_type: Option<ChatType>,
+    pub client_server_codes: HashMap<(NodeId, NodeId), String>,
+    pub show_history_popup: bool,
+    pub history_code_input: String,
+    pub history_client_id_input: String,
+    pub history_target_id_input: String,
+    pub history_code_failed: bool,
+    pub history_code_success: bool,
 }
 
 impl ChatUIState {
-    pub fn new() -> Self {
+    pub fn new(gui_input: SharedGuiInput) -> Self {
         ChatUIState {
             client_status: HashMap::new(),
             servers: vec![],
@@ -43,6 +61,17 @@ impl ChatUIState {
             selected_sender: None,
             pending_chat_termination: None,
             server_client_map: HashMap::new(),
+            gui_input,
+            chat_history: HashMap::new(),
+            chat_type_map: HashMap::new(),
+            pending_chat_type: None,
+            client_server_codes: HashMap::new(),
+            show_history_popup: false,
+            history_code_input: String::new(),
+            history_client_id_input: String::new(),
+            history_target_id_input: String::new(),
+            history_code_failed: false,
+            history_code_success: false,
         }
     }
 
@@ -58,15 +87,42 @@ impl ChatUIState {
                 } else {
                     ui.label("  Logged in clients:");
                     for cid in &clients {
-                        ui.label(format!("    - Client #{}", cid));
+                        let code = self.client_server_codes.get(&(*cid, server_id)).map_or("N/A", String::as_str);
+                        ui.label(format!("    - Client #{} [Code: {}]", cid, code));
                     }
                     if let Some((a, b)) = self.active_chat_pair {
                         if clients.contains(&a) && clients.contains(&b) {
                             ui.label("  🔵 Active chat:");
                             ui.label(format!("    - Client #{} ↔ Client #{}", a, b));
+                            let key = (a.min(b), a.max(b));
+                            if let Some(chat_type) = self.chat_type_map.get(&key) {
+                                let label = match chat_type {
+                                    ChatType::Normal => "Type: Normal",
+                                    ChatType::Temporary => "Type: Temporary",
+                                };
+                                ui.label(format!("    {}", label));
+                            }
                         }
                     }
                 }
+            }
+
+            ui.separator();
+            ui.label(RichText::new("GUI Input Queue (per client)").strong());
+
+            if let Ok(map) = self.gui_input.lock() {
+                if map.is_empty() {
+                    ui.label("No pending messages.");
+                } else {
+                    for (client_id, messages) in map.iter() {
+                        ui.label(format!("Client #{} →", client_id));
+                        for msg in messages {
+                            ui.label(format!("    {:?}", msg.1.clone()));
+                        }
+                    }
+                }
+            } else {
+                ui.label("⚠️ Failed to lock GUI input buffer");
             }
         });
     }
@@ -120,7 +176,9 @@ impl ChatUIState {
                             if let Some(server_id) = self.selected_server {
                                 self.client_status.insert(client_id, ClientStatus::Connected);
                                 self.server_client_map.entry(server_id).or_default().push(client_id);
-                                on_send(client_id, server_id, "[Login]".to_string());
+                                push_gui_message(&self.gui_input, client_id, server_id, "[Login]".to_string());
+                                let code = format!("{:06}", rand::random::<u32>() % 1_000_000);
+                                self.client_server_codes.insert((client_id, server_id), code);
                             }
                         }
                     });
@@ -133,16 +191,13 @@ impl ChatUIState {
                                 if let Some(clients) = self.server_client_map.get_mut(&server_id) {
                                     clients.retain(|&c| c != client_id);
                                 }
-                                if let Some(clients) = self.server_client_map.get_mut(&server_id) {
-                                    clients.retain(|&c| c != client_id);
-                                }
-                                on_send(client_id, server_id, "[Logout]".to_string());
+                                push_gui_message(&self.gui_input, client_id, server_id, "[Logout]".to_string());
                             }
                         }
 
                         if ui.button("Request Client List").clicked() {
                             if let Some(server_id) = self.selected_server {
-                                on_send(client_id, server_id, "[ClientListRequest]".to_string());
+                                push_gui_message(&self.gui_input, client_id, server_id, "[ClientListRequest]".to_string());
                             }
                         }
                     });
@@ -166,64 +221,137 @@ impl ChatUIState {
                     if let Some(peer_id) = requested_chat_with {
                         if let Some(server_id) = self.selected_server {
                             self.pending_chat_request = Some((client_id, peer_id));
-                            on_send(client_id, server_id, format!("[ChatRequest]::{peer_id}"));
+                            push_gui_message(&self.gui_input, client_id, server_id, format!("[ChatRequest]::{peer_id}"));
                         }
                     }
                 }
                 ClientStatus::Chatting(peer_id) => {
                     ui.horizontal(|ui| {
-                        if ui.button("End Chat").clicked() {
-                            self.pending_chat_termination = Some((client_id, peer_id));
+                        if let Some((a, b)) = self.active_chat_pair {
+                            if ui.button("End Chat").clicked() {
+                                self.pending_chat_termination = Some((a, b));
+                            }
                         }
                     });
                 }
             }
+
+            // Show Chat History button is now outside of any active chat condition
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Show Chat History").clicked() {
+                    self.show_history_popup = true;
+                    self.history_code_input.clear();
+                    self.history_client_id_input.clear();
+                    self.history_target_id_input.clear();
+                    self.history_code_failed = false;
+                    self.history_code_success = false;
+                }
+            });
         }
 
         if let Some((requester, target)) = self.pending_chat_request {
-            if Some(target) == self.selected_client {
-                egui::Window::new("Incoming Chat Request")
-                    .collapsible(false)
-                    .show(ui.ctx(), |ui| {
-                        ui.label(format!("Client #{} wants to start a chat.", requester));
+            // Show the chat request popup regardless of the selected client
+            egui::Window::new(format!("Incoming Chat Request for Client #{}", target))
+                .collapsible(false)
+                .show(ui.ctx(), |ui| {
+                    ui.label(format!("Client #{} wants to start a chat with Client #{}.", requester, target));
 
+                    let selected_chat_type = self.pending_chat_type.get_or_insert(ChatType::Normal);
+
+                    ui.horizontal(|ui| {
+                        ui.label("Chat Type:");
+                        egui::ComboBox::from_id_source("chat_type_selector")
+                            .selected_text(match selected_chat_type {
+                                ChatType::Normal => "Normal",
+                                ChatType::Temporary => "Temporary",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(selected_chat_type, ChatType::Normal, "Normal");
+                                ui.selectable_value(selected_chat_type, ChatType::Temporary, "Temporary");
+                            });
+                    });
+
+                    let mut accept_clicked = false;
+                    let mut decline_clicked = false;
+
+                    ui.horizontal(|ui| {
+                        // Make the buttons more visible
                         if ui.button("Accept").clicked() {
-                            self.client_status.insert(requester, ClientStatus::Chatting(target));
-                            self.client_status.insert(target, ClientStatus::Chatting(requester));
-                            self.active_chat_pair = Some((requester, target));
-                            self.selected_sender = Some(target);
-                            self.pending_chat_request = None;
+                            accept_clicked = true;
                         }
-
                         if ui.button("Decline").clicked() {
-                            self.pending_chat_request = None;
+                            decline_clicked = true;
                         }
                     });
-            }
+
+                    // Only allow responding if the target client is selected
+                    if Some(target) != self.selected_client {
+                        ui.label(RichText::new(format!("⚠️ Click on Client #{} to respond to this request", target)).color(Color32::YELLOW));
+                    } else if accept_clicked {
+                        let chat_type = self.pending_chat_type.unwrap_or(ChatType::Normal);
+                        let key = (requester.min(target), requester.max(target));
+                        self.chat_type_map.insert(key, chat_type);
+
+                        self.client_status.insert(requester, ClientStatus::Chatting(target));
+                        self.client_status.insert(target, ClientStatus::Chatting(requester));
+                        self.active_chat_pair = Some((requester, target));
+                        self.selected_sender = Some(target);
+                        self.pending_chat_request = None;
+                        self.pending_chat_type = None;
+
+                        if chat_type == ChatType::Temporary {
+                            self.chat_messages.clear();
+                        } else {
+                            self.chat_messages = self.chat_history.get(&key).cloned().unwrap_or_default();
+                        }
+                    } else if decline_clicked {
+                        self.pending_chat_request = None;
+                    }
+                });
         }
 
         if let Some((initiator, peer)) = self.pending_chat_termination {
-            if Some(peer) == self.selected_client {
-                egui::Window::new("Confirm End Chat")
-                    .collapsible(false)
-                    .show(ui.ctx(), |ui| {
-                        ui.label(format!("Client #{} wants to end the chat.", initiator));
+            // Show the chat termination popup regardless of the selected client
+            egui::Window::new(format!("Confirm End Chat for Client #{}", peer))
+                .collapsible(false)
+                .show(ui.ctx(), |ui| {
+                    ui.label(format!("Client #{} wants to end the chat with Client #{}.", initiator, peer));
 
+                    let mut confirm_clicked = false;
+                    let mut cancel_clicked = false;
+
+                    ui.horizontal(|ui| {
                         if ui.button("Confirm End").clicked() {
-                            if let Some(server_id) = self.selected_server {
-                                on_send(initiator, server_id, "[ChatFinish]".to_string());
-                            }
-                            self.client_status.insert(initiator, ClientStatus::Connected);
-                            self.client_status.insert(peer, ClientStatus::Connected);
-                            self.active_chat_pair = None;
-                            self.pending_chat_termination = None;
+                            confirm_clicked = true;
                         }
-
                         if ui.button("Cancel").clicked() {
-                            self.pending_chat_termination = None;
+                            cancel_clicked = true;
                         }
                     });
-            }
+
+                    // Only allow responding if the peer client is selected
+                    if Some(peer) != self.selected_client {
+                        ui.label(RichText::new(format!("⚠️ Click on Client #{} to respond to this request", peer)).color(Color32::YELLOW));
+                    } else if confirm_clicked {
+                        if let Some(server_id) = self.selected_server {
+                            push_gui_message(&self.gui_input, initiator, server_id, format!("[ChatFinish]::{peer}"));
+                        }
+
+                        let key = (initiator.min(peer), initiator.max(peer));
+                        if self.chat_type_map.get(&key) == Some(&ChatType::Temporary) {
+                            self.chat_messages.clear();
+                        }
+                        self.chat_type_map.remove(&key);
+
+                        self.client_status.insert(initiator, ClientStatus::Connected);
+                        self.client_status.insert(peer, ClientStatus::Connected);
+                        self.active_chat_pair = None;
+                        self.pending_chat_termination = None;
+                    } else if cancel_clicked {
+                        self.pending_chat_termination = None;
+                    }
+                });
         }
 
         ui.separator();
@@ -248,9 +376,15 @@ impl ChatUIState {
                     if let Some(from) = self.selected_sender {
                         let to = if from == a { b } else { a };
                         if !self.chat_input.trim().is_empty() {
-                            let msg = format!("[MessageTo]::{to}::{}", self.chat_input.trim());
-                            on_send(from, to, msg);
-                            self.chat_messages.push(ChatMessage { from, content: self.chat_input.clone() });
+                            let msg = ChatMessage { from, content: self.chat_input.clone() };
+                            self.chat_messages.push(msg.clone());
+
+                            let key = (from.min(to), from.max(to));
+                            if self.chat_type_map.get(&key) == Some(&ChatType::Normal) {
+                                self.chat_history.entry(key).or_default().push(msg.clone());
+                            }
+
+                            push_gui_message(&self.gui_input, from, to, format!("[MessageTo]::{to}::{}", msg.content));
                             self.chat_input.clear();
                         }
                     }
@@ -263,7 +397,60 @@ impl ChatUIState {
                 }
             });
         }
+
+        // History popup is now outside the active chat condition
+        if self.show_history_popup {
+            egui::Window::new("Retrieve Chat History").collapsible(false).show(ui.ctx(), |ui| {
+                ui.label("Client ID (you):");
+                ui.add(TextEdit::singleline(&mut self.history_client_id_input).hint_text("e.g. 101"));
+
+                ui.label("See chat with Client ID:");
+                ui.add(TextEdit::singleline(&mut self.history_target_id_input).hint_text("e.g. 102"));
+
+                ui.label("Security Code:");
+                ui.add(TextEdit::singleline(&mut self.history_code_input).hint_text("123456"));
+
+                ui.horizontal(|ui| {
+                    if ui.button("Submit").clicked() {
+                        if let (Ok(client_id), Ok(target_id), Some(server_id)) = (
+                            self.history_client_id_input.parse::<NodeId>(),
+                            self.history_target_id_input.parse::<NodeId>(),
+                            self.selected_server,
+                        ) {
+                            let correct_code = self.client_server_codes.get(&(client_id, server_id));
+                            if correct_code == Some(&self.history_code_input) {
+                                push_gui_message(&self.gui_input, client_id, target_id, format!("[HistoryRequest]::{}::{}",client_id, target_id));
+                                self.history_code_success = true;
+                                self.history_code_failed = false;
+                                self.show_history_popup = false; // close popup
+                            } else {
+                                self.history_code_failed = true;
+                                self.history_code_success = false;
+                            }
+                        } else {
+                            self.history_code_failed = true;
+                            self.history_code_success = false;
+                        }
+                    }
+
+                    if ui.button("Close").clicked() {
+                        self.show_history_popup = false;
+                        self.history_code_input.clear();
+                        self.history_client_id_input.clear();
+                        self.history_target_id_input.clear();
+                        self.history_code_failed = false;
+                        self.history_code_success = false;
+                    }
+                });
+
+                if self.history_code_failed {
+                    ui.label(RichText::new("❌ Incorrect code or client ID").color(Color32::RED));
+                } else if self.history_code_success {
+                    ui.label(RichText::new("✔ Code accepted. History request sent.").color(Color32::GREEN));
+                }
+            });
+        }
     }
 }
 
-//concerning the chat i still need to figure out the conditional print off he msg
+

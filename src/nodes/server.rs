@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+/*use std::collections::{HashMap, HashSet};
 use std::thread;
 use crossbeam_channel::{Receiver, Sender};
 use rand::Rng;
@@ -46,8 +46,15 @@ pub fn start_server(
         println!("Server {} finished flood test", server_id);
     });
 }
+*/
 
 /*
+COSE DA FARE :
+- le varie funzioni di interazione con i client: con i vari codici da mettere nei frammenti
+- implementare sto grafo dimmerda
+- fare simulazioni
+
+*/
 /*
 COSE DA FARE :
 - le varie funzioni di interazione con i client: con i vari codici da mettere nei frammenti
@@ -58,6 +65,8 @@ COSE DA FARE :
 
 use petgraph::algo::dijkstra;
 use std::collections::HashMap;
+use std::collections::HashSet;
+use std::mem::transmute;
 use crossbeam_channel::{Receiver, RecvError, Sender};
 use eframe::egui::accesskit::Node;
 use wg_2024::packet::{Ack, FloodRequest, FloodResponse, Fragment, Nack, NackType, NodeType, Packet, PacketType};
@@ -65,6 +74,7 @@ use wg_2024::network::{NodeId, SourceRoutingHeader};
 use log::{info, error, warn, debug};
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
+use std::collections::VecDeque;
 
 #[derive(Clone, Debug)]
 pub struct NetworkGraph {
@@ -165,6 +175,7 @@ impl NetworkGraph {
 }
 
 
+const MAX_CHAT_HISTORY: usize = 50; //50 messagges max for the chronology
 #[derive(Debug, Clone)]
 pub struct server {
     pub id: u8, // Server ID
@@ -172,8 +183,12 @@ pub struct server {
     pub fragment_lengths: HashMap<(u64, NodeId), u8>, // Maps (session_id, src_id) to length of the last fragment
     pub packet_sender: HashMap<NodeId, Sender<Packet>>, // Hashmap containing each sender channel to the neighbors (channels to send packets to clients)
     pub packet_receiver: Receiver<Packet>, // Channel to receive packets from clients/drones
-    pub registered_clients: HashMap<NodeId,Vec<NodeId>>,
-    pub network_graph: NetworkGraph,
+
+    seen_floods:HashSet<(u64, NodeId)>,
+    registered_clients: HashMap<NodeId,Vec<NodeId>>,
+    network_graph: NetworkGraph,
+    chat_history: HashMap<(NodeId,NodeId), VecDeque<String>>,
+
     //recovery_in_progress:  HashMap<(u64, NodeId), bool>, // Tracks if recovery is already in progress for a session
     //drop_counts: HashMap<(u64, NodeId), usize>, // Track number of drops per session
 }
@@ -189,22 +204,21 @@ impl server {
             fragment_lengths: HashMap::new(),
             packet_sender: packet_sender,
             packet_receiver,
+            seen_floods: HashSet::new(),
             registered_clients: HashMap::new(),
             network_graph: NetworkGraph::new(),
-            //recovery_in_progress: HashMap::new(),
-            //drop_counts: HashMap::new(),
+            chat_history:HashMap::new(),
         }
     }
 
     /// Run the server to process incoming packets and handle fragment assembly
     pub fn run(&mut self) {
-        // Initialize logger (logging setup for your program)
+        // Initialize the logger
         if let Err(e) = env_logger::builder().try_init() {
             eprintln!("Failed to initialize logger: {}", e);
         }
 
         info!("Server {} started running.", self.id);
-
         loop {
             match self.packet_receiver.recv() {
                 Ok(mut packet) => {
@@ -218,15 +232,15 @@ impl server {
                         }
                         PacketType::Ack(ack) => {
                             // Process ACKs, needed for simulation controller to know when to print the message
-                            //self.handle_ack(packet.session_id, ack, packet.routing_header);
+                            //self.handle_ack(packet.session_id, ack, packet.routing_header); --> no need to do anything
                         }
                         PacketType::FloodRequest(flood_request) => {
                             // Process flood requests from clients trying to discover the network
-                            // Server should send back a flood response
+                            // Server should send back a flood response and forward the FloodRequest to its neighbors except the one sending it
                             self.handle_flood_request(packet.session_id, flood_request, packet.routing_header);
                         }
                         PacketType::FloodResponse(flood_response) => {
-                            // Process flood responses containing network information
+                            // Process flood responses containing network information --> used to modify the configuration of the netwrok graph.
                             self.handle_flood_response(packet.session_id, flood_response, packet.routing_header);
                         }
                         _ => {
@@ -234,6 +248,7 @@ impl server {
                         }
                     }
                 }
+                //server is non receiving any packet
                 Err(e) => {
                     warn!("Error receiving packet: {}", e);
                     break;
@@ -250,21 +265,18 @@ impl server {
         // Initialize storage for fragments if not already present
         let entry = self.received_fragments.entry(key).or_insert_with(|| vec![None; fragment.total_n_fragments as usize]);
 
-        // Check if the fragment is already received
-        if entry[fragment.fragment_index as usize].is_some() {
+        // Check if the fragment is already received --> if already received return and do nothing
+        if entry[fragment.fragment_index as usize].is_some() { //check if the option in the vec is Some(...)
             warn!("Duplicate fragment {} received for session {:?}", fragment.fragment_index, key);
             return;
         }
-
-        // Store the fragment data
+        //if not received yet --> Store the fragment data
         entry[fragment.fragment_index as usize] = Some(fragment.data);
-
         // Update the last fragment's length if applicable
-        if fragment.fragment_index == fragment.total_n_fragments - 1 {
+        if fragment.fragment_index == fragment.total_n_fragments - 1 { // in the case we are receiving the last fragment we have not to consider the max length but rather the fragment length itself.
             self.fragment_lengths.insert(key, fragment.length);
             info!("Last fragment received for session {:?} with length {}.", key, fragment.length);
         }
-
         // Check if all fragments have been received
         if entry.iter().all(Option::is_some) {
             // All fragments received, handle complete message
@@ -281,11 +293,12 @@ impl server {
             message.extend_from_slice(&fragment.unwrap());
         }
         message.truncate(total_length);
-
+        //now trasform the message to string.
         let message_string = String::from_utf8_lossy(&message).to_string();
         let session_id: u64 = key.0;
         let client_id = key.1;
 
+        //create a format to handle the
         let tokens: Vec<&str> = message_string.trim().splitn(3, "::").collect();
 
         match tokens.as_slice() {
@@ -324,9 +337,30 @@ impl server {
                     {
                         let response = format!("[MessageFrom]::{}::{}", client_id, msg);
                         self.send_chat_message(session_id, target_id, response, routing_header);
+                        //now we store the messages to have the "CHRONOLOGY" feature:
+                        let entry= self.chat_history.entry((client_id.min(target_id), client_id.max(target_id))).or_insert_with(VecDeque::new);
+                        let chat_entry = format!("{}: {}", client_id, msg);
+                        entry.push_back(chat_entry);
+
+                        if entry.len() > MAX_CHAT_HISTORY {
+                            entry.pop_front(); // remove the oldest message
+                        }
                     } else {
                         self.send_chat_message(session_id, client_id, "error_wrong_client_id!".to_string(), routing_header);
                     }
+                }
+            }
+            ["[HistoryRequest]", source_id, target_id_str,] => { //when client wants to see chronology
+                if let Ok(target_id) = target_id_str.parse::<NodeId>() {
+                    let client_1=source_id.parse::<NodeId>().unwrap();
+                    let client_2 = target_id;
+                    let key = (client_1, client_2);
+                    let history = self.chat_history.get(&key);
+                    let response = match history {
+                        Some(messages) => messages.iter().cloned().collect::<Vec<String>>().join("\n"),
+                        None => "No history available".to_string(),
+                    };
+                    self.send_chat_message(session_id, client_id, format!("[HistoryResponse]::{}", response), routing_header);
                 }
             }
             ["[ChatFinish]"] => {
@@ -356,13 +390,7 @@ impl server {
 
         match nack.nack_type {
             NackType::Dropped => { // the only case i recieve nack Dropped is when i am forwarding the fragments to the second client
-                // Nacktype: ErrorInRouting ---> floodRequest --> find crashed drone --> remove from graph --> calculate path to dijstra and keep sending
-                //put a limit of 5 dropped fragments, at the 6th the server will flood the network sending a floodrequest
-                // to the drone to whom it is connected.
-
-                //Modus Operandi client/server:
-                // prima operazione generale: floodRequest.
-                /* Riceverò delle flood_response e da queste mi costruisco il grafo.
+                /*
                     Una volta costruito il grafo ad ogni nack::Dropped che ricevo vado a modificare il peso di tutti i
                     collegamenti relativi a quel drone. Gli altri nack implicano che c'è qualche problema del tipo crashed Drone.
                     Come gestisco? Mando floodRequest, riceverò floodResponse che mi indicheranno il drone problematico, carpita
@@ -373,7 +401,7 @@ impl server {
 
                 // grafo fatto con pet_graph.
                 warn!("Server {}: Received Nack::Dropped", self.id);
-
+                //ricevo nack::Dropped --> modifico il costo nel grafo
                 if routing_header.hop_index >= 1 {
                     if let (Some(from), Some(to)) = (
                         routing_header.hops.get(routing_header.hop_index - 1),
@@ -384,8 +412,8 @@ impl server {
                     }
                 }
                 warn!("Received Nack::Dropped, modifying the costs in the graph")
-
             },
+
             NackType::ErrorInRouting(crashed_node_id) => {
                 warn!("Server detected a crashed node {} due to ErrorInRouting.", crashed_node_id);
 
@@ -395,40 +423,41 @@ impl server {
                 info!("Server updated network graph after detecting crash of node {}", crashed_node_id);
                 self.network_graph.print_graph(); // optional: print updated graph
             },
-            _ => {
-                    warn!("Received ErrorInRouting/DestinationIsDrone/UnexpectedRecipient NACK type, sending flood request");
-                    let flood_request = FloodRequest {
-                        flood_id: session_id,
-                        initiator_id: self.id as NodeId,
-                        path_trace: vec![(self.id as NodeId, NodeType::Server)], //starting from server ID.,
-                    };
-                    // Create the flood packet to send to all connected drones
-                    let flood_packet = Packet::new_flood_request(
-                        // Route to first drone in original path
-                        SourceRoutingHeader {
-                            hop_index: 1,
-                            hops: routing_header.hops.iter().rev().cloned().collect(),
-                        },
-                        session_id,
-                        flood_request
-                    );
 
-                    if let Some(next_hop) = flood_packet.routing_header.hops.get(1) {
-                        if let Some(sender) = self.packet_sender.get(next_hop) {
-                            match sender.try_send(flood_packet.clone()) {
-                                Ok(()) => {
-                                    info!("FloodRequest sent to node {} for session {}", next_hop, session_id);
-                                }
-                                Err(e) => {
-                                    error!("Error sending flood packet: {:?}", e);
-                                }
+            _ => {
+                warn!("Received ErrorInRouting/DestinationIsDrone/UnexpectedRecipient NACK type, sending flood request");
+                let flood_request = FloodRequest {
+                    flood_id: session_id,
+                    initiator_id: self.id as NodeId,
+                    path_trace: vec![(self.id as NodeId, NodeType::Server)], //starting from server ID.,
+                };
+                // Create the flood packet to send to all connected drones
+                let flood_packet = Packet::new_flood_request(
+                    // Route to first drone in original path
+                    SourceRoutingHeader {
+                        hop_index: 1,
+                        hops: routing_header.hops.iter().rev().cloned().collect(),
+                    },
+                    session_id,
+                    flood_request
+                );
+
+                if let Some(next_hop) = flood_packet.routing_header.hops.get(1) {
+                    if let Some(sender) = self.packet_sender.get(next_hop) {
+                        match sender.try_send(flood_packet.clone()) {
+                            Ok(()) => {
+                                info!("FloodRequest sent to node {} for session {}", next_hop, session_id);
                             }
-                        } else {
-                            error!("No sender found for node {}", next_hop);
+                            Err(e) => {
+                                error!("Error sending flood packet: {:?}", e);
+                            }
                         }
                     } else {
-                        error!("No next hop available in routing header");
+                        error!("No sender found for node {}", next_hop);
                     }
+                } else {
+                    error!("No next hop available in routing header");
+                }
             }
             //di conseguenza successivamente il server riceverà delle floodResponse. Queste dovranno essere analizzate
             //ed interpretate per poi andare a modificare il grafo.
@@ -465,47 +494,49 @@ impl server {
     }
 
     fn handle_flood_request(&mut self, session_id:u64, flood_request: &FloodRequest, source_routing_header: SourceRoutingHeader) {
-        info!("Received Flood request for session {} with flood id {}", session_id, flood_request.flood_id);
+        //info!("Received Flood request for session {} with flood id {}", session_id, flood_request.flood_id);
+        info!("Received FloodRequest from {} with ID {}", flood_request.initiator_id, flood_request.flood_id);
 
-        let flood_response= PacketType::FloodResponse(
-            FloodResponse {
-                flood_id: session_id,
-                path_trace: vec![(self.id,NodeType::Server)],
+        let flood_req= (flood_request.flood_id, flood_request.initiator_id);
+        //we have to check if it has already been received --> check in seen_floods HashSet
+        //if it contains the flood_req:
+        if self.seen_floods.contains(&flood_req){
+            let flood_response= flood_request.generate_response(session_id);
+            if let Some(sender)= self.packet_sender.get(&flood_response.routing_header.hops[1]){
+                sender.send(flood_response).unwrap_or_else(|e| { error!("Failed to send flood_response: {:?}", e);});
             }
-        );
-        let packet_flood_response= Packet{
-            routing_header: SourceRoutingHeader{
-                hop_index: 0,
-                hops: source_routing_header.hops.iter().rev().copied().collect(),
-            },
-            session_id,
-            pack_type: flood_response,
-        };
-        self.packet_sender.iter().for_each(|(_, sender)| {
-            sender.try_send(packet_flood_response.clone()).unwrap()
-        })
+            return
+        }
+        //if it doesn't contain it --> we got to insert the flood_req in the HashSet
+        self.seen_floods.insert(flood_req);
+        //we then forward it to all neighbors except to the one who sent it to server
+        let mut forwarded_request = flood_request.clone();
+        forwarded_request.path_trace.push((self.id, NodeType::Server)); //we push as last element in the path_trace the server.
 
+        for (&vicino, sender_channel) in &self.packet_sender {
+            // Avoid sending back to the one we received it from
+            if let Some(&(last_visited, _)) = flood_request.path_trace.last() {
+                //checking the last element of flood_request (note that it is different from forwarded_request , which will be forwarded by the server itself
+                if vicino == last_visited {
+                    continue;
+                }
+            }
+            //create the new flood_request packet from forwarded_request.
+            let packet = Packet::new_flood_request(
+                SourceRoutingHeader::empty_route(),
+                session_id,
+                forwarded_request.clone(),
+            );
+            if let Err(errore) = sender_channel.send(packet) {
+                error!("Failed to forward FloodRequest to {}: {}", vicino, errore);
+            }
+        }
     }
 
-    //handle_flood_response is still to be checked properly and tested.
     fn handle_flood_response(&mut self, session_id: u64, flood_response: &FloodResponse, routing_header: SourceRoutingHeader) {
         info!("Received FloodResponse for flood_id {} in session {}", flood_response.flood_id, session_id);
         //obiettivo: fare tutta quella roba strana con il grafo.
-
-        /*
-        // Extract the path from the response
-        let path = flood_response.path_trace
-            .iter()
-            .map(|(id, _)| *id)
-            .collect::<Vec<NodeId>>();
-
-        info!("New path discovered: {:?}", path);
-        //integrare tutti i collegamenti e nodi del path dentro il grado
-
-        // TODO: Use this path for future communications with this client
-        // You might want to store this path in a new field in your server struct*/
         let nodes: Vec<NodeId> = flood_response.path_trace.iter().map(|(id, _)| *id).collect();
-
         for pair in nodes.windows(2) {
             if let [a, b] = pair {
                 self.network_graph.add_link(*a, *b);
@@ -527,10 +558,19 @@ impl server {
             data: fragment_data,
         };
 
-        // Reverse route from original to find target
-        let mut hops = original_header.hops.clone();
-        hops.reverse();
-        hops.push(target_id); // may need more logic here later
+        //find the best path from server to receiver client, using network_graph: NetworkGraph
+        let source= self.id;
+        let destination= target_id;
+        let hops= match self.network_graph.best_path(source, target_id){
+
+            Some(path) => {path}
+            None => {
+                error!("No path found from server {} to client {}", source, destination);
+                return;
+            }
+        };
+
+
 
         let packet = Packet {
             session_id,
@@ -665,4 +705,3 @@ mod tests {
 
 
 }
- */
