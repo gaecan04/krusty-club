@@ -131,7 +131,7 @@ pub struct server {
     registered_clients: Vec<NodeId>,
     network_graph: NetworkGraph,
     chat_history: HashMap<(NodeId,NodeId), VecDeque<String>>,
-    media_storage: HashMap<String, String> // media name --> associated base64 encoding as String
+    media_storage: HashMap<String, (NodeId,String)> // media name --> (uploader_id, associated base64 encoding as String)
 
     //recovery_in_progress:  HashMap<(u64, NodeId), bool>, // Tracks if recovery is already in progress for a session
     //drop_counts: HashMap<(u64, NodeId), usize>, // Track number of drops per session
@@ -254,7 +254,7 @@ impl server {
                         self.registered_clients.push(client_id);
                         info!("Client {} registered to this server", client_id);
 
-                        let loging_acknowledgement= format!("[Login_ack]::{}", session_id);
+                        let loging_acknowledgement= format!("[LoginAck]::{}", session_id);
                         self.send_chat_message(session_id, client_id,loging_acknowledgement, routing_header);
                     }
                 } else {
@@ -316,18 +316,40 @@ impl server {
                     let media_name = parts[0].to_string();
                     let base64_data = parts[1].to_string();
                     // Save the image media in the hashmap
-                    self.media_storage.insert(media_name.clone(), base64_data);
+                    self.media_storage.insert(media_name.clone(), (client_id, base64_data));
                     let confirm = format!("[MediaUploadAck]::{}", media_name);
                     self.send_chat_message(session_id, client_id, confirm, routing_header);
                 }
             }
+            ["[MediaListRequest]"] => {
+                let list = self.media_storage.keys()
+                    .cloned()
+                    .collect::<Vec<String>>()
+                    .join(",");
+                let response = format!("[MediaListResponse]::{}", list);
+                self.send_chat_message(session_id, client_id, response, routing_header);
+            }
             ["[MediaDownloadRequest]", media_name] => {
-                let response = if let Some(base64_data) = self.media_storage.get(*media_name) {
+                let response = if let Some((owner,base64_data)) = self.media_storage.get(*media_name) {
                     format!("[MediaDownloadResponse]::{}::{}", media_name, base64_data)
                 } else {
                     "[MediaDownloadResponse]::ERROR::NotFound".to_string()
                 };
                 self.send_chat_message(session_id, client_id, response, routing_header);
+            }
+            // da chi lo ricevo??? La richiesta dovrebbe mandarmela un client. Oppure il simulationController dalla GUI???
+            ["[MediaBroadcast]", media_name, base64_data] => {
+                self.media_storage.insert(media_name.to_string(), (client_id, base64_data.to_string()));
+                for &target_id in &self.registered_clients {
+                    // Avoid sending to the sender
+                    if target_id != client_id {
+                        let msg = format!("[MediaDownloadResponse]::{}::{}", media_name, base64_data);
+                        self.send_chat_message(session_id, target_id, msg.clone(), routing_header.clone());
+                    }
+                }
+                // Confirm broadcast to the sender
+                let ack = format!("[MediaBroadcastAck]::{}::Broadcasted", media_name);
+                self.send_chat_message(session_id, client_id, ack, routing_header);
             }
             ["[ChatFinish]"] => {
                 info!("Client {} finished chat in session {}", client_id, session_id);
