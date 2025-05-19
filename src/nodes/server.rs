@@ -253,6 +253,9 @@ impl server {
                     if !self.registered_clients.contains(&client_id) {
                         self.registered_clients.push(client_id);
                         info!("Client {} registered to this server", client_id);
+
+                        let loging_acknowledgement= format!("[Login_ack]::{}", session_id);
+                        self.send_chat_message(session_id, client_id,loging_acknowledgement, routing_header);
                     }
                 } else {
                     error!("server_id in Login request is not the id of the server receiving the fragment!")
@@ -530,7 +533,6 @@ impl server {
                 return;
             }
         };
-
         let packet = Packet {
             session_id,
             routing_header: SourceRoutingHeader {
@@ -539,7 +541,6 @@ impl server {
             },
             pack_type: PacketType::MsgFragment(fragment),
         };
-
         if let Some(sender) = self.packet_sender.get(&target_id) {
             if let Err(e) = sender.send(packet) {
                 error!("Failed to send chat response to {}: {:?}", target_id, e);
