@@ -128,7 +128,7 @@ pub struct server {
     pub packet_receiver: Receiver<Packet>, // Channel to receive packets from clients/drones
 
     seen_floods:HashSet<(u64, NodeId)>,
-    registered_clients: HashMap<NodeId,Vec<NodeId>>,
+    registered_clients: Vec<NodeId>,
     network_graph: NetworkGraph,
     chat_history: HashMap<(NodeId,NodeId), VecDeque<String>>,
     media_storage: HashMap<String, String> // media name --> associated base64 encoding as String
@@ -149,7 +149,7 @@ impl server {
             packet_sender: packet_sender,
             packet_receiver,
             seen_floods: HashSet::new(),
-            registered_clients: HashMap::new(),
+            registered_clients: Vec::new(),
             network_graph: NetworkGraph::new(),
             chat_history:HashMap::new(),
             media_storage: HashMap::new(),
@@ -247,48 +247,47 @@ impl server {
         let tokens: Vec<&str> = message_string.trim().splitn(3, "::").collect();
 
         match tokens.as_slice() {
-            ["[Login]"] => {
-                self.registered_clients
-                    .entry(session_id as NodeId)
-                    .or_default()
-                    .push(client_id);
-                info!("Client {} registered to chat in session {}", client_id, session_id);
+
+            ["[Login]", server_id_str] => {
+                if server_id_str.parse::<NodeId>() == Ok(self.id) {
+                    if !self.registered_clients.contains(&client_id) {
+                        self.registered_clients.push(client_id);
+                        info!("Client {} registered to this server", client_id);
+                    }
+                } else {
+                    error!("server_id in Login request is not the id of the server receiving the fragment!")
+                }
+
             }
             ["[ClientListRequest]"] => {
                 if let Some(sender) = self.packet_sender.get(&client_id) {
-                    let clients = self
-                        .registered_clients
-                        .get(&(session_id as NodeId))
-                        .cloned()
-                        .unwrap_or_default();
+                    let clients = self.registered_clients.clone();
                     let response = format!("[ClientListResponse]::{:?}", clients);
                     self.send_chat_message(session_id, client_id, response, routing_header);
                 }
             }
             ["[ChatRequest]", target_id_str] => {
                 if let Ok(target_id) = target_id_str.parse::<NodeId>() {
-                    let success = self.registered_clients
-                        .get(&(session_id as NodeId))
-                        .map_or(false, |list| list.contains(&target_id));
+                    let success = self.registered_clients.contains(&target_id);
                     let response = format!("[ChatStart]::{}", success);
                     self.send_chat_message(session_id, client_id, response, routing_header);
                 }
             }
             ["[MessageTo]", target_id_str, msg] => {
                 if let Ok(target_id) = target_id_str.parse::<NodeId>() {
-                    if self.registered_clients
-                        .get(&(session_id as NodeId))
-                        .map_or(false, |list| list.contains(&target_id))
-                    {
+                    if self.registered_clients.contains(&target_id) {
                         let response = format!("[MessageFrom]::{}::{}", client_id, msg);
                         self.send_chat_message(session_id, target_id, response, routing_header);
-                        //now we store the messages to have the "CHRONOLOGY" feature:
-                        let entry= self.chat_history.entry((client_id.min(target_id), client_id.max(target_id))).or_insert_with(VecDeque::new);
+
+                        let entry = self
+                            .chat_history
+                            .entry((client_id.min(target_id), client_id.max(target_id)))
+                            .or_insert_with(VecDeque::new);
                         let chat_entry = format!("{}: {}", client_id, msg);
                         entry.push_back(chat_entry);
 
                         if entry.len() > MAX_CHAT_HISTORY {
-                            entry.pop_front(); // remove the oldest message
+                            entry.pop_front();
                         }
                     } else {
                         self.send_chat_message(session_id, client_id, "error_wrong_client_id!".to_string(), routing_header);
@@ -297,9 +296,9 @@ impl server {
             }
             ["[HistoryRequest]", source_id, target_id_str,] => { //when client wants to see chronology
                 if let Ok(target_id) = target_id_str.parse::<NodeId>() {
-                    let client_1=source_id.parse::<NodeId>().unwrap();
+                    let client_1 = source_id.parse::<NodeId>().unwrap_or(client_id);
                     let client_2 = target_id;
-                    let key = (client_1, client_2);
+                    let key = (client_1.min(client_2), client_1.max(client_2));
                     let history = self.chat_history.get(&key);
                     let response = match history {
                         Some(messages) => messages.iter().cloned().collect::<Vec<String>>().join("\n"),
@@ -314,8 +313,7 @@ impl server {
                     let media_name = parts[0].to_string();
                     let base64_data = parts[1].to_string();
                     // Save the image media in the hashmap
-                    self.media_storage.insert(media_name.clone(), base64_data.clone());
-
+                    self.media_storage.insert(media_name.clone(), base64_data);
                     let confirm = format!("[MediaUploadAck]::{}", media_name);
                     self.send_chat_message(session_id, client_id, confirm, routing_header);
                 }
@@ -329,10 +327,7 @@ impl server {
                 self.send_chat_message(session_id, client_id, response, routing_header);
             }
             ["[ChatFinish]"] => {
-                if let Some(clients) = self.registered_clients.get_mut(&(session_id as NodeId)) {
-                    clients.retain(|&id| id != client_id);
-                    info!("Client {} finished chat in session {}", client_id, session_id);
-                }
+                info!("Client {} finished chat in session {}", client_id, session_id);
             }
             ["[Logout]"] => {
                 if let Some(clients) = self.registered_clients.get_mut(&(session_id as NodeId)) {
@@ -535,8 +530,6 @@ impl server {
                 return;
             }
         };
-
-
 
         let packet = Packet {
             session_id,
