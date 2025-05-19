@@ -249,6 +249,9 @@ impl MyClient{
 
 
 fn process_flood_request(&mut self, request: &FloodRequest, header: SourceRoutingHeader){
+        let mut updated_header = header.clone();
+        updated_header.append_hop(self.id);
+        updated_header.increase_hop_index();
         let mut updated_request = request.clone();
         if self.seen_flood_ids.contains(&(request.flood_id , request.initiator_id)) || self.packet_send.len() == 1{
             updated_request.path_trace.push((self.id , Client) );
@@ -274,7 +277,7 @@ fn process_flood_request(&mut self, request: &FloodRequest, header: SourceRoutin
                         initiator_id:updated_request.path_trace[0].0.clone(),
                         path_trace: updated_request.path_trace.clone(),
                     }),
-                    routing_header: header.clone(), // to fix
+                    routing_header: updated_header.clone(),
                     session_id:0,
                 };
                 if Some(*neighbor_id) != sender_id{
@@ -287,7 +290,6 @@ fn process_flood_request(&mut self, request: &FloodRequest, header: SourceRoutin
             }
         }
     }
-
     fn send_ack (&mut self, packet: &mut Packet , fragment: &Fragment) {
         let ack= Ack {
             fragment_index : fragment.fragment_index,
