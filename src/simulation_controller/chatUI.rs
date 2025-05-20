@@ -223,7 +223,7 @@ impl ChatUIState {
                             if let Some(server_id) = self.selected_server {
                                 self.client_status.insert(client_id, ClientStatus::Connected);
                                 self.server_client_map.entry(server_id).or_default().push(client_id);
-                                push_gui_message(&self.gui_input, client_id, server_id, "[Login]".to_string());
+                                push_gui_message(&self.gui_input, client_id, server_id, format!("[Login]::{}",server_id));
                                 let code = format!("{:06}", rand::random::<u32>() % 1_000_000);
                                 self.client_server_codes.insert((client_id, server_id), code);
                             }
