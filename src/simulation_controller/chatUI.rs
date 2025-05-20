@@ -152,15 +152,15 @@ impl ChatUIState {
                     for (client_id, messages) in map.iter() {
                         ui.label(format!("Client #{} →", client_id));
                         for msg in messages {
-                            let short_msg = if msg.1.starts_with("[MediaUpload]:") {
-                                let parts: Vec<&str> = msg.1.splitn(3, ':').collect();
+                            let short_msg = if msg.starts_with("[MediaUpload]:") {
+                                let parts: Vec<&str> = msg.splitn(3, ':').collect();
                                 if parts.len() == 3 {
-                                    format!("[MediaUpload]:{}:{}...", parts[1], &parts[2][..5.min(parts[2].len())])
+                                    format!("[MediaUpload]:{}:{}...", parts[1], &parts[2][..15.min(parts[2].len())])
                                 } else {
-                                    msg.1.clone()
+                                    msg.clone()
                                 }
                             } else {
-                                msg.1.clone()
+                                msg.clone()
                             };
 
                             ui.label(format!("    {}", short_msg));
@@ -223,7 +223,7 @@ impl ChatUIState {
                             if let Some(server_id) = self.selected_server {
                                 self.client_status.insert(client_id, ClientStatus::Connected);
                                 self.server_client_map.entry(server_id).or_default().push(client_id);
-                                push_gui_message(&self.gui_input, client_id, server_id, format!("[Login]::{}",server_id));
+                                push_gui_message(&self.gui_input, client_id, format!("[Login]::{}",server_id));
                                 let code = format!("{:06}", rand::random::<u32>() % 1_000_000);
                                 self.client_server_codes.insert((client_id, server_id), code);
                             }
@@ -250,7 +250,7 @@ impl ChatUIState {
                     if let Some(peer_id) = requested_chat_with {
                         if let Some(server_id) = self.selected_server {
                             self.pending_chat_request = Some((client_id, peer_id));
-                            push_gui_message(&self.gui_input, client_id, server_id, format!("[ChatRequest]::{peer_id}"));
+                            push_gui_message(&self.gui_input, client_id, format!("[ChatRequest]::{peer_id}"));
                         }
                     }
 
@@ -287,7 +287,7 @@ impl ChatUIState {
                                 .show(ui.ctx(), |ui| {
                                     if ui.button("Request Client List").clicked() {
                                         if let Some(client_id) = self.selected_client {
-                                            push_gui_message(&self.gui_input, client_id, server_id, "[ClientListRequest]".to_string());
+                                            push_gui_message(&self.gui_input, client_id, "[ClientListRequest]".to_string());
                                         }
                                     }
 
@@ -305,7 +305,7 @@ impl ChatUIState {
                                                         Ok(bytes) => {
                                                             let base64_data = base64::encode(bytes);
                                                             let msg = format!("[MediaUpload]:{}:{}", media_name, base64_data);
-                                                            push_gui_message(&self.gui_input, client_id, server_id, msg);
+                                                            push_gui_message(&self.gui_input, client_id, msg);
                                                         }
                                                         Err(e) => {
                                                             eprintln!("Error reading image file '{}': {}", path, e);
@@ -327,7 +327,7 @@ impl ChatUIState {
                                                 let trimmed = self.download_media_name_input.trim();
                                                 if !trimmed.is_empty() {
                                                     let msg = format!("[MediaDownloadRequest]:{}", trimmed);
-                                                    push_gui_message(&self.gui_input, client_id, server_id, msg);
+                                                    push_gui_message(&self.gui_input, client_id, msg);
                                                     self.download_result_message = Some(format!("Requested \"{}\"", trimmed));
                                                     self.download_media_name_input.clear();
                                                 }
@@ -346,7 +346,7 @@ impl ChatUIState {
                                             if let Some(clients) = self.server_client_map.get_mut(&server_id) {
                                                 clients.retain(|&c| c != client_id);
                                             }
-                                            push_gui_message(&self.gui_input, client_id, server_id, "[Logout]".to_string());
+                                            push_gui_message(&self.gui_input, client_id, "[Logout]".to_string());
                                         }
                                     }
                                     ui.separator();
@@ -479,7 +479,7 @@ impl ChatUIState {
                         ui.label(RichText::new(format!("⚠️ Click on Client #{} to respond to this request", peer)).color(Color32::YELLOW));
                     } else if confirm_clicked {
                         if let Some(server_id) = self.selected_server {
-                            push_gui_message(&self.gui_input, initiator, server_id, format!("[ChatFinish]::{peer}"));
+                            push_gui_message(&self.gui_input, initiator, format!("[ChatFinish]::{peer}"));
                         }
 
                         let key = (initiator.min(peer), initiator.max(peer));
@@ -528,7 +528,7 @@ impl ChatUIState {
                                 self.chat_history.entry(key).or_default().push(msg.clone());
                             }
 
-                            push_gui_message(&self.gui_input, from, to, format!("[MessageTo]::{to}::{}", msg.content));
+                            push_gui_message(&self.gui_input, from, format!("[MessageTo]::{to}::{}", msg.content));
                             self.chat_input.clear();
                         }
                     }
@@ -563,7 +563,7 @@ impl ChatUIState {
                         ) {
                             let correct_code = self.client_server_codes.get(&(client_id, server_id));
                             if correct_code == Some(&self.history_code_input) {
-                                push_gui_message(&self.gui_input, client_id, target_id, format!("[HistoryRequest]::{}::{}",client_id, target_id));
+                                push_gui_message(&self.gui_input, client_id, format!("[HistoryRequest]::{}::{}",client_id, target_id));
                                 self.history_code_success = true;
                                 self.history_code_failed = false;
                                 self.show_history_popup = false; // close popup
