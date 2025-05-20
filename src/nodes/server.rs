@@ -321,6 +321,7 @@ impl server {
                     self.send_chat_message(session_id, client_id, confirm, routing_header);
                 }
             }
+            //Providing Media list if asked by client --> so they can get to know before what to download
             ["[MediaListRequest]"] => {
                 let list = self.media_storage.keys()
                     .cloned()
@@ -338,6 +339,7 @@ impl server {
                 self.send_chat_message(session_id, client_id, response, routing_header);
             }
             // da chi lo ricevo??? La richiesta dovrebbe mandarmela un client. Oppure il simulationController dalla GUI???
+            //MEDIABROADCAST --> sending to all registered clients
             ["[MediaBroadcast]", media_name, base64_data] => {
                 self.media_storage.insert(media_name.to_string(), (client_id, base64_data.to_string()));
                 for &target_id in &self.registered_clients {
