@@ -52,6 +52,7 @@ pub struct MyClient{
     pub node_id_to_index : HashMap<NodeId, NodeIndex>, //mapping from node_id to inner indices of the graph
     pub active_flood_discoveries: HashMap<u64, FloodDiscoveryState>, //structure to take track of flood_request/response
     pub gui_input : SharedGuiInput,
+    pub connected_server_id : Option<NodeId>,
     //pub finalized_flood_discoveries : bool,
 }
 
@@ -64,7 +65,7 @@ struct FloodDiscoveryState {
 }
 
 impl MyClient {
-    pub fn new(id: NodeId, sim_contr_recv: Receiver<DroneCommand>, sim_contr_send: Sender<DroneEvent>, packet_recv: Receiver<Packet>, packet_send: HashMap<NodeId, Sender<Packet>>, sent_messages: HashMap<u64, SentMessageInfo>, gui_input: SharedGuiInput) -> Self {
+    pub fn new(id: NodeId, sim_contr_recv: Receiver<DroneCommand>, sim_contr_send: Sender<DroneEvent>, packet_recv: Receiver<Packet>, packet_send: HashMap<NodeId, Sender<Packet>>, sent_messages: HashMap<u64, SentMessageInfo>, gui_input: SharedGuiInput, connected_server_id : Option<NodeId>) -> Self {
         Self {
             id,
             sim_contr_recv,
@@ -77,6 +78,7 @@ impl MyClient {
             node_id_to_index: HashMap::new(),
             active_flood_discoveries: HashMap::new(),
             gui_input,
+            connected_server_id : None,
             //finalized_flood_discoveries : HashSet::new(),
         }
     }
@@ -90,8 +92,8 @@ impl MyClient {
         }
         loop {
             let gui_messages = pop_all_gui_messages(&self.gui_input, self.id);
-            for (server_id, msg_string) in gui_messages {
-                self.process_gui_command(server_id, msg_string);
+            for (src_id, msg_string) in gui_messages {
+                self.process_gui_command(src_id, msg_string);
             }
             self.check_flood_discoveries_timeouts();
             select_biased! {
@@ -688,89 +690,112 @@ impl MyClient {
         }
     }
 
-    fn process_gui_command(&mut self, destination_server_id: NodeId, command_string: String) {
-        println!("Client {} processing GUI command '{}' for server {}", self.id, command_string, destination_server_id);
+    fn process_gui_command(&mut self, dest_id: NodeId, command_string: String) {
+        println!("Client {} processing GUI command '{}' for {}", self.id, command_string, dest_id);
         let tokens: Vec<&str> = command_string.trim().split("::").collect();
-        let command_type = tokens.first().unwrap_or(&"");
-        let high_level_message_info: Option<(String, NodeId)> = match *command_type {
-            "[Login]" => {
-                println!("Client {} processing Login command", self.id);
-                Some(("[Login]".to_string(), destination_server_id))
+        let command_type_str = tokens.get(0).unwrap_or(&"");
+        let high_level_message_info: Option<String> = match tokens.as_slice() {
+            ["[Login]", server_id] => {
+                if let Ok(parsed_server_id) = server_id.parse::<NodeId>() {
+                    println!("Client {} processing Login command for server {}", self.id, parsed_server_id);
+                    self.connected_server_id = Some(parsed_server_id);
+                    None
+                } else {
+                    eprintln!("Client {} received Login command with invalid server {}", self.id, server_id);
+                    None
+                }
             },
-            "[Logout]" => {
-                println!("Client {} processing Logout command", self.id);
-                Some(("[Logout]".to_string(), destination_server_id))
+            ["[Logout]"] => {
+                if let Some(mem_server_id) = self.connected_server_id {
+                    println!("Client {} processing Logout command via server {}", self.id, mem_server_id);
+                    Some("[Logout]".to_string())
+                } else {
+                    eprintln!("Client {} received Logout command while not logged in. Ignoring", self.id);
+                    None
+                }
             },
-            "[ClientListRequest]" => {
-                println!("Client {} processing ClientListRequest command", self.id);
-                Some(("[ClientListRequest]".to_string(), destination_server_id))
+            ["[ClientListRequest]"] => {
+                if let Some(mem_server_id) = self.connected_server_id {
+                    println!("Client {} processing ClientListRequest command via server {}", self.id, mem_server_id);
+                    Some("[ClientListRequest]".to_string())
+                } else {
+                    eprintln!("Client {} received ClientListRequest command while not logged in. Ignoring", self.id);
+                    None
+                }
             },
-            "[MessageTo]" => {
-                if tokens.len() >= 3 {
-                    let target_id_str = tokens[3];
-                    let message_content = tokens[4];
-                    if let Ok(target_client_id) = target_id_str.parse::<NodeId>() {
-                        println!("Client {} processing MessageTo command for client {} with content {}", self.id, target_client_id, message_content);
-                        Some((format!("[MessageTo]::{target_client_id}::{message_content}"), destination_server_id))
+            ["[MessageTo]", target_id, message_content] => {
+                    if let Ok(target_client_id) = target_id.parse::<NodeId>() {
+                        if let Some(mem_server_id) = self.connected_server_id {
+                            println!("Client {} processing MessageTo command for client {} via server {} with content {}", self.id, target_client_id, mem_server_id, message_content);
+                            Some(format!("[MessageTo]::{target_client_id}::{message_content}"))
+                        } else {
+                            eprintln!("Client {} received MessageTo command while not logged in. Ignoring", self.id);
+                            None
+                        }
                     } else {
-                        eprintln!("Client {} received MessageTo command with invalid target_id: {}", self.id, target_id_str);
+                        eprintln!("Client {} received MessageTo command with invalid target_id: {}", self.id, target_id);
                         None
                     }
-                } else {
-                    eprintln!("Client {} received invalid MessageTo command format: {}", self.id, command_string);
-                    None
-                }
             },
-            "[ChatRequest]" => {
-                if tokens.len() >= 2 {
-                    let peer_id_str = tokens[3];
-                    if let Ok(peer_id) = peer_id_str.parse::<NodeId>() {
-                        println!("Client {} processing ChatRequest command for peer {}", self.id, peer_id);
-                        Some((format!("[ChatRequest]::{peer_id}"), destination_server_id))
+            ["[ChatRequest]", peer_id] => {
+                    if let Ok(_peer_id) = peer_id.parse::<NodeId>() {
+                        if let Some(mem_server_id) = self.connected_server_id {
+                            println!("Client {} processing ChatRequest command for peer {} via server {}", self.id, _peer_id, mem_server_id);
+                            Some(format!("[ChatRequest]::{_peer_id}"))
+                        } else {
+                            eprintln!("Client {} received ChatRequest command while not logged in. Ignoring", self.id);
+                            None
+                        }
                     } else {
-                        eprintln!("Client {} received ChatRequest command with invalid peer_id: {}", self.id, peer_id_str);
+                        eprintln!("Client {} received ChatRequest command with invalid peer_id: {}", self.id, peer_id);
                         None
                     }
-                } else {
-                    eprintln!("Client {} received invalid ChatRequest command format: {}", self.id, command_string);
-                    None
-                }
             },
-            "[ChatFinish]" => {
-                if tokens.len() >= 2 {
-                    let peer_id_str = tokens[3];
-                    if let Ok(peer_id) = peer_id_str.parse::<NodeId>() {
-                        println!("Client {} processing ChatFinished command for peer {}", self.id, peer_id);
-                        Some((format!("[ChatFinish]::{peer_id}"), destination_server_id))
+            ["[ChatFinish]", peer_id] => {
+                    if let Ok(_peer_id) = peer_id.parse::<NodeId>() {
+                        if let Some(mem_server_id) = self.connected_server_id {
+                            println!("Client {} processing ChatFinished command for peer {} via server {}", self.id, _peer_id, mem_server_id);
+                            Some(format!("[ChatFinish]::{_peer_id}"))
+                        } else {
+                            eprintln!("Client {} received ChatFinish command while not logged in. Ignoring", self.id);
+                            None
+                        }
                     } else {
-                        eprintln!("Client {} received ChatFinish command with invalid peer_id: {}", self.id, peer_id_str);
+                        eprintln!("Client {} received ChatFinish command with invalid peer_id: {}", self.id, peer_id);
                         None
                     }
-                } else {
-                    eprintln!("Client {} received invalid ChatFinish command format: {}", self.id, command_string);
-                    None
-                }
             },
-            "[MediaUpload]" => {
-                if tokens.len() >= 3 {
-                    let media_name = tokens[1];
-                    let base64_data = tokens[42];
-                    println!("Client {} processing MediaUpload command for media '{}'", self.id, media_name);
-                    Some((format!("[MediaUpload]::{media_name}::{base64_data}"), destination_server_id))
-                } else {
-                    eprintln!("Client {} received invalid MediaUpload command format: {}", self.id, command_string);
-                    None
-                }
+            ["[MediaUpload]", media_name, base64_data] => {
+                    if let Some(mem_server_id) = self.connected_server_id {
+                        println!("Client {} processing MediaUpload command for media '{}' via server {}", self.id, media_name, mem_server_id);
+                        Some(format!("[MediaUpload]::{media_name}::{base64_data}"))
+                    } else {
+                        eprintln!("Client {} received MediaUpload command while not logged in. Ignoring", self.id);
+                        None
+                    }
             },
-            "[MediaDownloadRequest]" => {
-                if tokens.len() >= 2 {
-                    let media_name = tokens[1];
-                    println!("Client {} processing MediaDownloadRequest command for media '{}'", self.id, media_name);
-                    Some((format!("[MediaDownloadRequest]::{media_name}"), destination_server_id))
-                } else {
-                    eprintln!("Client {} received invalid MediaDownloadRequest command format: {}", self.id, command_string);
-                    None
-                }
+            ["[MediaDownloadRequest]", media_name] => {
+                    if let Some(mem_server_id) = self.connected_server_id {
+                        println!("Client {} processing MediaDownloadRequest command for media '{}' via server {}", self.id, media_name, mem_server_id);
+                        Some(format!("[MediaDownloadRequest::{media_name}"))
+                    } else {
+                        eprintln!("Client {} received MediaDownloadRequest command while not logged in. Ignoring", self.id);
+                        None
+                    }
+            },
+            ["[HistoryRequest]", client_id, target_id] => {
+                    if let (Some(_client_id), Some(_target_id)) = (client_id.parse::<NodeId>().ok(), target_id.parse::<NodeId>().ok()) {
+                        if let Some(mem_server_id) = self.connected_server_id {
+                            println!("Client {} processing HistoryRequest command for history between {} and {} via server {}", self.id, _client_id, _target_id, mem_server_id);
+                            Some(format!("[HistoryRequest]::{_client_id}::{_target_id}"))
+                        } else {
+                            eprintln!("Client {} received HistoryRequest command while not logged in. Ignoring", self.id);
+                            None
+                        }
+                    } else {
+                        eprintln!("Client {} received HistoryRequest command with invalid client/target id: {}", self.id, command_string);
+                        None
+                    }
             },
             _ => {
                 eprintln!("Client {} received unrecognized GUI command: {}", self.id, command_string);
@@ -778,67 +803,74 @@ impl MyClient {
             }
         };
         //- - - - route evaluation towards destination server - - - -
-        if let Some((high_level_message_content, target_destination_id)) = high_level_message_info {
-            let route_option = self.best_path(self.id, destination_server_id);
-            let route = match route_option {
-                Some(path) => {
-                    println!("Client {} computed route to server {}: {:?}", self.id, destination_server_id, path);
-                    path
-                },
-                None => {
-                    eprintln!("Client {} could not compute route to server {}. Starting flood discovery.", self.id, destination_server_id);
-                    self.start_flood_discovery();
-                    return;
-                }
-            };
-            let routing_header = SourceRoutingHeader {
-                hops: route.clone(),
-                hop_index: 1,
-            };
-            let message_data_bytes = high_level_message_content.into_bytes();
-            const FRAGMENT_SIZE: usize = 128;
-            let total_fragments = (message_data_bytes.len() + FRAGMENT_SIZE - 1) / FRAGMENT_SIZE;
-            let mut fragments = Vec::new();
-            let session_id = random::<u64>();
-            for i in 0..total_fragments {
-                let start = i * FRAGMENT_SIZE;
-                let end = (start + FRAGMENT_SIZE).min(message_data_bytes.len());
-                let fragment_data_slice = &message_data_bytes[start..end];
-                let mut data: [u8; FRAGMENT_SIZE] = [0; FRAGMENT_SIZE];
-                data[..fragment_data_slice.len()].copy_from_slice(fragment_data_slice);
-                let len = fragment_data_slice.len();
-                fragments.push(Fragment {
-                    fragment_index: i as u64,
-                    total_n_fragments: total_fragments as u64,
-                    length: len as u8,
-                    data,
-                });
-            }
-            //println!("Client {} fragmented message into {} fragments for session {}", self.id, total_fragments, session_id);
-            self.sent_messages.insert(session_id, SentMessageInfo {
-                fragments: fragments.clone(),
-                original_routing_header: routing_header.clone(),
-                received_ack_indices: HashSet::new(),
-                route_needs_recalculation: false,
-            });
-            println!("Client {} stored message info for session {}", self.id, session_id);
-            if routing_header.hops.len() > routing_header.hop_index {
-                let first_hop = routing_header.hops[routing_header.hop_index];
-                println!("Client {} sending message fragments for session {} starting with hop {}", self.id, session_id, first_hop);
-                for fragment in fragments {
-                    let packet = Packet {
-                        pack_type: PacketType::MsgFragment(fragment.clone()),
-                        routing_header: routing_header.clone(),
-                        session_id,
-                    };
-                    match self.send_to_neighbor(first_hop, packet) {
-                        Ok(()) => println!("Client {} sent fragment {} for session {} to  {}", self.id, fragment.fragment_index, session_id, first_hop),
-                        Err(e) => eprintln!("Client {} Failed to send fragment {} for session {} to {}: {}", self.id, fragment.fragment_index, session_id, first_hop, e),
+        if let Some(high_level_message_content) = high_level_message_info {
+            let target_dest_id_for_sending = self.connected_server_id;
+            if let Some(id_to_send_to) = target_dest_id_for_sending {
+                let route_option = self.best_path(self.id, id_to_send_to);
+                let route = match route_option {
+                    Some(path) => {
+                        println!("Client {} computed route to server {}: {:?}", self.id, id_to_send_to, path);
+                        path
+                    },
+                    None => {
+                        eprintln!("Client {} could not compute route to server {}. Starting flood discovery.", self.id, dest_id);
+                        self.start_flood_discovery();
+                        return;
                     }
+                };
+                let routing_header = SourceRoutingHeader {
+                    hops: route.clone(),
+                    hop_index: 1,
+                };
+                let message_data_bytes = high_level_message_content.into_bytes();
+                const FRAGMENT_SIZE: usize = 128;
+                let total_fragments = (message_data_bytes.len() + FRAGMENT_SIZE - 1) / FRAGMENT_SIZE;
+                let mut fragments = Vec::new();
+                let session_id = random::<u64>();
+                for i in 0..total_fragments {
+                    let start = i * FRAGMENT_SIZE;
+                    let end = (start + FRAGMENT_SIZE).min(message_data_bytes.len());
+                    let fragment_data_slice = &message_data_bytes[start..end];
+                    let mut data: [u8; FRAGMENT_SIZE] = [0; FRAGMENT_SIZE];
+                    data[..fragment_data_slice.len()].copy_from_slice(fragment_data_slice);
+                    let len = fragment_data_slice.len();
+                    fragments.push(Fragment {
+                        fragment_index: i as u64,
+                        total_n_fragments: total_fragments as u64,
+                        length: len as u8,
+                        data,
+                    });
                 }
-            } else {
-                eprintln!("Client {} has no valid first hop in computed route {:?} to send the message to!", self.id, route);
-                self.start_flood_discovery();
+                //println!("Client {} fragmented message into {} fragments for session {}", self.id, total_fragments, session_id);
+                self.sent_messages.insert(session_id, SentMessageInfo {
+                    fragments: fragments.clone(),
+                    original_routing_header: routing_header.clone(),
+                    received_ack_indices: HashSet::new(),
+                    route_needs_recalculation: false,
+                });
+                println!("Client {} stored message info for session {}", self.id, session_id);
+                if routing_header.hops.len() > routing_header.hop_index {
+                    let first_hop = routing_header.hops[routing_header.hop_index];
+                    println!("Client {} sending message fragments for session {} starting with hop {}", self.id, session_id, first_hop);
+                    for fragment in fragments {
+                        let packet = Packet {
+                            pack_type: PacketType::MsgFragment(fragment.clone()),
+                            routing_header: routing_header.clone(),
+                            session_id,
+                        };
+                        match self.send_to_neighbor(first_hop, packet) {
+                            Ok(()) => println!("Client {} sent fragment {} for session {} to  {}", self.id, fragment.fragment_index, session_id, first_hop),
+                            Err(e) => eprintln!("Client {} Failed to send fragment {} for session {} to {}: {}", self.id, fragment.fragment_index, session_id, first_hop, e),
+                        }
+                    }
+                } else {
+                    eprintln!("Client {} has no valid first hop in computed route {:?} to send the message to!", self.id, route);
+                    self.start_flood_discovery();
+                }
+                if command_type_str == &"[Logout]" {
+                    println!("Client {} successfully sent Logout message. Disconnecting internally.", self.id);
+                    self.connected_server_id = None;
+                }
             }
         }
     }
@@ -906,77 +938,6 @@ impl MyClient {
         }
     }
 
-    fn send_chat_message(&mut self, destination_server_id: NodeId, target_client_id: NodeId, message_text: String) {
-        println!("Client {} preparing to send chat message to client {} via server {}", self.id, target_client_id, destination_server_id);
-        //- - - - route computation - - - -
-        let route_option = self.best_path(self.id, destination_server_id);
-        let route = match route_option {
-            Some(path) => {
-                println!("Client {} computed route: {:?}", self.id, path);
-                path
-            },
-            None => {
-                eprintln!("Client {} could not compute route to server {}", self.id, destination_server_id);
-                return;
-            }
-        };
-
-        let routing_header = SourceRoutingHeader {
-            hops: route.clone(),
-            hop_index: 1,
-        };
-
-        //- - - - creation of high level message - - - -
-        let high_level_message_content = format!("[message_for]::{client_id}::{message}", client_id = target_client_id, message = message_text); //DA SISTEMARE, FATTO DA IA
-        let message_data_bytes = high_level_message_content.into_bytes();
-
-        //- - - - message fragmentation - - - -
-        const FRAGMENT_SIZE: usize = 128;
-        let total_fragments = (message_data_bytes.len() + FRAGMENT_SIZE - 1) / FRAGMENT_SIZE;
-        let mut fragments: Vec<Fragment> = Vec::new();
-        let session_id = random::<u64>();
-        for i in 0..total_fragments {
-            let start = i * FRAGMENT_SIZE;
-            let end = std::cmp::min(start + FRAGMENT_SIZE, message_data_bytes.len());
-            let len = end - start;
-            let mut data_array = [0u8; 128];
-            data_array[..len].copy_from_slice(&message_data_bytes[start..end]);
-
-            fragments.push(Fragment {
-                fragment_index: i as u64,
-                total_n_fragments: total_fragments as u64,
-                length: len as u8,
-                data: data_array,
-            });
-        }
-        println!("Client {} fragmented message into {} fragments for session {}", self.id, total_fragments, session_id);
-
-        self.sent_messages.insert(session_id, SentMessageInfo {
-            fragments: fragments.clone(),
-            original_routing_header: routing_header.clone(),
-            received_ack_indices: HashSet::new(),
-            route_needs_recalculation: false,
-        });
-
-        //- - - - sending fragmented message - - - -
-        if routing_header.hops.len() > routing_header.hop_index {
-            let first_hop = routing_header.hops[routing_header.hop_index];
-            for fragment in fragments {
-                let packet = Packet {
-                    pack_type: PacketType::MsgFragment(fragment.clone()),
-                    routing_header: routing_header.clone(),
-                    session_id,
-                };
-                match self.send_to_neighbor(first_hop, packet) {
-                    Ok(()) => println!("Client {} sent fragment {} for session {} to {}", self.id, fragment.fragment_index, session_id, first_hop),
-                    Err(e) => eprintln!("Client {} Failed to send fragment {} for session {} to {}: {}", self.id, fragment.fragment_index, session_id, first_hop, e),
-                }
-            }
-        } else {
-            eprintln!("Client {} has no valid first hop in computed route {:?} to send the message to!", self.id, route);
-        }
-    }
-
     fn get_node_info(&self, node_id: NodeId) -> Option<&NodeInfo> {
         self.node_id_to_index.get(&node_id).and_then(|&idx| self.network_graph.node_weight(idx))
     }
@@ -1034,6 +995,7 @@ mod tests {
             packet_send_map,
             HashMap::new(),
             gui_input.clone(),
+            None,
         );
 
         (client, sim_contr_recv_tx, sim_contr_send_rx, packet_recv_tx, neighbor_receivers, gui_input)
@@ -1116,7 +1078,7 @@ mod tests {
         client.process_received_high_level_message = |_, msg_string, stc_id, sess_id| {
             println!("Mocked processing high-level message: '{}' from {} (session {})", msg_string, source_id, sess_id);
             high_level_message_processed = true;
-            //possibile aggiunta asserzioni messaggio riassemblato
+            //possibile aggiunta asserzioni messaggio ri-assemblato
             let expected_message = "AABBCCDD".to_string();
             //in questo test unitario, i byte sono {1..15} quindi il messaggio decodificato sarebbe "0102030405060708090a0b0c0d0e0f" in hex
             //dobbiamo testare che 'data' contenga i byte corretti e che 'process_received_high_level_message' venga chiamata
@@ -1126,7 +1088,7 @@ mod tests {
 
         client.reassemble_packet(&fragment3, &mut packet3);
         assert!(!client.received_messages.contains_key(&session_id));
-        //verifica che la funzione di processamento del messaggio di livello si stata chiamata
+        //verifica che la funzione di processing del messaggio di livello si stata chiamata
         //se la mock non ha effetti esterni, si può solo dedurre che sarebbe stata chiamata se non fosse mockata
 
         //ripristina funzione originale o ridefinisci per ogni test
