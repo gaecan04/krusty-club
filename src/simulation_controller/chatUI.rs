@@ -5,6 +5,7 @@ use crate::simulation_controller::gui_input_queue::{push_gui_message, new_gui_in
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 #[derive(Clone)]
 pub struct ChatMessage {
@@ -55,6 +56,10 @@ pub struct ChatUIState {
     pub download_media_name_input: String,
     pub download_result_message: Option<String>,
 
+    pub show_broadcast_list: bool,
+
+    broadcast_result_message: Option <String>,
+    pub broadcast_result_time: Option<Instant>,
 }
 
 impl ChatUIState {
@@ -88,6 +93,10 @@ impl ChatUIState {
             download_media_name_input: String::new(),
             download_result_message: None,
 
+            show_broadcast_list: false,
+
+            broadcast_result_message: None,
+            broadcast_result_time: None,
         }
     }
 
@@ -144,19 +153,33 @@ impl ChatUIState {
             }
 
             ui.separator();
-            ui.label(RichText::new("GUI Input Queue (per client)").strong());
+            ui.label(RichText::new("GUI Input Queue").strong());
 
             if let Ok(map) = self.gui_input.lock() {
+
                 if map.is_empty() {
                     ui.label("No pending messages.");
                 } else {
-                    for (client_id, messages) in map.iter() {
-                        ui.label(format!("Client #{} →", client_id));
+                    for (sender_id, messages) in map.iter() {
+                        let label = if self.servers.contains(sender_id) {
+                            format!("Server #{} →", sender_id)
+                        } else {
+                            format!("Client #{} →", sender_id)
+                        };
+                        ui.label(label);
                         for msg in messages {
-                            let short_msg = if msg.starts_with("[MediaUpload]:") {
-                                let parts: Vec<&str> = msg.splitn(3, ':').collect();
+                            let short_msg = if msg.starts_with("[MediaBroadcast]:") {
+                                let parts: Vec<&str> = msg.splitn(3, "::").collect();
                                 if parts.len() == 3 {
-                                    format!("[MediaUpload]:{}:{}...", parts[1], &parts[2][..15.min(parts[2].len())])
+                                    format!("[MediaBroadcast]::{}::{}...", parts[1], &parts[2][..5.min(parts[1].len())])
+                                }
+                                else {
+                                    msg.clone()
+                                }
+                            } else if msg.starts_with("[MediaUpload]:") {
+                                let parts: Vec<&str> = msg.splitn(3, "::").collect();
+                                if parts.len() == 3 {
+                                    format!("[MediaUpload]::{}::{}...", parts[1], &parts[2][..5.min(parts[2].len())])
                                 } else {
                                     msg.clone()
                                 }
@@ -165,9 +188,9 @@ impl ChatUIState {
                             };
 
                             ui.label(format!("    {}", short_msg));
-
                         }
                     }
+
                 }
             } else {
                 ui.label("⚠️ Failed to lock GUI input buffer");
@@ -190,7 +213,9 @@ impl ChatUIState {
                 };
                 if ui.add(egui::Button::new(format!("Client #{client_id}")).fill(color)).clicked() {
                     self.selected_client = Some(client_id);
+                    self.selected_server = None; // hide server-specific rows
                 }
+
             }
         });
 
@@ -199,7 +224,10 @@ impl ChatUIState {
             for &server_id in &self.servers {
                 if ui.add(egui::Button::new(format!("Server #{server_id}")).fill(Color32::LIGHT_BLUE)).clicked() {
                     self.selected_server = Some(server_id);
+                    self.selected_client = None; // hide client-specific rows
+                    self.show_broadcast_list = false;
                 }
+
             }
         });
 
@@ -209,10 +237,11 @@ impl ChatUIState {
 
             match status {
                 ClientStatus::Offline => {
+
                     ui.horizontal(|ui| {
                         ui.label("Connect to Server:");
                         egui::ComboBox::from_id_source("server_select")
-                            .selected_text(self.selected_server.map_or("Select...".into(), |id| format!("Server #{id}")))
+                            .selected_text(self.selected_server.map_or("Select...".into(), |id| format!("Server {id}")))
                             .show_ui(ui, |ui| {
                                 for &server_id in &self.servers {
                                     if ui.selectable_label(self.selected_server == Some(server_id), format!("Server #{server_id}")).clicked() {
@@ -254,6 +283,9 @@ impl ChatUIState {
                         if let Some(server_id) = self.selected_server {
                             self.pending_chat_request = Some((client_id, peer_id));
                             push_gui_message(&self.gui_input, client_id, format!("[ChatRequest]::{peer_id}"));
+
+                            // 🔧 Select the target so that the popup is usable
+                            self.selected_client = Some(peer_id);
                         }
                     }
 
@@ -307,7 +339,7 @@ impl ChatUIState {
                                                     match std::fs::read(path) {
                                                         Ok(bytes) => {
                                                             let base64_data = base64::encode(bytes);
-                                                            let msg = format!("[MediaUpload]:{}:{}", media_name, base64_data);
+                                                            let msg = format!("[MediaUpload]::{}::{}", media_name, base64_data);
                                                             push_gui_message(&self.gui_input, client_id, msg);
                                                         }
                                                         Err(e) => {
@@ -329,7 +361,7 @@ impl ChatUIState {
                                             if let Some(client_id) = self.selected_client {
                                                 let trimmed = self.download_media_name_input.trim();
                                                 if !trimmed.is_empty() {
-                                                    let msg = format!("[MediaDownloadRequest]:{}", trimmed);
+                                                    let msg = format!("[MediaDownloadRequest]::{}", trimmed);
                                                     push_gui_message(&self.gui_input, client_id, msg);
                                                     self.download_result_message = Some(format!("Requested \"{}\"", trimmed));
                                                     self.download_media_name_input.clear();
@@ -344,12 +376,33 @@ impl ChatUIState {
                                     ui.separator();
 
                                     if ui.button("Logout").clicked() {
-                                        if let Some(server_id) = self.selected_server {
+                                        // Find the actual server the client is logged into
+                                        let maybe_server_id = self.server_client_map.iter()
+                                            .find(|(_, clients)| clients.contains(&client_id))
+                                            .map(|(server_id, _)| *server_id);
+
+                                        if let Some(server_id) = maybe_server_id {
+                                            // 1. Mark as offline
                                             self.client_status.insert(client_id, ClientStatus::Offline);
+
+                                            // 2. Remove from server's client list
                                             if let Some(clients) = self.server_client_map.get_mut(&server_id) {
                                                 clients.retain(|&c| c != client_id);
                                             }
+
+                                            // 3. Clear selected_client if needed (optional)
+                                            if self.selected_client == Some(client_id) {
+                                                self.selected_client = None;
+                                            }
+
+                                            // 4. Clear selected_server to avoid showing Broadcast UI
+                                            self.selected_server = None;
+
+                                            // 5. Push logout message
                                             push_gui_message(&self.gui_input, client_id, "[Logout]".to_string());
+                                            self.show_server_popup = None;
+                                            self.show_upload_media_list = false;
+
                                         }
                                     }
                                     ui.separator();
@@ -395,6 +448,49 @@ impl ChatUIState {
                     self.history_code_success = false;
                 }
             });
+        }
+        ui.separator();
+        if let Some(server_id) = self.selected_server {
+            ui.horizontal(|ui| {
+                if ui.button("Broadcast Media").clicked() {
+                    self.show_broadcast_list = !self.show_broadcast_list;
+                }
+
+                if self.show_broadcast_list {
+                    ui.label("Choose file:");
+                    for (media_name, path) in &self.media_files {
+                        if ui.button(media_name).clicked() {
+                            match std::fs::read(path) {
+                                Ok(bytes) => {
+                                    let base64_data = base64::encode(bytes);
+                                    let msg = format!("[MediaBroadcast]::{}::{}", media_name, base64_data);
+
+                                    // ✅ Push it into the SERVER’s GUI input buffer, not client’s
+                                    push_gui_message(&self.gui_input, server_id, msg.clone());
+                                    // Right after pushing the message:
+                                    //println!("📥 Pushed msg for NodeId {}: {}", server_id, msg);
+
+
+                                    self.broadcast_result_message = Some(format!("📤 Sent '{}' to server {}", media_name, server_id));
+                                    self.broadcast_result_time = Some(Instant::now());
+                                }
+                                Err(e) => {
+                                    self.broadcast_result_message = Some(format!("❌ Failed to read : {}", e));
+                                    self.broadcast_result_time = Some(Instant::now());
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            if let (Some(msg), Some(time)) = (&self.broadcast_result_message, &self.broadcast_result_time) {
+                if time.elapsed().as_secs_f32() < 2.0 {
+                    ui.label(RichText::new(msg).color(Color32::LIGHT_GREEN));
+                } else {
+                    self.broadcast_result_message = None;
+                    self.broadcast_result_time = None;
+                }
+            }
         }
 
         if let Some((requester, target)) = self.pending_chat_request {

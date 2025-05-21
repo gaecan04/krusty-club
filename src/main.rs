@@ -1,6 +1,5 @@
 mod network;
 mod nodes;
-mod utils;
 mod simulation_controller;
 use std::collections::HashMap;
 use std::error::Error;
