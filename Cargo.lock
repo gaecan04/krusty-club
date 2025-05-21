@@ -22,6 +22,7 @@ dependencies = [
  "LeDron_James",
  "ap2024_unitn_cppenjoyers_drone",
  "bagel_bomber",
+ "base64",
  "bincode",
  "config",
  "crossbeam",

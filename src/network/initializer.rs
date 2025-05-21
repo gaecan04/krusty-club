@@ -25,9 +25,6 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use crossbeam::channel;
 
-//for testing
-use Krusty_Club::Krusty_C;
-// Assuming these are defined elsewhere or imported
 use wg_2024::network::NodeId;
 use crate::simulation_controller::SC_backend::SimulationController;
 use crate::simulation_controller::gui_input_queue::SharedGuiInput;
@@ -315,8 +312,6 @@ impl ParsedConfig {
             }
         }
     }
-
-
 }
 
 
@@ -336,14 +331,7 @@ impl DroneImplementation for MyDrone {
     fn run(&mut self) {
         <Self as DroneTrait>::run(self);
     }
-
-    /*fn get_id(&self) -> NodeId {
-        self.get_id()
-    }*/
 }
-
-
-
 
 macro_rules! impl_drone_adapter {
     ($name:ty) => {
@@ -353,17 +341,10 @@ macro_rules! impl_drone_adapter {
 
                 }
 
-            /*fn get_id(&self) -> NodeId {
-                 println!("get id");
-                self.id // assumes all drones have an `id` field of type NodeId
-            }*/
+
         }
     };
 }
-
-
-
-
 
 // === Macro Calls for All 10 Drones ===
 impl_drone_adapter!(BagelBomber);
@@ -375,7 +356,7 @@ impl_drone_adapter!(LeDron_JamesDrone);
 impl_drone_adapter!(DrOnesDrone);
 impl_drone_adapter!(SkyLinkDrone);
 impl_drone_adapter!(RustasticDrone);
-impl_drone_adapter!(Krusty_C);
+impl_drone_adapter!(CppEnjoyersDrone);
 
 
 //So MyDrone is your fallback implementation, used only when a group’s implementation is missing or fails to register.
@@ -459,7 +440,7 @@ Group Krusty_club buys:
  */
 
 use LeDron_James::Drone as LeDron_JamesDrone; //ok
-//use ap2024_unitn_cppenjoyers_drone::CppEnjoyersDrone; //ok
+use ap2024_unitn_cppenjoyers_drone::CppEnjoyersDrone; //ok
 use dr_ones::Drone as DrOnesDrone; //ok
 use skylink::SkyLinkDrone; //ok
 use rustastic_drone::RustasticDrone; //ok
@@ -803,7 +784,7 @@ impl NetworkInitializer {
             let (client_tx, client_rx) = crossbeam_channel::unbounded();
             self.channels.insert(client_id, client_tx.clone());
 
-            client1::start_client(client_id, client_rx, senders,gui_input.clone());
+            client2::start_client(client_id, client_rx, senders,gui_input.clone());
             /*let mut client = client1::MyClient::new(client_id, sim_controller_recv.clone(), client_rx, senders, HashMap::new());
             thread::spawn(move || {
                 client.run();
