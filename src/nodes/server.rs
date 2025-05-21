@@ -18,6 +18,8 @@ use log::{info, error, warn, debug};
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
 use std::collections::VecDeque;
+use crate::simulation_controller::gui_input_queue::SharedGuiInput;
+
 
 #[derive(Clone, Debug)]
 pub struct NetworkGraph {
@@ -131,14 +133,15 @@ pub struct server {
     registered_clients: Vec<NodeId>,
     network_graph: NetworkGraph,
     chat_history: HashMap<(NodeId,NodeId), VecDeque<String>>,
-    media_storage: HashMap<String, String> // media name --> associated base64 encoding as String
+    media_storage: HashMap<String, (NodeId,String)>, // media name --> (uploader_id, associated base64 encoding as String)
+    pub gui_buffer_input: SharedGuiInput,
 
     //recovery_in_progress:  HashMap<(u64, NodeId), bool>, // Tracks if recovery is already in progress for a session
     //drop_counts: HashMap<(u64, NodeId), usize>, // Track number of drops per session
 }
 
 impl server {
-    pub(crate) fn new(id: u8, packet_sender: HashMap<NodeId,Sender<Packet>>, packet_receiver: Receiver<Packet>) -> Self {
+    pub(crate) fn new(id: u8, packet_sender: HashMap<NodeId,Sender<Packet>>, packet_receiver: Receiver<Packet>, gui_buffer_input: SharedGuiInput) -> Self {
         // Log server creation
         info!("Server {} created.", id);
 
@@ -153,6 +156,7 @@ impl server {
             network_graph: NetworkGraph::new(),
             chat_history:HashMap::new(),
             media_storage: HashMap::new(),
+            gui_buffer_input: gui_buffer_input,
         }
     }
 
@@ -165,6 +169,33 @@ impl server {
 
         info!("Server {} started running.", self.id);
         loop {
+            //check if the server is receiving MediaBroadcast commands from the gui
+            if let Ok(mut buffer )= self.gui_buffer_input.lock(){ //block the arc mutex
+                if let Some(messages) = buffer.remove(&(self.id as NodeId)) { //if i have pending messages i take them
+                    for message in messages {
+                        if let Some(stripped) = message.strip_prefix("[MediaBroadcast]::") {
+                            let parts: Vec<&str> = stripped.splitn(2, "::").collect();
+                            if parts.len() == 2 {
+                                let media_name = parts[0].to_string();
+                                let base64_data = parts[1].to_string();
+
+                                //qua è sottinteso che il media non è presente nel server, ma deve esserlo prima che venga ricevuto dalla GUI
+
+                                // 💾 Store and broadcast to all clients
+                                self.media_storage.insert(media_name.clone(), (self.id, base64_data.clone()));
+                                for &target_id in &self.registered_clients {
+                                    let forward = format!("[MediaDownloadResponse]::{}::{}", media_name, base64_data);
+                                    self.send_chat_message(0, target_id, forward, SourceRoutingHeader::empty_route());
+                                }
+
+                                // Acknowledge to GUI (optional)
+                                info!("📢 Broadcasted media '{}' from GUI for server {}", media_name, self.id);
+                            }
+                        }
+                    }
+                }
+            }
+            //first checking if I have pending messages from GUI, then treat everything from the receiver channel
             match self.packet_receiver.recv() {
                 Ok(mut packet) => {
                     match &packet.pack_type {
@@ -253,6 +284,9 @@ impl server {
                     if !self.registered_clients.contains(&client_id) {
                         self.registered_clients.push(client_id);
                         info!("Client {} registered to this server", client_id);
+
+                        let loging_acknowledgement= format!("[LoginAck]::{}", session_id);
+                        self.send_chat_message(session_id, client_id,loging_acknowledgement, routing_header);
                     }
                 } else {
                     error!("server_id in Login request is not the id of the server receiving the fragment!")
@@ -313,27 +347,49 @@ impl server {
                     let media_name = parts[0].to_string();
                     let base64_data = parts[1].to_string();
                     // Save the image media in the hashmap
-                    self.media_storage.insert(media_name.clone(), base64_data);
+                    self.media_storage.insert(media_name.clone(), (client_id, base64_data));
                     let confirm = format!("[MediaUploadAck]::{}", media_name);
                     self.send_chat_message(session_id, client_id, confirm, routing_header);
                 }
             }
+            //Providing Media list if asked by client --> so they can get to know before what to download
+            ["[MediaListRequest]"] => {
+                let list = self.media_storage.keys()
+                    .cloned()
+                    .collect::<Vec<String>>()
+                    .join(",");
+                let response = format!("[MediaListResponse]::{}", list);
+                self.send_chat_message(session_id, client_id, response, routing_header);
+            }
             ["[MediaDownloadRequest]", media_name] => {
-                let response = if let Some(base64_data) = self.media_storage.get(*media_name) {
+                let response = if let Some((owner,base64_data)) = self.media_storage.get(*media_name) {
                     format!("[MediaDownloadResponse]::{}::{}", media_name, base64_data)
                 } else {
                     "[MediaDownloadResponse]::ERROR::NotFound".to_string()
                 };
                 self.send_chat_message(session_id, client_id, response, routing_header);
             }
+            // da chi lo ricevo??? La richiesta dovrebbe mandarmela un client. Oppure il simulationController dalla GUI???
+            //MEDIABROADCAST --> sending to all registered clients
+            ["[MediaBroadcast]", media_name, base64_data] => {
+                self.media_storage.insert(media_name.to_string(), (client_id, base64_data.to_string()));
+                for &target_id in &self.registered_clients {
+                    // Avoid sending to the sender
+                    if target_id != client_id {
+                        let msg = format!("[MediaDownloadResponse]::{}::{}", media_name, base64_data);
+                        self.send_chat_message(session_id, target_id, msg.clone(), routing_header.clone());
+                    }
+                }
+                // Confirm broadcast to the sender
+                let ack = format!("[MediaBroadcastAck]::{}::Broadcasted", media_name);
+                self.send_chat_message(session_id, client_id, ack, routing_header);
+            }
             ["[ChatFinish]"] => {
                 info!("Client {} finished chat in session {}", client_id, session_id);
             }
             ["[Logout]"] => {
-                if let Some(clients) = self.registered_clients.get_mut(&(session_id as NodeId)) {
-                    clients.retain(|&id| id != client_id);
-                    info!("Client {} logged out from session {}", client_id, session_id);
-                }
+                self.registered_clients.retain(|&id| id != client_id);
+                info!("Client {} logged out from session {}", client_id, session_id);
             }
 
             _ => {
@@ -530,7 +586,6 @@ impl server {
                 return;
             }
         };
-
         let packet = Packet {
             session_id,
             routing_header: SourceRoutingHeader {
@@ -539,7 +594,6 @@ impl server {
             },
             pack_type: PacketType::MsgFragment(fragment),
         };
-
         if let Some(sender) = self.packet_sender.get(&target_id) {
             if let Err(e) = sender.send(packet) {
                 error!("Failed to send chat response to {}: {:?}", target_id, e);
