@@ -82,62 +82,6 @@ impl NetworkApp {
         app
     }
 
-    /*
-    fn set_topology(&mut self, topology: &str,ctx: &egui::Context) {
-        // Attempt to load and parse the network configuration
-        let config_path = if topology.ends_with(".toml") {
-            topology.to_string()
-        } else {
-            format!("topologies/{}.toml", topology)
-        };
-        match crate::network::TOML_parser::parse_config(&config_path) {
-            Ok(config) => {
-                // Log success and network stats
-                self.simulation_log.push(format!("Loaded topology '{}'", topology));
-                self.simulation_log.push(format!(
-                    "Network has {} drones, {} clients, {} servers",
-                    config.drone.len(),
-                    config.client.len(),
-                    config.server.len()
-                ));
-
-                // Detect topology type and log it
-                let config_arc = Arc::new(Mutex::new(config));
-                if let Some(topology_name) = config_arc.lock().unwrap().detect_topology() {
-                    self.simulation_log.push(format!("Detected topology: {}", topology_name));
-                } else {
-                    self.simulation_log.push("Could not detect known topology (may be custom)".to_string());
-                }
-
-                // Store the config
-                self.network_config = Some(config_arc.clone());
-
-                // Initialize the network renderer with the config
-                self.network_renderer = Some(NetworkRenderer::new_from_config(topology, 50.0, 50.0, config_arc.clone()));
-
-                // Pass controller_send to NetworkRenderer if available
-                if let (Some(renderer), Some(sender)) = (&mut self.network_renderer, &self.controller_send) {
-                    renderer.set_controller_sender(sender.clone());
-                    self.simulation_log.push("Controller sender connected to network renderer".to_string());
-                }
-
-                // Pass controller to the renderer if available
-                if let (Some(renderer), Some(controller)) = (&mut self.network_renderer, &self.simulation_controller) {
-                    renderer.set_simulation_controller(controller.clone());
-                    self.simulation_log.push("Simulation controller connected to network renderer".to_string());
-                }
-
-                self.selected_topology = Some(topology.to_string());
-                self.topology_selected = true;
-                self.state = AppState::Simulation;
-            }
-            Err(e) => {
-                // Log error
-                self.simulation_log.push(format!("Failed to load topology '{}': {}", topology, e));
-            }
-        }
-
-    }*/
 
     fn flood_network(&mut self) {
         self.simulation_log.push("Flood Network initiated".to_string());
@@ -579,82 +523,6 @@ impl NetworkApp {
         }
     }
 
-
-    /*
-    fn render_topology_selection(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.heading("Select Network Topology");
-                ui.separator();
-
-                ui.add_space(50.0);
-
-                ui.horizontal(|ui| {
-                    // Star Topology Button
-                    if ui.button("Star Topology").clicked() {
-                        self.set_topology("star",ctx);
-                    }
-
-                    // Double Line Topology Button
-                    if ui.button("Double Line Topology").clicked() {
-                        self.set_topology("double_line",ctx);
-                    }
-
-                    // Butterfly Topology Button
-                    if ui.button("Butterfly Topology").clicked() {
-                        self.set_topology("butterfly",ctx);
-                    }
-                });
-
-                ui.add_space(20.0);
-
-                // Back to Welcome Button
-                if ui.button("Back to Welcome").clicked() {
-                    self.state = AppState::Welcome;
-                }
-            });
-        });
-    }
-/*
-    pub fn new_with_network_and_path(
-        cc: &eframe::CreationContext<'_>,
-        controller_send: Sender<DroneEvent>,
-        config: Arc<Mutex<ParsedConfig>>,
-        drone_factory: Arc<dyn Fn(
-            NodeId,
-            Sender<DroneEvent>,
-            Receiver<DroneCommand>,
-            Receiver<Packet>,
-            HashMap<NodeId, Sender<Packet>>,
-            f32,
-        ) -> Box<dyn Drone> + Send + Sync>,
-        config_path: &str,
-    ) -> Self {
-        let mut app = Self::new(cc);
-
-        // Apply values from existing setup
-        app.controller_send = Some(controller_send.clone());
-        app.simulation_controller = Some(Arc::new(Mutex::new(SimulationController::new(
-            config.clone(),
-            controller_send,
-            crossbeam_channel::unbounded().1, // dummy event_rx for GUI-only
-            drone_factory,
-        ))));
-        app.network_config = Some(config.clone());
-
-        // Load topology in the background (but DO NOT jump to Simulation yet)
-        app.set_topology(config_path);
-        app.topology_selected = true; // Mark that we did load something
-        // BUT: Keep `app.state = AppState::Welcome` so the welcome screen still shows
-        app.state=AppState::Welcome;
-        app
-    }
-
- */
- */
-
-
-
     fn render_chat_view(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             // ✅ TEMPORARY BOOTSTRAP
@@ -740,7 +608,7 @@ impl NetworkApp {
         }
 
 
-
+        app.chat_ui = ChatUIState::new(gui_input.clone());
         app.network_config = Some(config.clone());
         app.detect_and_log_topology(&config_path, config.clone());
         app.topology_selected = true;

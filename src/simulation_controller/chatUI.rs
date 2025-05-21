@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use crate::simulation_controller::gui_input_queue::{push_gui_message, new_gui_input_queue, SharedGuiInput};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct ChatMessage {
@@ -175,6 +176,7 @@ impl ChatUIState {
     }
 
     pub fn render(&mut self, ui: &mut egui::Ui, on_send: &mut impl FnMut(NodeId, NodeId, String)) {
+
         egui::SidePanel::right("server_status_panel").show_inside(ui, |ui| {
             self.render_server_info(ui);
         });
@@ -224,6 +226,7 @@ impl ChatUIState {
                                 self.client_status.insert(client_id, ClientStatus::Connected);
                                 self.server_client_map.entry(server_id).or_default().push(client_id);
                                 push_gui_message(&self.gui_input, client_id, format!("[Login]::{}",server_id));
+
                                 let code = format!("{:06}", rand::random::<u32>() % 1_000_000);
                                 self.client_server_codes.insert((client_id, server_id), code);
                             }
