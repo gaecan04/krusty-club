@@ -18,6 +18,8 @@ use log::{info, error, warn, debug};
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
 use std::collections::VecDeque;
+use crate::simulation_controller::gui_input_queue::SharedGuiInput;
+
 
 #[derive(Clone, Debug)]
 pub struct NetworkGraph {
@@ -131,14 +133,15 @@ pub struct server {
     registered_clients: Vec<NodeId>,
     network_graph: NetworkGraph,
     chat_history: HashMap<(NodeId,NodeId), VecDeque<String>>,
-    media_storage: HashMap<String, (NodeId,String)> // media name --> (uploader_id, associated base64 encoding as String)
+    media_storage: HashMap<String, (NodeId,String)>, // media name --> (uploader_id, associated base64 encoding as String)
+    pub gui_buffer_input: SharedGuiInput,
 
     //recovery_in_progress:  HashMap<(u64, NodeId), bool>, // Tracks if recovery is already in progress for a session
     //drop_counts: HashMap<(u64, NodeId), usize>, // Track number of drops per session
 }
 
 impl server {
-    pub(crate) fn new(id: u8, packet_sender: HashMap<NodeId,Sender<Packet>>, packet_receiver: Receiver<Packet>) -> Self {
+    pub(crate) fn new(id: u8, packet_sender: HashMap<NodeId,Sender<Packet>>, packet_receiver: Receiver<Packet>, gui_buffer_input: SharedGuiInput) -> Self {
         // Log server creation
         info!("Server {} created.", id);
 
@@ -153,6 +156,7 @@ impl server {
             network_graph: NetworkGraph::new(),
             chat_history:HashMap::new(),
             media_storage: HashMap::new(),
+            gui_buffer_input: gui_buffer_input,
         }
     }
 
@@ -165,6 +169,33 @@ impl server {
 
         info!("Server {} started running.", self.id);
         loop {
+            //check if the server is receiving MediaBroadcast commands from the gui
+            if let Ok(mut buffer )= self.gui_buffer_input.lock(){ //block the arc mutex
+                if let Some(messages) = buffer.remove(&(self.id as NodeId)) { //if i have pending messages i take them
+                    for message in messages {
+                        if let Some(stripped) = message.strip_prefix("[MediaBroadcast]::") {
+                            let parts: Vec<&str> = stripped.splitn(2, "::").collect();
+                            if parts.len() == 2 {
+                                let media_name = parts[0].to_string();
+                                let base64_data = parts[1].to_string();
+
+                                //qua è sottinteso che il media non è presente nel server, ma deve esserlo prima che venga ricevuto dalla GUI
+
+                                // 💾 Store and broadcast to all clients
+                                self.media_storage.insert(media_name.clone(), (self.id, base64_data.clone()));
+                                for &target_id in &self.registered_clients {
+                                    let forward = format!("[MediaDownloadResponse]::{}::{}", media_name, base64_data);
+                                    self.send_chat_message(0, target_id, forward, SourceRoutingHeader::empty_route());
+                                }
+
+                                // Acknowledge to GUI (optional)
+                                info!("📢 Broadcasted media '{}' from GUI for server {}", media_name, self.id);
+                            }
+                        }
+                    }
+                }
+            }
+            //first checking if I have pending messages from GUI, then treat everything from the receiver channel
             match self.packet_receiver.recv() {
                 Ok(mut packet) => {
                     match &packet.pack_type {
