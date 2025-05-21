@@ -388,10 +388,8 @@ impl server {
                 info!("Client {} finished chat in session {}", client_id, session_id);
             }
             ["[Logout]"] => {
-                if let Some(clients) = self.registered_clients.get_mut(&(session_id as NodeId)) {
-                    clients.retain(|&id| id != client_id);
-                    info!("Client {} logged out from session {}", client_id, session_id);
-                }
+                self.registered_clients.retain(|&id| id != client_id);
+                info!("Client {} logged out from session {}", client_id, session_id);
             }
 
             _ => {
