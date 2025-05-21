@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::string::String;
 use std::default::Default;
 use std::io;
@@ -23,6 +23,7 @@ use base64::{decode, Engine};
 use base64::engine::general_purpose::STANDARD;
 use std::io::Cursor;
 use image::{ImageReader, DynamicImage, open};
+use serde::de::StdError;
 use serde::de::Unexpected::Str;
 //use crate::simulation_controller::gui_input_queue::{push_gui_message, new_gui_input_queue, SharedGuiInput};
 
@@ -30,6 +31,7 @@ use serde::de::Unexpected::Str;
 //the two global variable are kept to ensure consistency throughout the various chats
 static FLOOD_IDS: Lazy<Mutex<u64>> = Lazy::new(|| Mutex::new(0));
 static SESSION_IDS: Lazy<Mutex<u64>> = Lazy::new(|| Mutex::new(0));
+static CHATTING_STATUS: Lazy<Mutex<(bool , NodeId)>> = Lazy::new(|| Mutex::new((false , 0)));
 
 #[derive(Debug,Clone)]
 pub struct MyClient{
@@ -44,7 +46,7 @@ pub struct MyClient{
     pub seen_flood_ids : HashSet<(u64 , NodeId)>,
     pub received_messages : HashMap<u64 , Vec<u8>>,
     //pub gui_input : SharedGuiInput,
-    pub avaible_servers: HashSet<(NodeId , bool)>,
+    pub available_servers: HashSet<(NodeId, bool)>,
 }
 
 impl MyClient{
@@ -61,7 +63,7 @@ impl MyClient{
             seen_flood_ids: HashSet::new(),
             received_messages: HashMap::new(),
             //gui_input,
-            avaible_servers : HashSet::new(),
+            available_servers: HashSet::new(),
         }
     }
 
@@ -69,12 +71,12 @@ impl MyClient{
         loop{
             select! {
                 recv(self.packet_recv) -> packet => {
-                    println!("Checking for received packet...");
+                    info!("Checking for received packet...");
                     if let Ok(packet) = packet {
-                        println!("Packet received by drone {} : {:?}",packet.routing_header.hops[packet.routing_header.hop_index], packet);
+                        info!("Packet received by drone {} : {:?}",packet.routing_header.hops[packet.routing_header.hop_index], packet);
                         self.process_packet(packet);
                     } else {
-                        println!("No packet received or channel closed.");
+                        info!("No packet received or channel closed.");
                     }
                 },
             }
@@ -107,14 +109,14 @@ impl MyClient{
     fn process_nack(&mut self, nack: &Nack, packet: &mut Packet) {
         match nack.nack_type {
             NackType::Dropped=>{
-                self.increase_cost(packet.routing_header.hops[0]); // to properly use our pathfinding algorithms the links between the drones are weighted based on the number of "Dropped" nacks we receive from each drone
+                self.increase_cost(packet.routing_header.hops[0]); // to properly use our pathfinding algorithms the links between the drones are weighted based on the number of "Dropped" Nacks we receive from each drone
                 if let Some(fragments) = self.sent_messages.get(&packet.session_id){
                     for  fragment in fragments{
                         if fragment.fragment_index == nack.fragment_index{
                             let sender_id = &packet.routing_header.hops[packet.routing_header.hops.len()-2];
                             let sender = self.packet_send.get(sender_id).unwrap();
                             let mut new_packet = packet.clone();
-                            new_packet.routing_header.hops = self.best_path(self.id , self.get_server_id()).unwrap(); // since the packet has already been dropped on the previous route we try to find out if there is a better route
+                            new_packet.routing_header.hops = self.best_path(self.id , self.get_server_id().unwrap_or(0)).unwrap(); // since the packet has already been dropped on the previous route we try to find out if there is a better route
                             (*sender).send(packet.clone()).unwrap();
                         }
                     }
@@ -126,7 +128,7 @@ impl MyClient{
                 self.send_flood_request();
             }
             _ => {
-                // since the other possible nacks that can be received presume some malfunctioning in the flooding or the dornes themselves
+                // since the other possible Nacks that can be received presume some malfunctioning in the flooding or the drones themselves
                 //we can't properly intervene on the graph, so we should try to flood as we see fit
                 self.send_flood_request();
             }
@@ -134,20 +136,33 @@ impl MyClient{
     }
 
 /*
-    pub fn pop_all_gui_messages(queue: &SharedGuiInput, client_id: NodeId) -> Vec<(NodeId,String)> {
-        if let Ok(mut map) = queue.lock() {
-            map.remove(&client_id).unwrap_or_default()
-        } else {
-            vec![]
+    pub fn pop_all_gui_messages(queue: &SharedGuiInput, client_id: NodeId){
+        loop {
+            if let Ok(mut map) = gui_input.lock() {
+                println!("Client {} is looking for messages. Available keys: {:?}", client_id, map.keys());
+
+                if let Some(msgs) = map.get_mut(&client_id) {
+
+                    if !msgs.is_empty() {
+                        let msg = msgs.remove(0); // only ONE message per loop
+                        drop(map); // release lock early
+                        println!("Client {} popped: {}", client_id, msg);
+                        let input = self.process_gui_command("Hello".to_string());
+                        match input {
+                            Ok(input) => {
+                                self.send_packet(input);
+                            }
+                            Err(e)=>{}
+                        }
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
         }
     }
 */
 
-    fn send_packet(&self){
-        //let messages = self.pop_all_gui_messages(&self.gui_input, self.id); // we get the input from the common buffer
-        //for msg in messages{
-        //let input = msg
-        let input = String::new();
+    fn send_packet(&self, input : String){
         let bytes = input.trim_end();
         let chunks: Vec<Vec<u8>> = bytes.as_bytes().chunks(128).map(|chunk| chunk.to_vec()).collect();//we break down the message in smaller chunks
         for i in 0..chunks.len() {
@@ -165,7 +180,7 @@ impl MyClient{
             let packet = Packet{ // we encapsulate the fragment in the packet to be sent through the threads
                 routing_header: SourceRoutingHeader{
                     hop_index : 1, // the hop index is initialized to 1 to stay consistent with the logic of the drones
-                    hops : self.best_path(self.id , self.get_server_id()).unwrap(),
+                    hops : self.best_path(self.id , self.get_server_id().unwrap_or(0)).unwrap(),
                 },
                 session_id: SESSION_IDS.lock().unwrap().clone(),
                 pack_type: MsgFragment(fragment),
@@ -177,22 +192,21 @@ impl MyClient{
                             sender.send(packet.clone()).unwrap();
                         }
                         Err(e)=>{
-                            println!("Error sending packet: {:?}", e);
+                            info!("Error sending packet: {:?}", e);
                         }
                     }
                 }
             }
         }
-        Self::increment_ids(&SESSION_IDS)
-        //}
+        self.increment_ids(&SESSION_IDS)
     }
 
     fn send_flood_request(&mut self){
-        Self::increment_ids(&FLOOD_IDS);
+        self.increment_ids(&FLOOD_IDS);
         let flood_request  = FloodRequest :: initialize(FLOOD_IDS.lock().unwrap().clone(), self.id, Client);
         let packet = Packet {
             pack_type: PacketType::FloodRequest(flood_request),
-            session_id: 18446744073709551615,
+            session_id: 18446744073709551615, // a session_id is reserved for the flood_requests
             routing_header: SourceRoutingHeader{
                 hop_index: 0,
                 hops: [self.id].to_vec(),
@@ -202,7 +216,7 @@ impl MyClient{
             let sender = sender_tuple.1.clone();
             sender.send(packet.clone()).unwrap();
         }
-        println!("Starting the flood n. {}", FLOOD_IDS.lock().unwrap());
+        info!("Starting the flood n. {}", FLOOD_IDS.lock().unwrap());
     }
 
     fn reassemble_packet (&mut self, fragment: &Fragment, packet : &mut Packet){
@@ -225,7 +239,7 @@ impl MyClient{
                 self.packet_command_handling(content.clone());
             }
             self.received_packets.insert(session_id ,content.clone());
-            println!("Packet with session_id {} fully received", session_id);
+            info!("Packet with session_id {} fully received", session_id);
         }
 
     }
@@ -234,32 +248,39 @@ impl MyClient{
         let message_string = String::from_utf8_lossy(&message).to_string();
         let tokens: Vec<&str> = message_string.trim().splitn(3, "::").collect();
         match tokens.as_slice() {
+            ["LoginAck" , _session]=>{
+                info!("You successfully logged in!");
+            }
             ["[MessageFrom]", client_id, msg]=>{
-                println!("Received message from client id {}. Message : {}", client_id , msg);
+                info!("Received message from client id {}. Message : {}", client_id , msg);
             }
             ["[ChatStart]", success]=>{
                 if success.to_string() == "true"{
-                    println!("Chat started successfully");
+                    info!("Chat started successfully");
                 }
                 else {
-                    println!("Chat start failed");
+                    self.change_chat_status(0);
+                    info!("Chat start failed");
                 }
             }
-            ["[ClientListResponse]", clients]=>{
-                println!("Clients aviable for chat: {}" , clients);
+            ["[ClientListResponse]", client_list]=>{
+                info!("Clients available for chat: {}" , client_list);
             }
             ["[HistoryResponse]", response]=>{
-                println!("Most recent chat history with current client: {}" , response);
+                info!("Most recent chat history with current client: {}" , response);
             }
             ["MediaUploadAck", media_name]=>{
-                println!("The media {} has been uploaded", media_name);
+                info!("The media {} has been uploaded", media_name);
+            }
+            ["MediaListResponse" , media_list]=>{
+                info!("Here's a list of the media available for download: {}" , media_list);
             }
             ["[MediaDownloadResponse]","ERROR","NotFound"]=>{
-                println!("The media could not be found.");
+                info!("The media could not be found.");
             }
             ["[MediaDownloadResponse]", media_name, base64_data]=>{
                 if let Err(e) = Self::display_image(base64_data, media_name) {
-                    eprintln!("Failed to display image: {}", e);
+                    info!("Failed to display image: {}", e);
                 }
             }
             _=>{
@@ -347,13 +368,13 @@ impl MyClient{
         }
         for i in 0 .. response.path_trace.len(){
             if response.path_trace[i].1 == Server {
-                if !self.avaible_servers.contains(&(response.path_trace[i].0, true)) && !self.avaible_servers.contains(&(response.path_trace[i].0 , false)) {
-                    self.avaible_servers.insert((response.path_trace[i].0, false));
+                if !self.available_servers.contains(&(response.path_trace[i].0, true)) && !self.available_servers.contains(&(response.path_trace[i].0, false)) {
+                    self.available_servers.insert((response.path_trace[i].0, false));
                 }
             }
         }
 
-        println!("Updating known network topology.")
+        info!("Updating known network topology.")
     }
     fn add_edge_no_duplicate(&mut self, graph: &mut Graph<u8, u8, Undirected>, a: NodeIndex, b: NodeIndex, weight: u8) -> bool {
         if !graph.contains_edge(a, b) {
@@ -450,11 +471,11 @@ impl MyClient{
         path.reverse();
         Some(path)
     }
-    fn get_server_id(&self) -> NodeId {
-        let mut server_value= (NodeIndex::new(0) , NodeType::Server);
+    fn get_server_id(&self) -> Option<NodeId> {
+        let mut server_value= (NodeIndex::new(0) , Server);
         //I look for the tuple of the server based on the knowledge that it is of NodeType::Server
         while let Some(indexes) = self.node_map.values().next(){
-            if indexes.1 == NodeType::Server {
+            if indexes.1 == Server {
                 server_value = *indexes;
             }
         }
@@ -462,19 +483,27 @@ impl MyClient{
         let found_key = self.node_map.iter()
             .find(|(_, v)| (*v).eq(&server_value))
             .map(|(server_id, _)| server_id);
-        let found_server = self.avaible_servers.get(&(*(found_key.unwrap()) , true));
+        let found_server = self.available_servers.get(&(*(found_key?), true));
 
         match found_server {
             Some(k) =>{
-                println!("Found server {} with status {}", k.0, k.1);
-                *(found_key.unwrap())},
-            None =>0,
+                info!("Found server {} with status {}", k.0, k.1);
+                Some(*(found_key?))},
+            None=>{
+                None
+            },
         }
     }
 
-    fn increment_ids( counter: &Lazy<Mutex<u64>>) {
+    fn increment_ids( &self , counter: &Lazy<Mutex<u64>>) {
         let mut val = counter.lock().unwrap();
         *val += 1;
+    }
+
+    fn change_chat_status(&self, peer_id : NodeId){
+        let mut status = CHATTING_STATUS.lock().unwrap();
+        (*status).0 = !(*status).0;
+        (*status).1 = peer_id;
     }
 
     fn display_image(base64_data: &str, media_name: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -482,7 +511,7 @@ impl MyClient{
         let decoded = match STANDARD.decode( base64_data) {
             Ok(d) => d,
             Err(e) => {
-                eprintln!("Base64 decode error: {}", e);
+                info!("Base64 decode error: {}", e);
                 return Err(Box::new(e));
             }
         };
@@ -492,7 +521,7 @@ impl MyClient{
         let img = match ImageReader::new(cursor).with_guessed_format()?.decode() {
             Ok(i) => i,
             Err(e) => {
-                eprintln!("Image decode error: {}", e);
+                info!("Image decode error: {}", e);
                 return Err(Box::new(e));
             }
         };
@@ -500,16 +529,16 @@ impl MyClient{
         // Save image to file
         let image_path = format!("{}.png", media_name);
         if let Err(e) = img.save(&image_path) {
-            eprintln!("Failed to save image: {}", e);
+            info!("Failed to save image: {}", e);
             return Err(Box::new(e));
         }
 
         // Display the image in a window (non-blocking, auto closes when user exits)
 
             match open(image_path){
-                Ok((display))=>{display}
+                Ok(display)=>{display}
                 Err(e) => {
-                    eprintln!("Failed to display: {}", e);
+                    info!("Failed to display: {}", e);
                     return Err(Box::new(e));
                 }
             };
@@ -517,23 +546,84 @@ impl MyClient{
         Ok(())
     }
 
-    fn process_gui_command(&mut self, command_string: String) {
+    fn process_gui_command(&mut self, command_string: String)->Result<String , Box<dyn std::error::Error>> {
         let tokens: Vec<&str> = command_string.trim().split("::").collect();
         match tokens.as_slice() {
-            ["[Login]" , server_id_str] => { // when logging in to a server we change its connection status from false to true
+            ["[Login]", server_id_str] => { // when logging in to a server we change its connection status from false to true
                 let server_id: u64 = (*server_id_str).parse().expect("Failed to parse u64");
-                self.avaible_servers.remove(&(server_id as NodeId, false));
-                self.avaible_servers.insert((server_id as NodeId, true));
+                self.available_servers.remove(&(server_id as NodeId, false));
+                self.available_servers.insert((server_id as NodeId, true));
+                info!("Login to {}", server_id_str);
+                Ok(command_string)
             },
-            ["[Logout]"] => {// the connection status goes back to false once the logout message is sent
-                if let Some(to_disconnect) = self.avaible_servers.iter().find(|(_, connected)| *connected == true).cloned() {
-                    let mut new_status = self.avaible_servers.take(&to_disconnect).unwrap();
-                    new_status.1 = false;
-                    self.avaible_servers.insert(new_status);
+            ["[Logout]"] => {
+                if (*CHATTING_STATUS.lock().unwrap()).0 == true {//we make sure to not log out while in the middle of a chat
+                    Err(Box::new(io::Error::new(io::ErrorKind::Interrupted, "You are still in a chat with another user. End the chat before logging out")))
+                }
+                else if let Some(to_disconnect) = self.available_servers.iter().find(|(_, connected)| *connected == true).cloned() {
+                    let mut new_status = self.available_servers.take(&to_disconnect).unwrap();
+                    new_status.1 = false; //since we are connected to a server we can actually log out and change the status of the server back to false
+                    self.available_servers.insert(new_status);
+                    info!("Logout from {:#?}", self.get_server_id());
+                    Ok(command_string)
+                }
+                else{ //if we are yet to log in to any server we can log out of it
+                    Err(Box::new(io::Error::new(io::ErrorKind::NotFound, "You have yet to login to any server")))
                 }
             },
+            ["ClientListRequest"]=>{
+                info!("Requesting the list of clients available for chat");
+                Ok(command_string)
+            }
+            ["MessageTo", client_id , message_str]=>{
+                info!("Sending message: {} to client {}", message_str, client_id);
+                Ok(command_string)
+            }
+            ["ChatRequest", client_id]=>{
+                if (*CHATTING_STATUS.lock().unwrap()).eq(&(false , 0)){//when requesting a chat we need to make sure that we are not in the middle of chatting with someone else
+                    info!("Requesting to chat with client: {}", client_id);
+                    let peer_id: NodeId = (*client_id).parse().expect("Failed to parse u64");
+                    self.change_chat_status(peer_id);
+                    Ok(command_string)
+                }
+                else {
+                    Err(Box::new(io::Error::new(io::ErrorKind::Interrupted, "You are already in a chat with another user.")))
+                }
+            }
+            ["HistoryRequest", personal_id , peer_id]=>{
+                info!("Requesting chat history between client {} and client {}", personal_id, peer_id);
+                Ok(command_string)
+            }
+            ["MediaUpload", media_name, encoded_media]=>{
+                info!("Uploading media with name: {} , encoded as: {}", media_name, encoded_media);
+                Ok(command_string)
+            }
+            ["MediaDownloadRequest" , media_name]=>{
+                info!("Requesting to download media: {}", media_name);
+                Ok(command_string)
+            }
+            ["ChatFinish"]=>{
+                if (*CHATTING_STATUS.lock().unwrap()).0 == true {
+                    info!("Requesting to end current chat");
+                    self.change_chat_status(0);
+                    Ok(command_string)
+                }
+                else {
+                    Err(Box::new(io::Error::new(io::ErrorKind::Interrupted, "You are not chatting with any user.")))
+                }
+
+            }
+            ["MediaBroadcast"]=>{
+                info!("Broadcasting media to all connected clients");
+                Ok(command_string)
+            }
+            ["MediaListRequest"]=>{
+                info!("Requesting media list to server: {}" , self.get_server_id().unwrap_or(0));
+                Ok(command_string)
+            }
             _=>{
-                println!("No specific action needed");
+                info!("Unknown format");
+                Err(Box::new(io::Error::new(io::ErrorKind::NotFound, "Unknown format")))
             }
         }
     }
