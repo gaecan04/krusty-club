@@ -776,7 +776,7 @@ impl NetworkInitializer {
         }
     }
 
-    fn initialize_clients(&mut self,gui_input: SharedGuiInput) {
+    /*fn initialize_clients(&mut self,gui_input: SharedGuiInput) {
         for client in &self.config.client {
             let client_id = client.id;
             let mut senders = HashMap::new();
@@ -788,11 +788,93 @@ impl NetworkInitializer {
             let (client_tx, client_rx) = crossbeam_channel::unbounded();
             self.packet_senders.insert(client_id, client_tx.clone());
 
-            client2::start_client(client_id, client_rx, senders,gui_input.clone());
+           // client2::start_client(client_id, client_rx, senders,gui_input.clone());
+            let mut cl2 = client2::MyClient::new(client_id,client_rx,senders);
+            let mut value = gui_input.clone();
+            thread::spawn(move || {
+                println!("client2 spawned");
+                cl2.run(value);
+            });        }
 
+    }*/
+
+    fn initialize_clients(&mut self, gui_input: SharedGuiInput) {
+        for (i, client) in self.config.client.iter().enumerate() {
+            let client_id = client.id;
+            let mut senders = HashMap::new();
+
+            for &drone_id in &client.connected_drone_ids {
+                if let Some(tx) = self.packet_senders.get(&drone_id) {
+                    senders.insert(drone_id, tx.clone());
+                }
+            }
+
+            let (client_tx, client_rx) = crossbeam_channel::unbounded();
+            self.packet_senders.insert(client_id, client_tx.clone());
+
+            // Create simulation controller channel for this client
+            let (sim_ctrl_send, sim_ctrl_recv) = crossbeam_channel::unbounded();
+
+            // If needed, store sim_ctrl_send so the SC can send commands later
+            self.controller_command_senders.insert(client_id, sim_ctrl_send.clone());
+
+            let gui_clone = gui_input.clone();
+
+            if self.config.client.len() == 2 {
+                if client_id % 2 == 0 {
+                    // client2
+                    thread::spawn(move || {
+                        println!("client2 spawned");
+                        let mut cl2 = client2::MyClient::new(client_id, client_rx, senders);
+                        cl2.run(gui_clone);
+                    });
+                } else {
+                    // client1
+                    thread::spawn(move || {
+                        println!("client1 spawned");
+                        let sent_messages = HashMap::new();
+                        let connected_server_id = None;
+                        let mut cl1 = client1::MyClient::new(
+                            client_id,
+                            client_rx,
+                            senders,
+                            sent_messages,
+                            connected_server_id,
+                            sim_ctrl_recv,
+                            sim_ctrl_send,
+                        );
+                        cl1.run(gui_clone);
+                    });
+                }
+            } else {
+                if i % 2 == 0 {
+                    // client2 for even-indexed clients
+                    thread::spawn(move || {
+                        println!("client2 spawned");
+                        let mut cl2 = client2::MyClient::new(client_id, client_rx, senders);
+                        cl2.run(gui_clone);
+                    });
+                } else {
+                    // client1 for odd-indexed clients
+                    thread::spawn(move || {
+                        println!("client1 spawned");
+                        let sent_messages = HashMap::new();
+                        let connected_server_id = None;
+                        let mut cl1 = client1::MyClient::new(
+                            client_id,
+                            client_rx,
+                            senders,
+                            sent_messages,
+                            connected_server_id,
+                            sim_ctrl_recv,
+                            sim_ctrl_send,
+                        );
+                        cl1.run(gui_clone);
+                    });
+                }
+            }
         }
     }
-
 
     fn initialize_servers(&mut self,gui_input: SharedGuiInput) {
         for server in &self.config.server {
@@ -1730,8 +1812,8 @@ mod channel_tests {
         let gui_input= SharedGuiInput::new(Default::default());
         initializer.setup_channels();
         initializer.initialize_drones();
-        initializer.initialize_clients(gui_input); // Dummy SharedGuiInput
-        initializer.initialize_servers();
+        initializer.initialize_clients(gui_input.clone()); // Dummy SharedGuiInput
+        initializer.initialize_servers(gui_input.clone());
 
         for node_id in [1, 2, 3, 4] {
             assert!(initializer.packet_senders.contains_key(&node_id), "Missing channel for node {}", node_id);

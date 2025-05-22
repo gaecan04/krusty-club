@@ -33,6 +33,7 @@ image = "0.25.6"
 ap2024_unitn_cppenjoyers_drone = { git = "https://github.com/Cpp-enjoyers/drone.git", features =  ["unlimited_buffer"] }
 petgraph = "0.8.1"
 base64 = "0.21.7"
+once_cell = "1.21.3"
 [patch."https://github.com/Cpp-enjoyers/common.git"]
 common = { git = "https://github.com/Ossyk/common.git", branch = "main" }
 
