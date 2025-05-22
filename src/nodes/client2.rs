@@ -17,6 +17,7 @@ pub fn start_client(
 ) {
     thread::spawn(move || {
         println!("Temp Client {} started", client_id);
+        println!("🧠 Arc ptr of client: {:p}", Arc::as_ptr(&gui_input));
 
         /*
                 // Flooding (unchanged)
@@ -52,26 +53,37 @@ pub fn start_client(
         // 🆕 Poll and send one message every second
         loop {
             if let Ok(mut map) = gui_input.lock() {
-                //println!("Client {} is looking for messages. Available keys: {:?}", client_id, map.keys());
-
                 if let Some(msgs) = map.get_mut(&client_id) {
-
                     if !msgs.is_empty() {
                         let msg = msgs.remove(0); // only ONE message per loop
                         drop(map); // release lock early
-                       // println!("Client {} popped: {}", client_id, msg);
 
-                        // send to server (simplified)
+                        // Send to all servers
                         for (&server_id, sender) in &packet_senders {
-                            let fragment = Fragment::from_string(0, 1, msg.clone());
-                            let packet = Packet {
-                                session_id: rand::random(),
-                                routing_header: SourceRoutingHeader::with_first_hop(vec![client_id, server_id]),
-                                pack_type: PacketType::MsgFragment(fragment),
-                            };
+                            let raw_bytes = msg.as_bytes();
+                            let max_len = 128;
+                            let total_frags = ((raw_bytes.len() + max_len - 1) / max_len) as u64;
+                            let session_id = rand::random();
 
-                           // println!("Client {} sending: {}", client_id, msg);
-                            let _ = sender.send(packet);
+                            for (i, chunk) in raw_bytes.chunks(max_len).enumerate() {
+                                let mut buf = [0u8; 128];
+                                buf[..chunk.len()].copy_from_slice(chunk);
+
+                                let fragment = Fragment {
+                                    fragment_index: i as u64,
+                                    total_n_fragments: total_frags,
+                                    length: chunk.len() as u8,
+                                    data: buf,
+                                };
+
+                                let packet = Packet {
+                                    session_id,
+                                    routing_header: SourceRoutingHeader::with_first_hop(vec![client_id, server_id]),
+                                    pack_type: PacketType::MsgFragment(fragment),
+                                };
+
+                                let _ = sender.send(packet);
+                            }
                         }
                     }
                 }

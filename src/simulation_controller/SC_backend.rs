@@ -42,6 +42,11 @@ pub struct SimulationController {
 }
 
 impl SimulationController {
+    //to delete, this is just for testing purposes
+    pub fn registered_nodes(&self) -> Vec<NodeId> {
+        self.packet_senders.keys().cloned().collect()
+    }
+
     pub fn new(
         network_config: Arc<Mutex<ParsedConfig>>,
         event_sender: Sender<DroneEvent>,

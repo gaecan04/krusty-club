@@ -14,7 +14,7 @@ use wg_2024::drone::Drone;
 use wg_2024::network::NodeId;
 use wg_2024::packet::Packet;
 use crate::simulation_controller::chatUI::{ChatMessage, ChatUIState, ClientStatus};
-use crate::simulation_controller::gui_input_queue::SharedGuiInput;
+use crate::simulation_controller::gui_input_queue::{push_gui_message, SharedGuiInput};
 
 enum AppState {
     Welcome,
@@ -82,30 +82,6 @@ impl NetworkApp {
         app
     }
 
-
-    fn flood_network(&mut self) {
-        self.simulation_log.push("Flood Network initiated".to_string());
-
-        // If you have the network initialized, send flood request to servers and clients
-        if let Some(config) = &self.network_config {
-            let config = config.lock().unwrap();
-
-            // Example: Send flood requests to servers and clients
-            // This is a simplified example - you would need to implement
-            // the actual flood request sending logic
-
-            for server in &config.server {
-                self.simulation_log.push(format!("Sending flood request to server {}", server.id));
-            }
-
-            for client in &config.client {
-                self.simulation_log.push(format!("Sending flood request to client {}", client.id));
-                // Call client flood request function
-            }
-
-            self.simulation_log.push("Network flood completed".to_string());
-        }
-    }
 
     // This function is kept for the UI but delegates to NetworkRenderer if possible
     fn crash_drone(&mut self, drone_id: NodeId) {
@@ -297,6 +273,7 @@ impl NetworkApp {
                     // Display current topology and zoom controls
                     ui.horizontal(|ui| {
                         if let Some(ref topology) = self.selected_topology {
+                            ui.add_space(10.0);
                             ui.label(format!("Current Topology: {}", topology));
                         }
                         ui.add_space(20.0);
@@ -313,24 +290,24 @@ impl NetworkApp {
                             }
                         }
                         ui.label(format!("Zoom: {:.1}x", self.zoom_level));
+                        ui.add_space(10.0);
+                        if ui.button("Recenter Graph").clicked() {
+                            self.pan_offset = Vec2::ZERO;
+                        }
                     });
 
                     // Control panel for drone operations
                     ui.horizontal(|ui| {
 
-                        if ui.button("Flood Network").clicked() {
-                            self.flood_network();
-                        }
-                        ui.add_space(10.0);
-                        ui.label("(Click on nodes to modify properties)");
                         ui.add_space(10.0);
                         if ui.button("Spawn Drone").clicked() {
                             self.show_spawn_drone_popup = true;
                         }
+                    });
+                    ui.horizontal(|ui|{
                         ui.add_space(10.0);
-                        if ui.button("Recenter Graph").clicked() {
-                            self.pan_offset = Vec2::ZERO;
-                        }
+                        ui.label("Click on nodes to modify properties");
+
                     });
 
                     // Network view with zoom and pan
