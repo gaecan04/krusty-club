@@ -134,7 +134,6 @@ pub struct server {
     network_graph: NetworkGraph,
     chat_history: HashMap<(NodeId,NodeId), VecDeque<String>>,
     media_storage: HashMap<String, (NodeId,String)>, // media name --> (uploader_id, associated base64 encoding as String)
-    pub gui_buffer_input: SharedGuiInput,
 
     //recovery_in_progress:  HashMap<(u64, NodeId), bool>, // Tracks if recovery is already in progress for a session
     //drop_counts: HashMap<(u64, NodeId), usize>, // Track number of drops per session
@@ -156,12 +155,11 @@ impl server {
             network_graph: NetworkGraph::new(),
             chat_history:HashMap::new(),
             media_storage: HashMap::new(),
-            gui_buffer_input: gui_buffer_input,
         }
     }
 
     /// Run the server to process incoming packets and handle fragment assembly
-    pub fn run(&mut self) {
+    pub fn run(&mut self, gui_buffer_input:SharedGuiInput) {
         // Initialize the logger
         if let Err(e) = env_logger::builder().try_init() {
             eprintln!("Failed to initialize logger: {}", e);
@@ -170,31 +168,30 @@ impl server {
         info!("Server {} started running.", self.id);
         loop {
             //check if the server is receiving MediaBroadcast commands from the gui
-            if let Ok(mut buffer )= self.gui_buffer_input.lock(){ //block the arc mutex
-                if let Some(messages) = buffer.remove(&(self.id as NodeId)) { //if i have pending messages i take them
-                    for message in messages {
+            if let Ok(mut buffer )= gui_buffer_input.lock(){ //block the arc mutex
+                if let Some(messages) = buffer.get_mut(&(self.id as NodeId)) { //if i have pending messages i take them
+                    if !messages.is_empty() {
+                        let message = messages.remove(0); // I pop the first message until the buffer is empty
+                        println!("🧹 Server {} popped one msg from GUI", self.id);
+                        drop(buffer); // ✅ release lock early
                         if let Some(stripped) = message.strip_prefix("[MediaBroadcast]::") {
                             let parts: Vec<&str> = stripped.splitn(2, "::").collect();
                             if parts.len() == 2 {
                                 let media_name = parts[0].to_string();
                                 let base64_data = parts[1].to_string();
 
-                                //qua è sottinteso che il media non è presente nel server, ma deve esserlo prima che venga ricevuto dalla GUI
-
-                                // 💾 Store and broadcast to all clients
                                 self.media_storage.insert(media_name.clone(), (self.id, base64_data.clone()));
                                 for &target_id in &self.registered_clients {
                                     let forward = format!("[MediaDownloadResponse]::{}::{}", media_name, base64_data);
                                     self.send_chat_message(0, target_id, forward, SourceRoutingHeader::empty_route());
                                 }
-
-                                // Acknowledge to GUI (optional)
-                                info!("📢 Broadcasted media '{}' from GUI for server {}", media_name, self.id);
+                                info!("Broadcasted media '{}' from GUI for server {}", media_name, self.id);
                             }
                         }
                     }
                 }
             }
+            std::thread::sleep(std::time::Duration::from_secs(1)); // we process one msg per second
             //first checking if I have pending messages from GUI, then treat everything from the receiver channel
             match self.packet_receiver.recv() {
                 Ok(mut packet) => {
