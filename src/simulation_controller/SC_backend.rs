@@ -9,6 +9,9 @@ use wg_2024::drone::Drone;
 use wg_2024::network::NodeId;
 use crate::network::initializer::{ParsedConfig};
 use crate::simulation_controller::network_designer::{Node, NodeType};
+use crate::simulation_controller::gui_input_queue::broadcast_topology_change;
+
+
 //Reminder about structs
 /*pub enum DroneCommand {
     RemoveSender(usize), // NodeId
@@ -505,6 +508,8 @@ impl SimulationController {
                 factory(id, controller_send, cmd_rx, pkt_rx, packet_send_map, pdr);
             drone.run();
         });
+       // broadcast_topology_change(&format!("[FloodRequired]::SpawnDrone"));
+
 
         Ok(())
     }
@@ -570,6 +575,8 @@ impl SimulationController {
         // 5. Update the internal network graph
         self.network_graph.entry(a).or_default().insert(b);
         self.network_graph.entry(b).or_default().insert(a);
+        //broadcast_topology_change(&"[FloodRequired]::AddSender".to_string());
+
 
         Ok(())
     }

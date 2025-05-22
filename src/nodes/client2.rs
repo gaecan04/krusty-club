@@ -82,7 +82,7 @@ impl MyClient {
             }
             select! {
                 recv(self.packet_recv) -> packet => {
-                    info!("Checking for received packet...");
+                    println!("Checking for received packet by client {}...",self.id);
                     if let Ok(packet) = packet {
                         info!("Packet received by drone {} : {:?}",packet.routing_header.hops[packet.routing_header.hop_index], packet);
                         self.process_packet(packet);
@@ -90,25 +90,34 @@ impl MyClient {
                         info!("No packet received or channel closed.");
                     }
                 },
-                recv(self.sim_contr_recv) -> msg => {
-                    info!("Checking for received packet...");
+                /*recv(self.sim_contr_recv) -> msg => {
+                    info!("Checking for received command...");
                     if let Ok(msg) = msg {
                         info!("Command received: {:?}", msg);
                         self.process_controller_command(msg);
                     } else {
                         info!("No command received or channel closed.");
                     }
-                }
+                }*/
             }
         }
     }
-
+/*
 fn process_controller_command(&mut self, msg: DroneCommand) {
     match &mut msg.clone(){
-        
-        _=>{}
+        DroneCommand::RemoveSender(drone_id)=>{
+            self.packet_send.remove(drone_id);
+            info!("Removed sender packet for {}", drone_id);
+        }
+        DroneCommand::AddSender(drone_id, sender)=>{
+            self.packet_send.insert(*drone_id , sender.clone());
+            info!("Added sender packet for {}", drone_id);
+        }
+        _=>{
+            warn!("The command is not recognized by the client")
+        }
     }
-}
+}*/
 
 fn process_packet (&mut self, packet: Packet) {
         match &mut packet.clone().pack_type {
@@ -160,6 +169,7 @@ fn process_packet (&mut self, packet: Packet) {
         }
     }
 
+    /*
     pub fn pop_all_gui_messages(&self, queue: &SharedGuiInput, client_id: NodeId){
             if let Ok(mut map) = queue.lock() {
                 println!("Client {} is looking for messages. Available keys: {:?}", client_id, map.keys());
@@ -179,6 +189,7 @@ fn process_packet (&mut self, packet: Packet) {
             }
             std::thread::sleep(std::time::Duration::from_secs(1));
     }
+     */
 
 
 
@@ -672,7 +683,7 @@ pub fn start_client(
         println!("Temp Client {} started", client_id);
         println!("🧠 Arc ptr of client: {:p}", Arc::as_ptr(&gui_input));
 
-        /*
+
                 // Flooding (unchanged)
                 let flood_id = rand::thread_rng().gen::<u64>();
                 let flood_request = Packet {
@@ -702,7 +713,7 @@ pub fn start_client(
                 }
 
                 println!("Client {} finished flood test", client_id);
-        */
+
         // 🆕 Poll and send one message every second
         loop {
             if let Ok(mut map) = gui_input.lock() {
@@ -748,7 +759,7 @@ pub fn start_client(
     });
 }
 
-/*
+
 
 let messages = pop_all_gui_messages(&self.gui_input, self.id);
 for msg in messages {
@@ -765,9 +776,9 @@ for msg in messages {
         let _ = sender.send(packet);
     }
 }
-*/
 
-/*
+
+
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::io::Write;
@@ -845,10 +856,10 @@ impl MyClient{
         }
     }
 
-    /*
+
     i messaggi che vengono mandati vengono divisi in un vettore di frammenti associato al suo id e conservati in un hashmap
     quando recuperiamo il messaggio cerchiamo l'id e troviamo il fragment index
-     */
+
     fn process_nack(&mut self, nack: &Nack, packet: &mut Packet) {
         match nack.nack_type {
             NackType::Dropped=>{

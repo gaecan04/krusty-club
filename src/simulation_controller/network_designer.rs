@@ -7,6 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::collections::{HashMap, HashSet};
 use crate::simulation_controller::SC_backend::SimulationController;
 use crate::network::initializer::ParsedConfig;
+use crate::simulation_controller::gui_input_queue::broadcast_topology_change;
+
 use egui::epaint::PathShape;
 
 
@@ -1520,8 +1522,10 @@ impl NetworkRenderer {
                                                 if let Some(drone) = cfg.drone.iter_mut().find(|d| d.id == neighbor_id) {
                                                     drone.connected_node_ids.retain(|&id| id != node_id);
                                                 }
+
                                                 drop(ctrl); // Drop before self mutation
                                                 drop(cfg);
+                                                //broadcast_topology_change(&self.chat_ui.gui_input, &self.network_config, "[FloodRequired]::SpawnDrone");
 
                                                 self.build_from_config(cfg_arc.clone());
                                             }

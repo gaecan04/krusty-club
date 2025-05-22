@@ -12,13 +12,12 @@ use base64;
 use image::load_from_memory;
 use petgraph::graph::NodeIndex;
 use petgraph::stable_graph::StableGraph;
-use wg_2024::controller::{DroneCommand, DroneEvent};
 use wg_2024::network::{NodeId, SourceRoutingHeader};
 use wg_2024::packet::{Ack, FloodRequest, FloodResponse, Fragment, Nack, NackType, NodeType, Packet, PacketType};
 //use wg_2024::packet::PacketType::MsgFragment;
 //use wg_2024::drone::Drone;
 use crossbeam_channel::{select_biased, Receiver, Sender};
-use crate::simulation_controller::gui_input_queue::{pop_all_gui_messages, push_gui_message, SharedGuiInput};
+use crate::simulation_controller::gui_input_queue::{SharedGuiInput};
 
 
 #[derive(Debug, Clone)]
@@ -54,8 +53,6 @@ pub struct MyClient{
     pub active_flood_discoveries: HashMap<u64, FloodDiscoveryState>, //structure to take track of flood_request/response
     pub connected_server_id : Option<NodeId>,
     //pub finalized_flood_discoveries : bool,
-    pub sim_contr_recv: Receiver<DroneCommand>,
-    pub sim_contr_send: Sender<DroneEvent>,
 }
 
 #[derive(Debug, Clone)]
@@ -73,8 +70,6 @@ impl MyClient {
         packet_send: HashMap<NodeId, Sender<Packet>>,
         sent_messages: HashMap<u64, SentMessageInfo>,
         connected_server_id: Option<NodeId>,
-        sim_contr_recv: Receiver<DroneCommand>,
-        sim_contr_send: Sender<DroneEvent>,
     ) -> Self {
         Self {
             id,
@@ -86,8 +81,6 @@ impl MyClient {
             node_id_to_index: HashMap::new(),
             active_flood_discoveries: HashMap::new(),
             connected_server_id,
-            sim_contr_recv,
-            sim_contr_send,
         }
     }
 
@@ -116,43 +109,17 @@ impl MyClient {
             self.check_flood_discoveries_timeouts();
 
             select_biased! {
-            recv(self.sim_contr_recv) -> command => {
-                if let Ok(command) = command {
-                    println!("Command received by client {} : {:?}", self.id, command);
-                    match command {
-                        DroneCommand::AddSender(node_id, sender) => {
-                            println!("Client {} received AddSender command for node {}", self.id, node_id);
-                            self.packet_send.insert(node_id, sender);
-                            println!("Client {} starting flood discovery after AddSender", self.id);
-                            self.start_flood_discovery();
-                        },
-                        DroneCommand::RemoveSender(node_id) => {
-                            println!("Client {} received RemoveSender command for node {}", self.id, node_id);
-                            self.packet_send.remove(&node_id);
-                            self.remove_node_from_graph(node_id);
-                            println!("Client {} starting flood discovery after RemoveSender", self.id);
-                            self.start_flood_discovery();
-                        },
-                        DroneCommand::Crash | DroneCommand::SetPacketDropRate(_) => {
-                            eprintln!("Client {} received unexpected command: {:?}", self.id, command);
-                        }
+                recv(self.packet_recv) -> packet => {
+                    println!("Checking for received packet by client {} ...", self.id);
+                    if let Ok(packet) = packet {
+                        println!("Packet received by client {} : {:?}", self.id, packet);
+                        self.process_packet(packet, &mut seen_flood_ids);
                     }
-                } else {
-                    println!("Simulation Controller channel closed for client {}. Exiting run loop.", self.id);
-                    break;
-                }
-            },
-            recv(self.packet_recv) -> packet => {
-                println!("Checking for received packet by client {} ...", self.id);
-                if let Ok(packet) = packet {
-                    println!("Packet received by client {} : {:?}", self.id, packet);
-                    self.process_packet(packet, &mut seen_flood_ids);
-                }
-            },
-            default => {
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            },
-        }
+                },
+                default => {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                },
+            }
         }
     }
 
@@ -229,7 +196,6 @@ impl MyClient {
         response_routing_header.hops.reverse();
         response_routing_header.hop_index = 1;
         let reversed_hops = response_routing_header.hops.clone();
-        let final_destination_id = flood_response.path_trace.first().map(|(id, _)| *id);
         if response_routing_header.hops.len() > 1 {
             let next_hop = response_routing_header.hops[response_routing_header.hop_index];
             let response_packet_to_send = Packet {
@@ -239,71 +205,14 @@ impl MyClient {
             };
             if let Some(sender) = self.packet_send.get(&next_hop) {
                 match sender.send(response_packet_to_send.clone()) {
-                    Ok(()) => {
-                        println!("Client {} sent FloodResponse {} back to {}", self.id, request.flood_id, next_hop);
-                        self.sim_contr_send.send(DroneEvent::PacketSent(response_packet_to_send.clone())).unwrap_or_else(|err|{eprintln!("Client {} failed to send PacketSent event to sim_controller for packet sent to {:?}: {}", self.id, final_destination_id, err)});
-                    }
-                    Err(e) => {
-                        eprintln!("Client {} failed to send FloodResponse {} back to {}: {}", self.id, request.flood_id, next_hop, e);
-                        if let Some(dest_id) = final_destination_id {
-                            let shortcut_header = SourceRoutingHeader {
-                                hop_index: 0,
-                                hops: vec![dest_id],
-                            };
-                            let shortcut_packet = Packet {
-                                pack_type: PacketType::FloodResponse(flood_response.clone()),
-                                routing_header: shortcut_header,
-                                session_id: request.flood_id,
-                            };
-                            match self.sim_contr_send.send(DroneEvent::ControllerShortcut(shortcut_packet)) {
-                                Ok(()) => println!("Client {} sent FloodResponse {} via ControllerShortcut to destination {}.", self.id, request.flood_id, dest_id),
-                                Err(e_sc) => eprintln!("Client {} FAILED to send FloodResponse {} via ControllerShortcut to {}: {}", self.id, request.flood_id, dest_id, e_sc),
-                            }
-                        } else {
-                            eprintln!("Client {} failed to send FloodResponse {} via ControllerShortcut: could not determine final destination.", self.id, request.flood_id);
-                        }
-                    }
+                    Ok(()) => println!("Client {} sent FloodResponse {} back to {}", self.id, request.flood_id, next_hop),
+                    Err(e) => eprintln!("Client {} failed to send FloodResponse {} back to {}: {}", self.id, request.flood_id, next_hop, e),
                 }
             } else {
-                eprintln!("Client {} error: no sender found for FloodResponse next hop {}. Attempting ControllerShortcut", self.id, next_hop);
-                if let Some(dest_id) = final_destination_id {
-                    let shortcut_header = SourceRoutingHeader {
-                        hop_index: 0,
-                        hops: vec![dest_id],
-                    };
-                    let shortcut_packet = Packet {
-                        pack_type: PacketType::FloodResponse(flood_response.clone()),
-                        routing_header: shortcut_header,
-                        session_id: request.flood_id,
-                    };
-                    match self.sim_contr_send.send(DroneEvent::ControllerShortcut(shortcut_packet)) {
-                        Ok(()) => println!("Client {} sent FloodResponse {} via ControllerShortcut (neighbor not found).", self.id, request.flood_id),
-                        Err(e_sc) => eprintln!("Client {} FAILED to send FloodResponse via ControllerShortcut (neighbor not found) for flood_id {}: {}", self.id, request.flood_id, e_sc),
-                    }
-                } else {
-                    eprintln!("Client {} error: cannot send FloodResponse, inverted routing header hops too short {:?}. Cannot use normal path.", self.id, reversed_hops);
-                    if let Some(dest_id) = final_destination_id {
-                        eprintln!("Client {} attempting ControllerShortcut due to short reversed hops.", self.id);
-                        let shortcut_header = SourceRoutingHeader {
-                            hop_index: 0,
-                            hops: vec![dest_id],
-                        };
-
-                        let shortcut_packet = Packet {
-                            pack_type: PacketType::FloodResponse(flood_response.clone()),
-                            routing_header: shortcut_header,
-                            session_id: request.flood_id,
-                        };
-
-                        match self.sim_contr_send.send(DroneEvent::ControllerShortcut(shortcut_packet)) {
-                            Ok(()) => println!("Client {} sent FloodResponse {} via ControllerShortcut (short hops).", self.id, request.flood_id),
-                            Err(e_sc) => eprintln!("Client {} FAILED to send FloodResponse via ControllerShortcut (short hops) for flood_id {}: {}", self.id, request.flood_id, e_sc),
-                        }
-                    } else {
-                        eprintln!("Client {} failed to send FloodResponse {} via ControllerShortcut: could not determine final destination (short hops case).", self.id, request.flood_id);
-                    }
-                }
+                eprintln!("Client {} error: no sender found for FloodResponse next hop {}", self.id, next_hop);
             }
+        } else {
+            eprintln!("Client {} error: cannot send FloodResponse, inverted routing header hops too short {:?}. Cannot use normal path.", self.id, reversed_hops);
         }
         seen_flood_ids.insert(request.flood_id);
     }
@@ -332,10 +241,7 @@ impl MyClient {
         //4.sending flood_request to all neighbors
         for (&neighbor_id, sender) in &self.packet_send {
             match sender.send(flood_packet.clone()) {
-                Ok(_) => {
-                    println!("Client {} sent FloodRequest to neighbor {}", self.id, neighbor_id);
-                    self.sim_contr_send.send(DroneEvent::PacketSent(flood_packet.clone())).unwrap_or_else(|err|{eprintln!("Client {} failed to send PacketSent event for FloodRequest to sim_controller: {}", self.id, err)});
-                },
+                Ok(_) =>  println!("Client {} sent FloodRequest to neighbor {}", self.id, neighbor_id),
                 Err(e) => eprintln!("Client {} failed to send FloodRequest to neighbor {}: {}", self.id, neighbor_id, e),
             }
         }
@@ -453,8 +359,7 @@ impl MyClient {
                     let media_name = media;
                     let base64_data = base64;
                     if media_name.to_string() == "ERROR" && base64_data.to_string() == "NotFound" {
-                        println!("Client {} received MediaDownloadResponse: Media not found.", self.id);
-                    } else {
+                        println!("Client {} received MediaDownloadResponse: Media not found.", self.id)                    } else {
                         println!("Client {} received MediaDownloadResponse for media '{}', data: ...", self.id, media_name);
                         //- - - - logic for showing the image - - - -
                         match base64::decode(&base64_data) {
@@ -536,40 +441,11 @@ impl MyClient {
             };
             if let Some(sender) = self.packet_send.get(&next_hop_for_ack) {
                 match sender.send(ack_packet_to_send.clone()) {
-                    Ok(()) => {
-                        println!("Client {} sent ACK for session {} fragment {} to neighbor {}", self.id, packet.session_id, fragment.fragment_index, next_hop_for_ack);
-                        self.sim_contr_send.send(DroneEvent::PacketSent(ack_packet_to_send)).unwrap_or_else(|err|{eprintln!("Client {} failed to send PacketSent event for ACK to sim_controller: {}", self.id, err)});
-                    },
-                    Err(e) => {
-                        eprintln!("Client {} error sending ACK packet for session {} to neighbor {}: {}. Using ControllerShortcut.", self.id, packet.session_id, next_hop_for_ack, e);
-                        let mut shortcut_header = ack_packet_to_send.routing_header.clone();
-                        shortcut_header.hop_index = 0;
-                        shortcut_header.hops = vec![destination_node_id.unwrap()];
-                        let shortcut_packet = Packet {
-                            pack_type: ack_packet_to_send.pack_type,
-                            routing_header: shortcut_header,
-                            session_id: ack_packet_to_send.session_id,
-                        };
-                        match self.sim_contr_send.send(DroneEvent::ControllerShortcut(shortcut_packet)) {
-                            Ok(()) => println!("Client {} sent ACK for session {} fragment {} via ControllerShortcut.", self.id, packet.session_id, fragment.fragment_index),
-                            Err(e_sc) => eprintln!("Client {} FAILED to send ACK via ControllerShortcut for session {}: {}", self.id, packet.session_id, e_sc),
-                        }
-                    }
+                    Ok(()) => println!("Client {} sent ACK for session {} fragment {} to neighbor {}", self.id, packet.session_id, fragment.fragment_index, next_hop_for_ack),
+                    Err(e) => eprintln!("Client {} error sending ACK packet for session {} to neighbor {}: {}. Using ControllerShortcut.", self.id, packet.session_id, next_hop_for_ack, e),
                 }
             } else {
                 eprintln!("Client {} error: no sender found for ACK next hop {}. Attempting to use ControllerShortcut.", self.id, next_hop_for_ack);
-                let mut shortcut_header = ack_packet_to_send.routing_header.clone();
-                shortcut_header.hop_index = 0;
-                shortcut_header.hops = vec![destination_node_id.unwrap()];
-                let shortcut_packet = Packet {
-                    pack_type: ack_packet_to_send.pack_type,
-                    routing_header: shortcut_header,
-                    session_id: ack_packet_to_send.session_id,
-                };
-                match self.sim_contr_send.send(DroneEvent::ControllerShortcut(shortcut_packet)) {
-                    Ok(()) => println!("Client {} sent ACK for session {} fragment {} via ControllerShortcut (neighbor not found).", self.id, packet.session_id, fragment.fragment_index),
-                    Err(e_sc) => eprintln!("Client {} FAILED to send ACK via ControllerShortcut (neighbor not found) for session {}: {}", self.id, packet.session_id, e_sc),
-                }
             }
         } else {
             eprintln!("Client {} error: cannot send ACK, original routing header hops too short: {:?}. Cannot use ControllerShortcut.", self.id, packet.routing_header.hops);
@@ -984,10 +860,7 @@ impl MyClient {
     fn send_to_neighbor(&mut self, neighbor_id: NodeId, packet: Packet) -> Result<(), String> {
         if let Some(sender) = self.packet_send.get(&neighbor_id) {
             match sender.send(packet.clone()) {
-                Ok(()) => {
-                    self.sim_contr_send.send(DroneEvent::PacketSent(packet)).unwrap_or_else(|err|{eprintln!("Client {} failed to send PacketSent event to sim_controller for packet sent to {}: {}", self.id, neighbor_id, err)});
-                    Ok(())
-                },
+                Ok(()) => Ok(()),
                 Err(e) => Err(format!("Failed to send packet to neighbor {}: {}", neighbor_id, e)),
             }
         } else {
@@ -1032,8 +905,6 @@ mod tests {
             packet_send_map,
             HashMap::new(),
             None,
-            sim_contr_recv_rx,
-            sim_contr_send_tx.clone(),
         );
 
         (client, sim_contr_recv_tx, sim_contr_send_rx, packet_recv_tx, neighbor_receivers, gui_input)

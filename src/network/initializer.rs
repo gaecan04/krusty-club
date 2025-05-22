@@ -812,11 +812,7 @@ impl NetworkInitializer {
             let (client_tx, client_rx) = crossbeam_channel::unbounded();
             self.packet_senders.insert(client_id, client_tx.clone());
 
-            // Create simulation controller channel for this client
-            let (sim_ctrl_send, sim_ctrl_recv) = crossbeam_channel::unbounded();
-
             // If needed, store sim_ctrl_send so the SC can send commands later
-            self.controller_command_senders.insert(client_id, sim_ctrl_send.clone());
 
             let gui_clone = gui_input.clone();
 
@@ -840,8 +836,7 @@ impl NetworkInitializer {
                             senders,
                             sent_messages,
                             connected_server_id,
-                            sim_ctrl_recv,
-                            sim_ctrl_send,
+
                         );
                         cl1.run(gui_clone);
                     });
@@ -866,8 +861,7 @@ impl NetworkInitializer {
                             senders,
                             sent_messages,
                             connected_server_id,
-                            sim_ctrl_recv,
-                            sim_ctrl_send,
+
                         );
                         cl1.run(gui_clone);
                     });
