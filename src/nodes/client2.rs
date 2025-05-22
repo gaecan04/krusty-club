@@ -104,7 +104,10 @@ impl MyClient {
     }
 
 fn process_controller_command(&mut self, msg: DroneCommand) {
-    match &mut msg.clone(). {  }
+    match &mut msg.clone(){
+        
+        _=>{}
+    }
 }
 
 fn process_packet (&mut self, packet: Packet) {
