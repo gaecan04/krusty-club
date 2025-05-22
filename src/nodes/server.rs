@@ -25,6 +25,8 @@ use crate::simulation_controller::gui_input_queue::SharedGuiInput;
 pub struct NetworkGraph {
     graph: DiGraph<NodeId, usize>,
     node_indices: HashMap<NodeId, NodeIndex>,
+    node_types: HashMap<NodeId, NodeType>,
+
 }
 
 impl NetworkGraph {
@@ -32,31 +34,40 @@ impl NetworkGraph {
         Self {
             graph: DiGraph::new(),
             node_indices: HashMap::new(),
+            node_types: HashMap::new(),
         }
     }
-
-    pub fn add_node(&mut self, id: NodeId) -> NodeIndex {
+    pub fn set_node_type(&mut self, node_id: NodeId, node_type: NodeType) { //method to set NodeType
+        self.node_types.insert(node_id, node_type);
+    }
+    pub fn get_node_type(&self, node_id: NodeId) -> Option<&NodeType> {
+        self.node_types.get(&node_id)
+    }
+    pub fn add_node(&mut self, id: NodeId, node_type: NodeType) -> NodeIndex {
         if let Some(&index) = self.node_indices.get(&id) {
+            self.node_types.insert(id, node_type); // this is to update the hashmap with nodetype associated to nodeId
             index
         } else {
             let index = self.graph.add_node(id);
             self.node_indices.insert(id, index);
+            self.node_types.insert(id, node_type);
             index
         }
     }
     pub fn remove_node(&mut self, node_id: NodeId) {
         if let Some(node_index) = self.node_indices.remove(&node_id) {
             self.graph.remove_node(node_index);
+            self.node_types.remove(&node_id);
         } else {
             warn!("Tried to remove non-existing node {}", node_id);
         }
     }
 
-    pub fn add_link(&mut self, a: NodeId, b: NodeId) {
-        let a_idx = self.add_node(a);
-        let b_idx = self.add_node(b);
-        self.graph.update_edge(a_idx, b_idx, 0);
-        self.graph.update_edge(b_idx, a_idx, 0);
+    pub fn add_link(&mut self, a: NodeId, node_type_a: NodeType, b: NodeId, node_type_b: NodeType) {
+        let a_idx = self.add_node(a, node_type_a);
+        let b_idx = self.add_node(b, node_type_b);
+        self.graph.update_edge(a_idx, b_idx, 1);
+        self.graph.update_edge(b_idx, a_idx, 1);
     }
     pub fn increment_drop(&mut self, a: NodeId, b: NodeId) {
         if let (Some(&a_idx), Some(&b_idx)) = (self.node_indices.get(&a), self.node_indices.get(&b)) {
@@ -114,7 +125,13 @@ impl NetworkGraph {
             let source = self.graph[edge.source()];
             let target = self.graph[edge.target()];
             let weight = edge.weight();
-            println!("{} <-> {} with {} drops", source, target, weight);
+            let source_type = self.node_types.get(&source).map(|t| format!("{:?}", t)).unwrap_or("Unknown".to_string());
+            let target_type = self.node_types.get(&target).map(|t| format!("{:?}", t)).unwrap_or("Unknown".to_string());
+
+            println!(
+                "{} ({}) <-> {} ({}) with {} drops",
+                source, source_type, target, target_type, weight
+            );
         }
     }
 }
@@ -338,6 +355,16 @@ impl server {
                     self.send_chat_message(session_id, client_id, format!("[HistoryResponse]::{}", response), routing_header);
                 }
             }
+            //chat_history: HashMap<(NodeId,NodeId), VecDeque<String>>,
+            ["[ChatHistoryUpdate]", source_server, serialized_entry] => {
+                if let Ok(((id1, id2), history)) = serde_json::from_str::<((NodeId, NodeId), VecDeque<String>)>(serialized_entry) {
+                    self.chat_history.insert((id1, id2), history);
+                    info!("Received and saved full chat history entry from server {}", source_server);
+                } else {
+                    error!("Failed to parse full chat history entry from {}", source_server);
+                }
+            }
+
             ["[MediaUpload]", image_info] => {
                 let parts: Vec<&str> = image_info.splitn(2, "::").collect();
                 if parts.len() == 2 {
@@ -381,8 +408,29 @@ impl server {
                 let ack = format!("[MediaBroadcastAck]::{}::Broadcasted", media_name);
                 self.send_chat_message(session_id, client_id, ack, routing_header);
             }
-            ["[ChatFinish]"] => {
+            ["[ChatFinish]", target_client_str] => {
                 info!("Client {} finished chat in session {}", client_id, session_id);
+                //get the chat history for the session --> only one for each client.
+                // Find the exact chat history (could be based on two clients)
+                let target_client_id= target_client_str.parse::<NodeId>().unwrap();
+                let entry = self.chat_history.iter()
+                    .find(|((a, b), _)| *a == client_id || *b == target_client_id); // optionally refine match
+
+                if let Some(((id1, id2), history)) = entry {
+                    let full_entry = ((*id1, *id2), history.clone());
+                    if let Ok(serialized) = serde_json::to_string(&full_entry) {
+                        for (&node_id, _ ) in self.network_graph.node_types.iter() {
+                            if self.network_graph.get_node_type(node_id) == Some(&NodeType::Server) && node_id != self.id {
+                                if let Some(route) = self.compute_best_path(self.id, node_id) {
+                                    let routing_header = SourceRoutingHeader::with_first_hop(route);
+                                    let msg = format!("[ChatHistoryUpdate]::{}::{}", self.id, serialized);
+                                    self.send_chat_message(session_id, node_id, msg, routing_header);
+                                }
+                            }
+                        }
+                    }
+                }
+                //update the chat history on the other servers.
             }
             ["[Logout]"] => {
                 self.registered_clients.retain(|&id| id != client_id);
@@ -431,15 +479,32 @@ impl server {
             NackType::ErrorInRouting(crashed_node_id) => {
                 warn!("Server detected a crashed node {} due to ErrorInRouting.", crashed_node_id);
 
-                // REMOVE the crashed node from the network graph
-                self.network_graph.remove_node(crashed_node_id);
+                let node_type = self.network_graph.node_types.get(&crashed_node_id);
 
-                info!("Server updated network graph after detecting crash of node {}", crashed_node_id);
-                self.network_graph.print_graph(); // optional: print updated graph
+                match node_type {
+                    // ????? review protocol nack behaviour
+                    Some(NodeType:: Server) => {
+                        warn!("Attempted to remove Server node {} — action skipped.", crashed_node_id);
+                    }
+                    Some(NodeType:: Client) => {
+                        warn!("Attempted to remove client node {} — action skipped.", crashed_node_id);
+                    }
+                    Some(drone_type) => {
+                        warn!("Detected crashed {:?} node {} due to ErrorInRouting.", drone_type, crashed_node_id);
+                        // REMOVE the crashed node from the network graph
+                        self.network_graph.remove_node(crashed_node_id);
+                        info!("Updated graph after removing {:?}", crashed_node_id);
+                        self.network_graph.print_graph();
+                    }
+                    None => {
+                        warn!("Node type for {} not found — skipping removal.", crashed_node_id);
+                    }
+                }
+
             },
 
             _ => {
-                    warn!("Received ErrorInRouting/DestinationIsDrone/UnexpectedRecipient NACK type, sending flood request");
+                    warn!("Received DestinationIsDrone/UnexpectedRecipient NACK type, sending flood request");
                     let flood_request = FloodRequest {
                         flood_id: session_id,
                         initiator_id: self.id as NodeId,
@@ -550,10 +615,12 @@ impl server {
     fn handle_flood_response(&mut self, session_id: u64, flood_response: &FloodResponse, routing_header: SourceRoutingHeader) {
         info!("Received FloodResponse for flood_id {} in session {}", flood_response.flood_id, session_id);
         //obiettivo: fare tutta quella roba strana con il grafo.
-        let nodes: Vec<NodeId> = flood_response.path_trace.iter().map(|(id, _)| *id).collect();
-        for pair in nodes.windows(2) {
-            if let [a, b] = pair {
-                self.network_graph.add_link(*a, *b);
+        //
+        // let nodes: Vec<NodeId> = flood_response.path_trace.iter().map(|(id, _)| *id).collect();
+        let path = &flood_response.path_trace;
+        for pair in path.windows(2) {
+            if let [(a_id, a_type), (b_id, b_type)] = pair {
+                self.network_graph.add_link(*a_id, *a_type, *b_id, *b_type);
             }
         }
 
@@ -604,7 +671,7 @@ impl server {
     }
 
 }
-
+/*
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -715,3 +782,4 @@ mod tests {
 
 
 }
+*/

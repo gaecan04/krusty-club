@@ -16,6 +16,7 @@ dependencies = [
  "petgraph",
  "rand 0.9.0-beta.3",
  "serde",
+ "serde_json",
  "toml",
  "wg_2024",
 ]
