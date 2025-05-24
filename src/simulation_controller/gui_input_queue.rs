@@ -15,25 +15,27 @@ pub fn new_gui_input_queue() -> SharedGuiInput {
 /// Push a message from the GUI into the buffer for a given client
 pub fn push_gui_message(queue: &SharedGuiInput, from: NodeId, msg: String) {
     if let Ok(mut map) = queue.lock() {
-        //map.entry(from).or_default().push((to, msg));
+        println!("📤 Inserting message for NodeId: {}", from);
         map.entry(from).or_default().push(msg);
-
+    } else {
+        println!("❌ Could not lock GUI input queue");
     }
 }
+
 
 pub fn broadcast_topology_change(
     gui_input: &SharedGuiInput,
     config: &Arc<Mutex<ParsedConfig>>,
     message: &str,
 ) {
-    if let Ok(cfg) = config.lock() {
+   /* if let Ok(cfg) = config.lock() {
         for client in &cfg.client {
             push_gui_message(gui_input, client.id, message.to_string());
         }
         for server in &cfg.server {
             push_gui_message(gui_input, server.id, message.to_string());
         }
-    }
+    }*/
 }
 
 

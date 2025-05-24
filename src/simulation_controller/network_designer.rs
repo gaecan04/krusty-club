@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::collections::{HashMap, HashSet};
 use crate::simulation_controller::SC_backend::SimulationController;
 use crate::network::initializer::ParsedConfig;
-use crate::simulation_controller::gui_input_queue::broadcast_topology_change;
+use crate::simulation_controller::gui_input_queue::{broadcast_topology_change, SharedGuiInput};
 
 use egui::epaint::PathShape;
 
@@ -116,12 +116,13 @@ pub(crate) struct NetworkRenderer {
     manual_positions: HashMap<NodeId, (f32, f32)>,
     last_spawned_position: Option<(f32, f32)>,
 
+    pub gui_input: SharedGuiInput,
 
 
 }
 
 impl NetworkRenderer {
-    pub(crate) fn new(topology: &str, x_offset: f32, y_offset: f32,ctx: &egui::Context) -> Self {
+    pub(crate) fn new(topology: &str, x_offset: f32, y_offset: f32,ctx: &egui::Context, gui_input:SharedGuiInput) -> Self {
         let drone_texture = Some(load_texture(ctx, "assets/drone.png"));
         let client_texture = Some(load_texture(ctx, "assets/client.png"));
         let server_texture = Some(load_texture(ctx, "assets/server.png"));
@@ -151,6 +152,7 @@ impl NetworkRenderer {
             current_topology: None,
             manual_positions: HashMap::new(),
             last_spawned_position: None,
+            gui_input,
         };
 
         match Topology::from_str(topology) {
@@ -174,8 +176,9 @@ impl NetworkRenderer {
     }
 
     // Create a network renderer directly from config
-    pub(crate) fn new_from_config(topology: &str, x_offset: f32, y_offset: f32, config: Arc<Mutex<ParsedConfig>>,ctx: &egui::Context) -> Self {
-        let mut network = Self::new(topology, x_offset, y_offset,ctx); // Force base to be empty
+    pub(crate) fn new_from_config(topology: &str, x_offset: f32, y_offset: f32, config: Arc<Mutex<ParsedConfig>>,ctx: &egui::Context, gui_input: SharedGuiInput,) -> Self {
+        let mut network = Self::new(topology, x_offset, y_offset,ctx,gui_input.clone()); // Force base to be empty
+        println!("🔗 GUI_INPUT addr (network_design): {:p}", &*gui_input.lock().unwrap());
 
         // Store the config
         network.config = Some(config.clone());
@@ -1453,10 +1456,13 @@ impl NetworkRenderer {
                                 if ui.button("Crash Node").clicked() {
                                     should_crash = true;
                                 }
+                            });
 
+                            ui.horizontal(|ui| {
                                 let mut pending_connection: Option<NodeId> = None;
 
-                                egui::ComboBox::from_label("Connect to:")
+                                ui.label("Connect to:");
+                                egui::ComboBox::from_id_source("connect_to_combo")
                                     .selected_text("select peer")
                                     .show_ui(ui, |ui| {
                                         for peer in self.nodes.iter() {
@@ -1476,12 +1482,17 @@ impl NetworkRenderer {
 
                                 if let Some(peer_id) = pending_connection {
                                     self.add_connection(node_id as usize, peer_id as usize);
+                                    broadcast_topology_change(&self.gui_input, &(self.config.clone().unwrap()), "[FloodRequired]::AddSender");
                                 }
 
+
+                            });
+                            ui.horizontal(|ui| {
                                 // New: Remove Sender dropdown and button
                                 let mut selected_neighbor: Option<NodeId> = None;
 
-                                egui::ComboBox::from_label("Remove sender (neighbor):")
+                                ui.label("Remove sender (neighbor):");
+                                egui::ComboBox::from_id_source("remove_sender_combo")
                                     .selected_text("select neighbor")
                                     .show_ui(ui, |ui| {
                                         if let Some(cfg) = &self.config {
@@ -1525,7 +1536,7 @@ impl NetworkRenderer {
 
                                                 drop(ctrl); // Drop before self mutation
                                                 drop(cfg);
-                                                //broadcast_topology_change(&self.chat_ui.gui_input, &self.network_config, "[FloodRequired]::SpawnDrone");
+                                                //broadcast_topology_change(&self.gui_input, &(self.config.clone().unwrap()), "[FloodRequired]::RemoveSender");
 
                                                 self.build_from_config(cfg_arc.clone());
                                             }

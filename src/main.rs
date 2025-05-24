@@ -31,6 +31,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Initialize network and shared channels
     let (event_sender, event_receiver, command_sender, command_receiver, packet_recv, packet_send_map, config) =
         initialize_network_channels(&config_path)?;
+    let gui_input_queue = new_gui_input_queue();
+    println!("🔗 GUI_INPUT addr (main): {:p}", &*gui_input_queue.lock().unwrap());
 
     let parsed_config = Arc::new(Mutex::new(config.clone()));
 
@@ -54,6 +56,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         event_sender.clone(),
         event_receiver,
         drone_factory.clone(),
+        gui_input_queue.clone(),
     )));
 
     // Create drone implementations using the NetworkInitializer
@@ -67,7 +70,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Initialize the network
     let mut initializer = NetworkInitializer::new(&config_path, drone_impls, controller.clone())?;
-    let gui_input_queue = new_gui_input_queue();
 
     initializer.initialize(gui_input_queue.clone())?;
     println!("Network initialized successfully");

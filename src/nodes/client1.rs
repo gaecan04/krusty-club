@@ -86,6 +86,7 @@ impl MyClient {
 
 
     pub(crate) fn run(&mut self, gui_input: SharedGuiInput) {
+
         let mut seen_flood_ids = HashSet::new();
         println!("Client {} starting run loop", self.id);
 
@@ -97,6 +98,7 @@ impl MyClient {
         loop {
             // Process only ONE GUI message per iteration
             if let Ok(mut map) = gui_input.lock() {
+
                 if let Some(msgs) = map.get_mut(&self.id) {
                     if !msgs.is_empty() {
                         let msg = msgs.remove(0); // remove the first message
