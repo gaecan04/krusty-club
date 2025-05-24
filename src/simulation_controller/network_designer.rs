@@ -1456,10 +1456,13 @@ impl NetworkRenderer {
                                 if ui.button("Crash Node").clicked() {
                                     should_crash = true;
                                 }
+                            });
 
+                            ui.horizontal(|ui| {
                                 let mut pending_connection: Option<NodeId> = None;
 
-                                egui::ComboBox::from_label("Connect to:")
+                                ui.label("Connect to:");
+                                egui::ComboBox::from_id_source("connect_to_combo")
                                     .selected_text("select peer")
                                     .show_ui(ui, |ui| {
                                         for peer in self.nodes.iter() {
@@ -1479,12 +1482,17 @@ impl NetworkRenderer {
 
                                 if let Some(peer_id) = pending_connection {
                                     self.add_connection(node_id as usize, peer_id as usize);
+                                    broadcast_topology_change(&self.gui_input, &(self.config.clone().unwrap()), "[FloodRequired]::AddSender");
                                 }
 
+
+                            });
+                            ui.horizontal(|ui| {
                                 // New: Remove Sender dropdown and button
                                 let mut selected_neighbor: Option<NodeId> = None;
 
-                                egui::ComboBox::from_label("Remove sender (neighbor):")
+                                ui.label("Remove sender (neighbor):");
+                                egui::ComboBox::from_id_source("remove_sender_combo")
                                     .selected_text("select neighbor")
                                     .show_ui(ui, |ui| {
                                         if let Some(cfg) = &self.config {
@@ -1528,7 +1536,7 @@ impl NetworkRenderer {
 
                                                 drop(ctrl); // Drop before self mutation
                                                 drop(cfg);
-                                                broadcast_topology_change(&self.gui_input, &(self.config.clone().unwrap()), "[FloodRequired]::SpawnDrone");
+                                                broadcast_topology_change(&self.gui_input, &(self.config.clone().unwrap()), "[FloodRequired]::RemoveSender");
 
                                                 self.build_from_config(cfg_arc.clone());
                                             }
