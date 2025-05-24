@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::collections::{HashMap, HashSet};
 use crate::simulation_controller::SC_backend::SimulationController;
 use crate::network::initializer::ParsedConfig;
-use crate::simulation_controller::gui_input_queue::broadcast_topology_change;
+use crate::simulation_controller::gui_input_queue::{broadcast_topology_change, SharedGuiInput};
 
 use egui::epaint::PathShape;
 
@@ -116,12 +116,13 @@ pub(crate) struct NetworkRenderer {
     manual_positions: HashMap<NodeId, (f32, f32)>,
     last_spawned_position: Option<(f32, f32)>,
 
+    pub gui_input: SharedGuiInput,
 
 
 }
 
 impl NetworkRenderer {
-    pub(crate) fn new(topology: &str, x_offset: f32, y_offset: f32,ctx: &egui::Context) -> Self {
+    pub(crate) fn new(topology: &str, x_offset: f32, y_offset: f32,ctx: &egui::Context, gui_input:SharedGuiInput) -> Self {
         let drone_texture = Some(load_texture(ctx, "assets/drone.png"));
         let client_texture = Some(load_texture(ctx, "assets/client.png"));
         let server_texture = Some(load_texture(ctx, "assets/server.png"));
@@ -151,6 +152,7 @@ impl NetworkRenderer {
             current_topology: None,
             manual_positions: HashMap::new(),
             last_spawned_position: None,
+            gui_input,
         };
 
         match Topology::from_str(topology) {
@@ -174,8 +176,9 @@ impl NetworkRenderer {
     }
 
     // Create a network renderer directly from config
-    pub(crate) fn new_from_config(topology: &str, x_offset: f32, y_offset: f32, config: Arc<Mutex<ParsedConfig>>,ctx: &egui::Context) -> Self {
-        let mut network = Self::new(topology, x_offset, y_offset,ctx); // Force base to be empty
+    pub(crate) fn new_from_config(topology: &str, x_offset: f32, y_offset: f32, config: Arc<Mutex<ParsedConfig>>,ctx: &egui::Context, gui_input: SharedGuiInput,) -> Self {
+        let mut network = Self::new(topology, x_offset, y_offset,ctx,gui_input.clone()); // Force base to be empty
+        println!("🔗 GUI_INPUT addr (network_design): {:p}", &*gui_input.lock().unwrap());
 
         // Store the config
         network.config = Some(config.clone());
@@ -1525,7 +1528,7 @@ impl NetworkRenderer {
 
                                                 drop(ctrl); // Drop before self mutation
                                                 drop(cfg);
-                                                //broadcast_topology_change(&self.chat_ui.gui_input, &self.network_config, "[FloodRequired]::SpawnDrone");
+                                                broadcast_topology_change(&self.gui_input, &(self.config.clone().unwrap()), "[FloodRequired]::SpawnDrone");
 
                                                 self.build_from_config(cfg_arc.clone());
                                             }

@@ -10,7 +10,7 @@ use wg_2024::network::{NodeId, SourceRoutingHeader};
 use wg_2024::packet::{Ack, FloodRequest, FloodResponse, Fragment, Nack, NodeType, NackType,  Packet, PacketType};
 use wg_2024::packet::PacketType::MsgFragment;
 use wg_2024::drone::Drone;
-use crossbeam_channel::{select, Receiver, Sender};
+use crossbeam_channel::{select, select_biased, Receiver, Sender};
 use log::{info, warn};
 use petgraph::graph::{Graph, NodeIndex, UnGraph};
 use petgraph::algo::dijkstra;
@@ -67,12 +67,14 @@ impl MyClient {
         }
     }
 
-    pub fn run(&mut self, gui_input: SharedGuiInput) {
-        //self.pop_all_gui_messages(&gui_buffer_input, self.id);
+    pub (crate) fn run(&mut self, gui_input: SharedGuiInput) {
+        println!("Client {} starting run loop", self.id);
         loop {
             if let Ok(mut map) = gui_input.lock() {
+
                 if let Some(msgs) = map.get_mut(&self.id) {
                     if !msgs.is_empty() {
+
                         let msg = msgs.remove(0);
                         drop(map); // Release lock early
                         let message = self.process_gui_command(msg).unwrap();
@@ -80,7 +82,7 @@ impl MyClient {
                     }
                 }
             }
-            select! {
+            select_biased! {
                 recv(self.packet_recv) -> packet => {
                     println!("Checking for received packet by client {}...",self.id);
                     if let Ok(packet) = packet {
@@ -90,6 +92,9 @@ impl MyClient {
                         info!("No packet received or channel closed.");
                     }
                 },
+                default => {
+                   std::thread::sleep(std::time::Duration::from_millis(1));
+    }
                 /*recv(self.sim_contr_recv) -> msg => {
                     info!("Checking for received command...");
                     if let Ok(msg) = msg {
@@ -578,6 +583,8 @@ fn process_packet (&mut self, packet: Packet) {
     }
 
     fn process_gui_command(&mut self, command_string: String)->Result<String , Box<dyn std::error::Error>> {
+        println!("Client {} processing GUI command '{}'", self.id, command_string);
+
         let tokens: Vec<&str> = command_string.trim().split("::").collect();
         match tokens.as_slice() {
             ["[Login]", server_id_str] => { // when logging in to a server we change its connection status from false to true

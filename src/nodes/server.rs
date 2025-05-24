@@ -168,8 +168,6 @@ impl server {
         /*if let Err(e) = env_logger::builder().try_init() {
             eprintln!("Failed to initialize logger: {}", e);
         }*/
-        println!("🧠 Arc ptr of server: {:p}",Arc::as_ptr(&gui_buffer_input));
-        println!("🧹 Trying to pop for Server {}", self.id);
 
         info!("Server {} started running.", self.id);
         loop {

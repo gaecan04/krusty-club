@@ -9,7 +9,7 @@ use wg_2024::drone::Drone;
 use wg_2024::network::NodeId;
 use crate::network::initializer::{ParsedConfig};
 use crate::simulation_controller::network_designer::{Node, NodeType};
-use crate::simulation_controller::gui_input_queue::broadcast_topology_change;
+use crate::simulation_controller::gui_input_queue::{broadcast_topology_change, SharedGuiInput};
 
 
 //Reminder about structs
@@ -41,6 +41,7 @@ pub struct SimulationController {
         f32,
     ) -> Box<dyn Drone> + Send + Sync>,
     config: Arc<Mutex<ParsedConfig>>,
+    pub gui_input: SharedGuiInput,
 
 }
 
@@ -55,8 +56,11 @@ impl SimulationController {
         event_sender: Sender<DroneEvent>,
         event_receiver: Receiver<DroneEvent>,
         drone_factory: Arc<dyn Fn(NodeId,Sender<DroneEvent>,Receiver<DroneCommand>,Receiver<Packet>,HashMap<NodeId, Sender<Packet>>,f32, ) -> Box<dyn Drone> + Send + Sync>,
+        gui_input: SharedGuiInput,
 
     ) -> Self {
+        println!("🔗 GUI_INPUT addr (SC_backend): {:p}", &*gui_input.lock().unwrap());
+
         let mut controller = SimulationController {
             network_config: network_config.clone(),
             config: network_config.clone(),
@@ -67,6 +71,7 @@ impl SimulationController {
             network_graph: HashMap::new(),
             packet_senders: HashMap::new(),
             drone_factory,
+            gui_input,
 
         };
 
@@ -508,7 +513,7 @@ impl SimulationController {
                 factory(id, controller_send, cmd_rx, pkt_rx, packet_send_map, pdr);
             drone.run();
         });
-       // broadcast_topology_change(&format!("[FloodRequired]::SpawnDrone"));
+       broadcast_topology_change(&self.gui_input, &self.config,&"[FloodRequired]::SpawnDrone".to_string());
 
 
         Ok(())
