@@ -42,6 +42,7 @@ dependencies = [
  "rustastic-drone",
  "serde",
  "serde_derive",
+ "serde_json",
  "skylink",
  "toml",
  "wg_2024",

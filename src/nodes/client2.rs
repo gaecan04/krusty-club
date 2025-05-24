@@ -659,6 +659,9 @@ fn process_packet (&mut self, packet: Packet) {
                 info!("Requesting media list to server: {}" , self.get_server_id().unwrap_or(0));
                 Ok(command_string)
             }
+            /*["[FloodRequired]",action] => {
+                //TODO: implement correct logic
+            }*/
             _=>{
                 info!("Unknown format");
                 Err(Box::new(io::Error::new(io::ErrorKind::NotFound, "Unknown format")))
