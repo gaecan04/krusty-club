@@ -513,7 +513,7 @@ impl SimulationController {
                 factory(id, controller_send, cmd_rx, pkt_rx, packet_send_map, pdr);
             drone.run();
         });
-       broadcast_topology_change(&self.gui_input, &self.config,&"[FloodRequired]::SpawnDrone".to_string());
+       //broadcast_topology_change(&self.gui_input, &self.config,&"[FloodRequired]::SpawnDrone".to_string());
 
 
         Ok(())
@@ -580,7 +580,7 @@ impl SimulationController {
         // 5. Update the internal network graph
         self.network_graph.entry(a).or_default().insert(b);
         self.network_graph.entry(b).or_default().insert(a);
-        broadcast_topology_change(&self.gui_input,&self.network_config,&"[FloodRequired]::AddSender".to_string());
+        //broadcast_topology_change(&self.gui_input,&self.network_config,&"[FloodRequired]::AddSender".to_string());
 
 
         Ok(())

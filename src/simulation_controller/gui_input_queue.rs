@@ -23,20 +23,7 @@ pub fn push_gui_message(queue: &SharedGuiInput, from: NodeId, msg: String) {
 }
 
 
-pub fn broadcast_topology_change(
-    gui_input: &SharedGuiInput,
-    config: &Arc<Mutex<ParsedConfig>>,
-    message: &str,
-) {
-    if let Ok(cfg) = config.lock() {
-        for client in &cfg.client {
-            push_gui_message(gui_input, client.id, message.to_string());
-        }
-        for server in &cfg.server {
-            push_gui_message(gui_input, server.id, message.to_string());
-        }
-    }
-}
+
 
 
 /// Pop and return all pending messages for a client
