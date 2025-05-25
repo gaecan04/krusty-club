@@ -157,7 +157,7 @@ pub struct server {
 }
 
 impl server {
-    pub(crate) fn new(id: u8, packet_sender: HashMap<NodeId,Sender<Packet>>, packet_receiver: Receiver<Packet>, gui_buffer_input: SharedGuiInput) -> Self {
+    pub(crate) fn new(id: u8, packet_sender: HashMap<NodeId,Sender<Packet>>, packet_receiver: Receiver<Packet>) -> Self {
         // Log server creation
         info!("Server {} created.", id);
 
@@ -178,9 +178,10 @@ impl server {
     /// Run the server to process incoming packets and handle fragment assembly
     pub fn run(&mut self, gui_buffer_input:SharedGuiInput) {
         // Initialize the logger
-        if let Err(e) = env_logger::builder().try_init() {
+
+        /*if let Err(e) = env_logger::builder().try_init() {
             eprintln!("Failed to initialize logger: {}", e);
-        }
+        }*/
 
         info!("Server {} started running.", self.id);
         loop {
