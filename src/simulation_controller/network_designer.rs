@@ -1536,7 +1536,7 @@ impl NetworkRenderer {
 
                                                 drop(ctrl); // Drop before self mutation
                                                 drop(cfg);
-                                                //broadcast_topology_change(&self.gui_input, &(self.config.clone().unwrap()), "[FloodRequired]::RemoveSender");
+                                                broadcast_topology_change(&self.gui_input, &(self.config.clone().unwrap()), "[FloodRequired]::RemoveSender");
 
                                                 self.build_from_config(cfg_arc.clone());
                                             }

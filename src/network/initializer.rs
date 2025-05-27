@@ -775,8 +775,8 @@ impl NetworkInitializer {
             println!("Spawned drone {}", id);
         }
     }
-
-    /*fn initialize_clients(&mut self,gui_input: SharedGuiInput) {
+/*
+    fn initialize_clients(&mut self,gui_input: SharedGuiInput) {
         for client in &self.config.client {
             let client_id = client.id;
             let mut senders = HashMap::new();
@@ -869,7 +869,40 @@ impl NetworkInitializer {
             }
         }
     }
+/*
+    fn initialize_clients(&mut self, gui_input: SharedGuiInput) {
+        for client in &self.config.client {
+            let client_id = client.id;
+            let mut senders = HashMap::new();
 
+            for &drone_id in &client.connected_drone_ids {
+                if let Some(tx) = self.packet_senders.get(&drone_id) {
+                    senders.insert(drone_id, tx.clone());
+                }
+            }
+
+            let (client_tx, client_rx) = crossbeam_channel::unbounded();
+            self.packet_senders.insert(client_id, client_tx.clone());
+
+            let gui_clone = gui_input.clone();
+
+            // Launch all clients as client1::MyClient
+            thread::spawn(move || {
+                println!("client1 spawned");
+                let sent_messages = HashMap::new();
+                let connected_server_id = None;
+                let mut cl1 = client1::MyClient::new(
+                    client_id,
+                    client_rx,
+                    senders,
+                    sent_messages,
+                    connected_server_id,
+                );
+                cl1.run(gui_clone);
+            });
+        }
+    }
+*/
     fn initialize_servers(&mut self,gui_input: SharedGuiInput) {
         for server in &self.config.server {
             println!("server initi");
