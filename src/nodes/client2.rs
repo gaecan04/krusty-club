@@ -69,6 +69,7 @@ impl MyClient {
 
     pub (crate) fn run(&mut self, gui_input: SharedGuiInput) {
         println!("Client {} starting run loop", self.id);
+        self.send_flood_request();
         loop {
             if let Ok(mut map) = gui_input.lock() {
 
@@ -107,24 +108,24 @@ impl MyClient {
             }
         }
     }
-/*
-fn process_controller_command(&mut self, msg: DroneCommand) {
-    match &mut msg.clone(){
-        DroneCommand::RemoveSender(drone_id)=>{
-            self.packet_send.remove(drone_id);
-            info!("Removed sender packet for {}", drone_id);
+    /*
+    fn process_controller_command(&mut self, msg: DroneCommand) {
+        match &mut msg.clone(){
+            DroneCommand::RemoveSender(drone_id)=>{
+                self.packet_send.remove(drone_id);
+                info!("Removed sender packet for {}", drone_id);
+            }
+            DroneCommand::AddSender(drone_id, sender)=>{
+                self.packet_send.insert(*drone_id , sender.clone());
+                info!("Added sender packet for {}", drone_id);
+            }
+            _=>{
+                warn!("The command is not recognized by the client")
+            }
         }
-        DroneCommand::AddSender(drone_id, sender)=>{
-            self.packet_send.insert(*drone_id , sender.clone());
-            info!("Added sender packet for {}", drone_id);
-        }
-        _=>{
-            warn!("The command is not recognized by the client")
-        }
-    }
-}*/
+    }*/
 
-fn process_packet (&mut self, packet: Packet) {
+    fn process_packet (&mut self, packet: Packet) {
         match &mut packet.clone().pack_type {
             PacketType::FloodRequest(request) => {
                 self.process_flood_request(request, packet.routing_header.clone());
@@ -156,7 +157,7 @@ fn process_packet (&mut self, packet: Packet) {
                             let sender = self.packet_send.get(sender_id).unwrap();
                             let mut new_packet = packet.clone();
                             new_packet.routing_header.hops = self.best_path(self.id , self.get_server_id().unwrap_or(0)).unwrap(); // since the packet has already been dropped on the previous route we try to find out if there is a better route
-                            (*sender).send(packet.clone()).unwrap();
+                            (*sender).send(packet.clone()).unwrap_or_default();
                         }
                     }
                 }
@@ -216,7 +217,7 @@ fn process_packet (&mut self, packet: Packet) {
             let packet = Packet{ // we encapsulate the fragment in the packet to be sent through the threads
                 routing_header: SourceRoutingHeader{
                     hop_index : 1, // the hop index is initialized to 1 to stay consistent with the logic of the drones
-                    hops : self.best_path(self.id , self.get_server_id().unwrap_or(0)).unwrap(),
+                    hops : self.best_path(self.id , self.get_server_id().unwrap_or(0)).unwrap_or_default(),
                 },
                 session_id: SESSION_IDS.lock().unwrap().clone(),
                 pack_type: MsgFragment(fragment),
@@ -225,7 +226,8 @@ fn process_packet (&mut self, packet: Packet) {
                 if let Some(sender) = self.packet_send.get(&next_hop){
                     match sender.try_send(packet.clone()) {
                         Ok(()) => {
-                            sender.send(packet.clone()).unwrap();
+                                info!("Sending packet with message {:?} , path: {:?}" , data , packet.routing_header.hops);
+                            sender.send(packet.clone()).unwrap_or_default();
                         }
                         Err(e)=>{
                             info!("Error sending packet: {:?}", e);
@@ -250,7 +252,7 @@ fn process_packet (&mut self, packet: Packet) {
         };
         for  sender_tuple in self.packet_send.iter() { // we go through all the neighbours of the Client, and we send a FloodRequest to each of them
             let sender = sender_tuple.1.clone();
-            sender.send(packet.clone()).unwrap();
+            sender.send(packet.clone()).unwrap_or_default();
         }
         info!("Starting the flood n. {}", FLOOD_IDS.lock().unwrap());
     }
@@ -335,8 +337,8 @@ fn process_packet (&mut self, packet: Packet) {
             updated_request.path_trace.push((self.id , Client) );
             //each time a FloodRequest arrives and its flood_id and initiator_id tuple matches one present in our seen_flood_ids we create a FloodResponse based on the request
             let response_packet = request.generate_response(0);
-            let  response_sender = self.packet_send.get(&updated_request.initiator_id).unwrap();
-            (*response_sender).send(response_packet).unwrap();
+            let response_sender = self.packet_send.get(&updated_request.path_trace[updated_request.path_trace.len()-2].0).unwrap();
+            (*response_sender).send(response_packet).unwrap_or_default();
             println!("Successfully sent response packet");
         }
         else {
@@ -360,7 +362,7 @@ fn process_packet (&mut self, packet: Packet) {
                     session_id:0,
                 };
                 if Some(*neighbor_id) != sender_id{
-                    sender.send(packet.clone()).unwrap();
+                    sender.send(packet.clone()).unwrap_or_default();
                 }
                 if let Err(err) = sender.send(packet) {
                     println!("Error sending packet: {:?}", err);
@@ -383,7 +385,7 @@ fn process_packet (&mut self, packet: Packet) {
             if let Some(sender) = self.packet_send.get(&next_hop){
                 match sender.try_send(ack_packet.clone()) {
                     Ok(()) => {
-                        sender.send(ack_packet.clone()).unwrap();
+                        sender.send(ack_packet.clone()).unwrap_or_default();
                     }
                     Err(e)=>{
                         println!("Error sending packet: {:?}", e);
@@ -489,6 +491,7 @@ fn process_packet (&mut self, packet: Packet) {
 
         // If I fail to find my target I exit
         if !predecessors.contains_key(&target_idx.0) {
+            warn!("No path found");
             return None;
         }
 
@@ -500,6 +503,7 @@ fn process_packet (&mut self, packet: Packet) {
                 path.push(self.net_graph[prev]);
                 current = prev;
             } else {
+                warn!("No path found");
                 return None;
             }
         }
@@ -595,80 +599,73 @@ fn process_packet (&mut self, packet: Packet) {
                 Ok(command_string)
             },
             ["[Logout]"] => {
-                if (*CHATTING_STATUS.lock().unwrap()).0 == true {//we make sure to not log out while in the middle of a chat
+                if (*CHATTING_STATUS.lock().unwrap()).0 == true { //we make sure to not log out while in the middle of a chat
                     Err(Box::new(io::Error::new(io::ErrorKind::Interrupted, "You are still in a chat with another user. End the chat before logging out")))
-                }
-                else if let Some(to_disconnect) = self.available_servers.iter().find(|(_, connected)| *connected == true).cloned() {
+                } else if let Some(to_disconnect) = self.available_servers.iter().find(|(_, connected)| *connected == true).cloned() {
                     let mut new_status = self.available_servers.take(&to_disconnect).unwrap();
                     new_status.1 = false; //since we are connected to a server we can actually log out and change the status of the server back to false
                     self.available_servers.insert(new_status);
                     info!("Logout from {:#?}", self.get_server_id());
                     Ok(command_string)
-                }
-                else{ //if we are yet to log in to any server we can log out of it
+                } else { //if we are yet to log in to any server we can log out of it
                     Err(Box::new(io::Error::new(io::ErrorKind::NotFound, "You have yet to login to any server")))
                 }
             },
-            ["ClientListRequest"]=>{
+            ["[ClientListRequest]"] => {
                 info!("Requesting the list of clients available for chat");
                 Ok(command_string)
-            }
-            ["MessageTo", client_id , message_str]=>{
+            },
+            ["[MessageTo]", client_id, message_str] => {
                 info!("Sending message: {} to client {}", message_str, client_id);
                 Ok(command_string)
-            }
-            ["ChatRequest", client_id]=>{
-                if (*CHATTING_STATUS.lock().unwrap()).eq(&(false , 0)){//when requesting a chat we need to make sure that we are not in the middle of chatting with someone else
+            },
+            ["[ChatRequest]", client_id] => {
+                if (*CHATTING_STATUS.lock().unwrap()).eq(&(false, 0)) { //when requesting a chat we need to make sure that we are not in the middle of chatting with someone else
                     info!("Requesting to chat with client: {}", client_id);
                     let peer_id: NodeId = (*client_id).parse().expect("Failed to parse u64");
                     self.change_chat_status(peer_id);
                     Ok(command_string)
-                }
-                else {
+                } else {
                     Err(Box::new(io::Error::new(io::ErrorKind::Interrupted, "You are already in a chat with another user.")))
                 }
-            }
-            ["HistoryRequest", personal_id , peer_id]=>{
+            },
+            ["[HistoryRequest]", personal_id, peer_id] => {
                 info!("Requesting chat history between client {} and client {}", personal_id, peer_id);
                 Ok(command_string)
-            }
-            ["MediaUpload", media_name, encoded_media]=>{
+            },
+            ["[MediaUpload]", media_name, encoded_media] => {
                 info!("Uploading media with name: {} , encoded as: {}", media_name, encoded_media);
                 Ok(command_string)
-            }
-            ["MediaDownloadRequest" , media_name]=>{
+            },
+            ["[MediaDownloadRequest]", media_name] => {
                 info!("Requesting to download media: {}", media_name);
                 Ok(command_string)
-            }
-            ["ChatFinish"]=>{
+            },
+            ["[ChatFinish]"] => {
                 if (*CHATTING_STATUS.lock().unwrap()).0 == true {
                     info!("Requesting to end current chat");
                     self.change_chat_status(0);
                     Ok(command_string)
-                }
-                else {
+                } else {
                     Err(Box::new(io::Error::new(io::ErrorKind::Interrupted, "You are not chatting with any user.")))
                 }
-
-            }
-            ["MediaBroadcast"]=>{
+            },
+            ["[MediaBroadcast]"] => {
                 info!("Broadcasting media to all connected clients");
                 Ok(command_string)
-            }
-            ["MediaListRequest"]=>{
+            },
+            ["[MediaListRequest]"] => {
                 info!("Requesting media list to server: {}" , self.get_server_id().unwrap_or(0));
                 Ok(command_string)
-            }
-            /*["[FloodRequired]",action] => {
-                //TODO: implement correct logic
-            }*/
-            _=>{
+            },
+            _ => {
                 info!("Unknown format");
                 Err(Box::new(io::Error::new(io::ErrorKind::NotFound, "Unknown format")))
-            }
+            },
         }
     }
 }
+
 
 
 
