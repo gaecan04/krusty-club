@@ -229,7 +229,7 @@ impl MyClient {
                 if let Some(sender) = self.packet_send.get(&next_hop){
                     match sender.try_send(packet.clone()) {
                         Ok(()) => {
-                                info!("Sending packet with message {:?} , path: {:?}" , data , packet.routing_header.hops);
+                            info!("Sending packet with message {:?} , path: {:?}" , data , packet.routing_header.hops);
                             sender.send(packet.clone()).unwrap_or_default();
                         }
                         Err(e)=>{
