@@ -89,6 +89,8 @@ impl MyClient {
                     println!("Checking for received packet by client {}...",self.id);
                     if let Ok(packet) = packet {
                         info!("Packet received by drone {} : {:?}",packet.routing_header.hops[packet.routing_header.hop_index], packet);
+                        println!("♥️♥️ Packet received by client {} : {:?}", self.id, packet);
+
                         self.process_packet(packet);
                     } else {
                         info!("No packet received or channel closed.");
@@ -249,7 +251,7 @@ impl MyClient {
             pack_type: PacketType::FloodRequest(flood_request),
             session_id: 18446744073709551615, // a session_id is reserved for the flood_requests
             routing_header: SourceRoutingHeader{
-                hop_index: 0,
+                hop_index: 1,
                 hops: [self.id].to_vec(),
             }
         };

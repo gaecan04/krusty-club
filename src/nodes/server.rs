@@ -128,10 +128,7 @@ impl NetworkGraph {
             let source_type = self.node_types.get(&source).map(|t| format!("{:?}", t)).unwrap_or("Unknown".to_string());
             let target_type = self.node_types.get(&target).map(|t| format!("{:?}", t)).unwrap_or("Unknown".to_string());
 
-            println!(
-                "{} ({}) <-> {} ({}) with {} drops",
-                source, source_type, target, target_type, weight
-            );
+            //println!("{} ({}) <-> {} ({}) with {} drops", source, source_type, target, target_type, weight);
         }
     }
 }
@@ -250,6 +247,8 @@ impl server {
                     match packet_result {
                         Ok(mut packet) => {
                             info!("Server {} received packet :{:?}", self.id, packet);
+                            println!("♥️♥️♥️ Packet received by server {} : {:?}", self.id, packet);
+
                             match &packet.pack_type {
                                 PacketType::MsgFragment(fragment) => {
                                     self.send_ack(&packet, &fragment);

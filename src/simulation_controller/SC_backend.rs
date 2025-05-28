@@ -201,9 +201,9 @@ impl SimulationController {
             DroneEvent::PacketSent(packet) => {
                 // Log packet sent event
                 if let Some(&last_hop) = packet.routing_header.hops.last() {
-                    println!("Packet sent from {} to {}", packet.session_id, last_hop);
+                   // println!("Packet sent from {} to {}", packet.session_id, last_hop);
                 } else {
-                    println!("Packet sent from {} but routing header was empty", packet.session_id);
+                    //println!("Packet sent from {} but routing header was empty", packet.session_id);
                 }
             },
             DroneEvent::PacketDropped(packet) => {

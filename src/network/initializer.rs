@@ -780,28 +780,7 @@ impl NetworkInitializer {
             println!("Spawned drone {}", id);
         }
     }
-    /*
-        fn initialize_clients(&mut self,gui_input: SharedGuiInput) {
-            for client in &self.config.client {
-                let client_id = client.id;
-                let mut senders = HashMap::new();
-                for &drone_id in &client.connected_drone_ids {
-                    if let Some(tx) = self.packet_senders.get(&drone_id) {
-                        senders.insert(drone_id, tx.clone());
-                    }
-                }
-                let (client_tx, client_rx) = crossbeam_channel::unbounded();
-                self.packet_senders.insert(client_id, client_tx.clone());
 
-               // client2::start_client(client_id, client_rx, senders,gui_input.clone());
-                let mut cl2 = client2::MyClient::new(client_id,client_rx,senders);
-                let mut value = gui_input.clone();
-                thread::spawn(move || {
-                    println!("client2 spawned");
-                    cl2.run(value);
-                });        }
-
-        }*/
 
     fn initialize_clients(&mut self, gui_input: SharedGuiInput) {
         for (i, client) in self.config.client.iter().enumerate() {
@@ -815,57 +794,53 @@ impl NetworkInitializer {
                 }
             }
 
-            let (client_tx, client_rx) = crossbeam_channel::unbounded();
-            self.packet_senders.insert(client_id, client_tx.clone());
+           // let (client_tx, client_rx) = crossbeam_channel::unbounded();
+            //self.packet_senders.insert(client_id, client_tx.clone());
 
+            let client_rx = self
+                            .packet_receivers
+                            .get(&client_id)
+                            .expect("setup_channels must have created this")
+                            .clone();
             let gui_clone = gui_input.clone();
 
-            if i % 2 == 0 {
-                thread::spawn(move || {
-                    let mut cl2 = client2::MyClient::new(client_id, client_rx, senders);
-                    cl2.run(gui_clone);
-                });
-            } else {
-                thread::spawn(move || {
-                    let mut cl1 = client1::MyClient::new(client_id, client_rx, senders, HashMap::new(), None);
-                    cl1.run(gui_clone);
-                });
-            }
-        }
-    }/*
-    fn initialize_clients(&mut self, gui_input: SharedGuiInput) {
-        for client in &self.config.client {
-            let client_id = client.id;
-            let mut senders = HashMap::new();
+            if self.config.client.len() == 2 {
+                if client_id % 2 == 0 {
+                    // client2
+                    thread::spawn(move || {
+                        println!("client2 spawned");
+                        let mut cl2 = client2::MyClient::new(client_id, client_rx.clone(), senders);
+                        cl2.run(gui_clone);
+                    });
+                } else {
+                    // client1
+                    thread::spawn(move || {
+                        println!("client1 spawned");
+                        let mut cl1 = client1::MyClient::new(client_id, client_rx.clone(), senders, HashMap::new(), None,HashSet::new());
 
-            for &drone_id in &client.connected_drone_ids {
-                if let Some(tx) = self.packet_senders.get(&drone_id) {
-                    senders.insert(drone_id, tx.clone());
+                        cl1.run(gui_clone);
+                    });
+                }
+            } else {
+                if i % 2 == 0 {
+                    // client2 for even-indexed clients
+                    thread::spawn(move || {
+                        println!("client2 spawned");
+                        let mut cl2 = client2::MyClient::new(client_id, client_rx.clone(), senders);
+                        cl2.run(gui_clone);
+                    });
+                } else {
+                    // client1 for odd-indexed clients
+                    thread::spawn(move || {
+                        println!("client1 spawned");
+                        let mut cl1 = client1::MyClient::new(client_id, client_rx.clone(), senders, HashMap::new(), None,HashSet::new());
+                        cl1.run(gui_clone);
+                    });
                 }
             }
-
-            let (client_tx, client_rx) = crossbeam_channel::unbounded();
-            self.packet_senders.insert(client_id, client_tx.clone());
-
-            let gui_clone = gui_input.clone();
-
-            // Launch all clients as client1::MyClient
-            thread::spawn(move || {
-                println!("client1 spawned");
-                let sent_messages = HashMap::new();
-                let connected_server_id = None;
-                let mut cl1 = client1::MyClient::new(
-                    client_id,
-                    client_rx,
-                    senders,
-                    sent_messages,
-                    connected_server_id,
-                );
-                cl1.run(gui_clone);
-            });
         }
     }
-*/
+
     fn initialize_servers(&mut self, gui_input: SharedGuiInput) {
         for server in &self.config.server {
             let server_id = server.id;
@@ -878,12 +853,17 @@ impl NetworkInitializer {
                 }
             }
 
-            let (server_tx, server_rx) = crossbeam_channel::unbounded();
-            self.packet_senders.insert(server_id, server_tx.clone());
+           // let (server_tx, server_rx) = crossbeam_channel::unbounded();
+            //self.packet_senders.insert(server_id, server_tx.clone());
+            let server_rx = self
+                .packet_receivers
+                .get(&server_id)
+                .expect("setup_channels must have created this")
+                .clone();
 
             let gui_clone = gui_input.clone();
             thread::spawn(move || {
-                let mut srv = server::server::new(server_id as u8, senders, server_rx);
+                let mut srv = server::server::new(server_id as u8, senders, server_rx.clone());
                 srv.run(gui_clone);
             });
         }
