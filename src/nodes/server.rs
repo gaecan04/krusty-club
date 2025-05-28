@@ -193,6 +193,7 @@ impl server {
                         println!("🧹 Server {} popped one msg from GUI", self.id);
                         drop(buffer); // ✅ release lock early
                         if let Some(stripped) = message.strip_prefix("[MediaBroadcast]::") {
+                            info!("Server received a MediaBroadcast request");
                             let parts: Vec<&str> = stripped.splitn(2, "::").collect();
                             if parts.len() == 2 {
                                 let media_name = parts[0].to_string();
@@ -215,10 +216,12 @@ impl server {
                 Ok(mut packet) => {
                     match &packet.pack_type {
                         PacketType::MsgFragment(fragment) => {
+                            info!("Server received fragment");
                             self.send_ack(&packet, &fragment);
                             self.handle_fragment(packet.session_id, fragment, packet.routing_header);
                         }
                         PacketType::Nack(nack) => {
+                            info!("Server received NACK");
                             self.handle_nack(packet.session_id, nack, packet.routing_header);
                         }
                         PacketType::Ack(ack) => {
@@ -226,11 +229,13 @@ impl server {
                             //self.handle_ack(packet.session_id, ack, packet.routing_header); --> no need to do anything
                         }
                         PacketType::FloodRequest(flood_request) => {
+                            info!("Server received FloodRequest");
                             // Process flood requests from clients trying to discover the network
                             // Server should send back a flood response and forward the FloodRequest to its neighbors except the one sending it
                             self.handle_flood_request(packet.session_id, flood_request, packet.routing_header);
                         }
                         PacketType::FloodResponse(flood_response) => {
+                            info!("Server received FloodResponse");
                             // Process flood responses containing network information --> used to modify the configuration of the netwrok graph.
                             self.handle_flood_response(packet.session_id, flood_response, packet.routing_header);
                         }
@@ -300,8 +305,8 @@ impl server {
                         self.registered_clients.push(client_id);
                         info!("Client {} registered to this server", client_id);
 
-                        let loging_acknowledgement= format!("[LoginAck]::{}", session_id);
-                        self.send_chat_message(session_id, client_id,loging_acknowledgement, routing_header);
+                        let login_acknowledgement= format!("[LoginAck]::{}", session_id);
+                        self.send_chat_message(session_id, client_id,login_acknowledgement, routing_header);
                     }
                 } else {
                     error!("server_id in Login request is not the id of the server receiving the fragment!")
@@ -309,6 +314,7 @@ impl server {
 
             }
             ["[ClientListRequest]"] => {
+                info!("Server received ClientListRequest");
                 if let Some(sender) = self.packet_sender.get(&client_id) {
                     let clients = self.registered_clients.clone();
                     let response = format!("[ClientListResponse]::{:?}", clients);
@@ -316,6 +322,7 @@ impl server {
                 }
             }
             ["[ChatRequest]", target_id_str] => {
+                info!("Server received ChatRequest");
                 if let Ok(target_id) = target_id_str.parse::<NodeId>() {
                     let success = self.registered_clients.contains(&target_id);
                     let response = format!("[ChatStart]::{}", success);
@@ -323,6 +330,7 @@ impl server {
                 }
             }
             ["[MessageTo]", target_id_str, msg] => {
+                info!("Server received MessageTo");
                 if let Ok(target_id) = target_id_str.parse::<NodeId>() {
                     if self.registered_clients.contains(&target_id) {
                         let response = format!("[MessageFrom]::{}::{}", client_id, msg);
@@ -344,6 +352,7 @@ impl server {
                 }
             }
             ["[HistoryRequest]", source_id, target_id_str,] => { //when client wants to see chronology
+                info!("Server received HistoryRequest");
                 if let Ok(target_id) = target_id_str.parse::<NodeId>() {
                     let client_1 = source_id.parse::<NodeId>().unwrap_or(client_id);
                     let client_2 = target_id;
@@ -358,6 +367,7 @@ impl server {
             }
             //chat_history: HashMap<(NodeId,NodeId), VecDeque<String>>,
             ["[ChatHistoryUpdate]", source_server, serialized_entry] => {
+                info!("Server received ChatHistoryUpdate");
                 if let Ok(((id1, id2), history)) = serde_json::from_str::<((NodeId, NodeId), VecDeque<String>)>(serialized_entry) {
                     self.chat_history.insert((id1, id2), history);
                     info!("Received and saved full chat history entry from server {}", source_server);
@@ -367,6 +377,7 @@ impl server {
             }
 
             ["[MediaUpload]", image_info] => {
+                info!("Server received MediaUpload");
                 let parts: Vec<&str> = image_info.splitn(2, "::").collect();
                 if parts.len() == 2 {
                     let media_name = parts[0].to_string();
@@ -379,6 +390,7 @@ impl server {
             }
             //Providing Media list if asked by client --> so they can get to know before what to download
             ["[MediaListRequest]"] => {
+                info!("Server received MediaListRequest");
                 let list = self.media_storage.keys()
                     .cloned()
                     .collect::<Vec<String>>()
@@ -387,6 +399,7 @@ impl server {
                 self.send_chat_message(session_id, client_id, response, routing_header);
             }
             ["[MediaDownloadRequest]", media_name] => {
+                info!("Server received MediaDownloadRequest");
                 let response = if let Some((owner,base64_data)) = self.media_storage.get(*media_name) {
                     format!("[MediaDownloadResponse]::{}::{}", media_name, base64_data)
                 } else {
@@ -397,6 +410,7 @@ impl server {
             // da chi lo ricevo??? La richiesta dovrebbe mandarmela un client. Oppure il simulationController dalla GUI???
             //MEDIABROADCAST --> sending to all registered clients
             ["[MediaBroadcast]", media_name, base64_data] => {
+                info!("Server received MediaBroadcast command");
                 self.media_storage.insert(media_name.to_string(), (client_id, base64_data.to_string()));
                 for &target_id in &self.registered_clients {
                     // Avoid sending to the sender
@@ -426,6 +440,7 @@ impl server {
                                     let routing_header = SourceRoutingHeader::with_first_hop(route);
                                     let msg = format!("[ChatHistoryUpdate]::{}::{}", self.id, serialized);
                                     self.send_chat_message(session_id, node_id, msg, routing_header);
+                                    info!("Server sent ChatHistoryUpdate");
                                 }
                             }
                         }
