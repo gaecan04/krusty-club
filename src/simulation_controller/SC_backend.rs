@@ -200,11 +200,19 @@ impl SimulationController {
         match event {
             DroneEvent::PacketSent(packet) => {
                 // Log packet sent event
-                println!("Packet sent from {} to {}", packet.session_id, packet.routing_header.hops[packet.routing_header.hops.len() - 1]);
+                if let Some(&last_hop) = packet.routing_header.hops.last() {
+                    println!("Packet sent from {} to {}", packet.session_id, last_hop);
+                } else {
+                    println!("Packet sent from {} but routing header was empty", packet.session_id);
+                }
             },
             DroneEvent::PacketDropped(packet) => {
                 // Log packet dropped event
-                println!("Packet dropped from {} to {}", packet.session_id, packet.routing_header.hops[packet.routing_header.hops.len() - 1]);
+                if let Some(&last_hop) = packet.routing_header.hops.last() {
+                    println!("Packet dropped from {} to {}", packet.session_id, last_hop);
+                } else {
+                    println!("Packet dropped from {} but routing header was empty", packet.session_id);
+                }
             },
             DroneEvent::ControllerShortcut(packet) => {
                 // Handle direct routing for critical packets

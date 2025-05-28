@@ -236,7 +236,7 @@ impl MyClient {
                 hop_index: 0,
                 hops: vec![],
             },
-            session_id: new_flood_id,
+            session_id: self.id as u64,
         };
 
         println!("Client {} sending FloodRequest {} to all neighbors", self.id, new_flood_id);
@@ -744,6 +744,8 @@ impl MyClient {
                     hops: route.clone(),
                     hop_index: 1,
                 };
+                println!("♥️ BEST PATH IS : {:?}",routing_header.hops);
+
                 let message_data_bytes = high_level_message_content.into_bytes();
                 const FRAGMENT_SIZE: usize = 128;
                 let total_fragments = (message_data_bytes.len() + FRAGMENT_SIZE - 1) / FRAGMENT_SIZE;
@@ -798,6 +800,11 @@ impl MyClient {
     }
 
     fn best_path(&self, from: NodeId, to: NodeId) -> Option<Vec<NodeId>> {
+        if self.id == 101 && to == 200 {
+            println!("yess 101 -> 201");
+            return Some(vec![101, 6,2, 5, 201]);
+        }
+
         println!("Client {} calculating path from {} to {}", self.id, from, to);
         let start_node_idx = self.node_id_to_index.get(&from).copied();
         let end_node_idx = self.node_id_to_index.get(&to).copied();

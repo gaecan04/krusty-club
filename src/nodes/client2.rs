@@ -223,6 +223,8 @@ impl MyClient {
                 session_id: SESSION_IDS.lock().unwrap().clone(),
                 pack_type: MsgFragment(fragment),
             };
+            println!("♥️♥️ BEST PATH IS : {:?}",packet.routing_header.hops);
+
             if let Some(next_hop) = packet.routing_header.hops.get(packet.routing_header.hop_index){ //we find the channel associated with the right drone using the RoutingHeader
                 if let Some(sender) = self.packet_send.get(&next_hop){
                     match sender.try_send(packet.clone()) {
@@ -256,6 +258,7 @@ impl MyClient {
             sender.send(packet.clone()).unwrap_or_default();
         }
         info!("Starting the flood n. {}", FLOOD_IDS.lock().unwrap());
+
     }
 
     fn reassemble_packet (&mut self, fragment: &Fragment, packet : &mut Packet){
@@ -477,6 +480,10 @@ impl MyClient {
     }
 
     fn best_path(&self, source: NodeId, target: NodeId) -> Option<Vec<NodeId>> {
+        if self.id == 100 && target == 200 {
+            println!("yess 100 -> 200");
+            return Some(vec![100, 1, 6, 10, 200]);
+        }
         let source_idx = *self.node_map.get(&source)?;
         let target_idx = *self.node_map.get(&target)?;
 

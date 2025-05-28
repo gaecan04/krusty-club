@@ -40,4 +40,6 @@ common = { git = "https://github.com/Ossyk/common.git", branch = "main" }
 
 
 [features]
+default = []
 serialize = []
+unlimited_buffer = ["ap2024_unitn_cppenjoyers_drone/unlimited_buffer"]
