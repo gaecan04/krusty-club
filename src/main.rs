@@ -1,70 +1,171 @@
-mod utils;
 mod network;
 mod nodes;
-mod gui;
 mod simulation_controller;
-
+use std::collections::HashMap;
+use std::error::Error;
+use std::sync::{Arc, Mutex};
 use std::thread;
-use crate::gui::MyApp;
-/*
-fn main() {
-    // Load the network configuration from the `.toml` file
-    let config_path = "path/to/network_config.toml";
-    let network_config = match config::NetworkConfig::from_file(config_path) {
-        Ok(config) => config,
-        Err(e) => {
-            eprintln!("Error loading network configuration: {}", e);
-            return;
+use crossbeam_channel::{Receiver, Sender, unbounded};
+use wg_2024::controller::{DroneCommand, DroneEvent};
+use wg_2024::drone::Drone;
+use wg_2024::network::NodeId;
+use wg_2024::packet::Packet;
+use simulation_controller::app::NetworkApp;
+use simulation_controller::SC_backend::SimulationController;
+use crate::network::TOML_parser;
+use crate::network::initializer::{DroneImplementation, MyDrone, NetworkInitializer, ParsedConfig};
+use crate::simulation_controller::gui_input_queue::{push_gui_message, new_gui_input_queue, SharedGuiInput};
+
+fn main() -> Result<(), Box<dyn Error>> {
+    env_logger::init();
+    // Config and duration
+    let config_path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "topologies/default.toml".to_string());
+
+    let simulation_duration = std::env::args()
+        .nth(3)
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(60);
+
+    // Initialize network and shared channels
+    let (event_sender, event_receiver, command_sender, command_receiver, packet_recv, packet_send_map, config) =
+        initialize_network_channels(&config_path)?;
+    let gui_input_queue = new_gui_input_queue();
+    println!("🔗 GUI_INPUT addr (main): {:p}", &*gui_input_queue.lock().unwrap());
+
+    let parsed_config = Arc::new(Mutex::new(config.clone()));
+
+    // ✅ Create drone_factory closure => Required by updated SC constructor
+    let drone_factory = Arc::new(
+        |id, controller_send, controller_recv, packet_recv, packet_send, pdr| {
+            Box::new(MyDrone::new(
+                id,
+                controller_send,
+                controller_recv,
+                packet_recv,
+                packet_send,
+                pdr,
+            )) as Box<dyn Drone>
         }
+    );
 
-    };
+    // Create Simulation Controller with factory
+    let controller = Arc::new(Mutex::new(SimulationController::new(
+        parsed_config.clone(),
+        event_sender.clone(),
+        event_receiver,
+        drone_factory.clone(),
+        gui_input_queue.clone(),
+    )));
 
-    println!("Network configuration loaded successfully!");
+    // Create drone implementations using the NetworkInitializer
+    let drone_impls = NetworkInitializer::create_drone_implementations(
+        &config,
+        event_sender.clone(),
+        command_receiver.clone(),
+        packet_recv,
+        packet_send_map,
+    );
 
-    // run the egui
-    println!("Launching GUI...");
-    // Call the GUI logic directly on the main thread
-    if let Err(e) = gui::run() {
-        eprintln!("Failed to launch GUI: {}", e);
+    // Initialize the network
+    let mut initializer = NetworkInitializer::new(&config_path, drone_impls, controller.clone())?;
+
+    initializer.initialize(gui_input_queue.clone())?;
+    println!("Network initialized successfully");
+
+    // Decide mode
+    if std::env::args().any(|arg| arg == "--headless") {
+        println!("Running in headless mode");
+        run_headless_simulation(simulation_duration, parsed_config.clone(), controller.clone());
+    } else {
+        println!("Starting GUI application");
+        SimulationController::start_background_thread(controller.clone());
+        run_gui_application(event_sender.clone(), command_receiver, parsed_config, drone_factory,&config_path,gui_input_queue.clone())?;
     }
 
-    // Start the Network Initializer in its own thread
-    let network_handle = thread::spawn(move || {
-        println!("Initializing network...");
-        match network::initializer::initialize_network(network_config) {
-            Ok(_) => println!("Network initialized successfully!"),
-            Err(e) => eprintln!("Error initializing network: {}", e),
-        }
-    });
-
-    // Start the Simulation Controller in its own thread
-    let simulation_handle = thread::spawn(|| {
-        println!("Starting Simulation Controller...");
-        match network::simulation::run_simulation_controller() {
-            Ok(_) => println!("Simulation Controller finished!"),
-            Err(e) => eprintln!("Error in Simulation Controller: {}", e),
-        }
-    });
-
-    // Wait for all threads to complete
-    if let Err(e) = gui_handle.join() {
-        eprintln!("Error in GUI thread: {:?}", e);
-    }
-
-    if let Err(e) = network_handle.join() {
-        eprintln!("Error in Network Initializer thread: {:?}", e);
-    }
-
-    if let Err(e) = simulation_handle.join() {
-        eprintln!("Error in Simulation Controller thread: {:?}", e);
-    }
-
-    println!("All threads have completed. Exiting program.");
+    Ok(())
 }
 
- */
+fn run_headless_simulation(
+    duration: u64,
+    _config: Arc<Mutex<ParsedConfig>>,
+    controller: Arc<Mutex<SimulationController>>,
+) {
+    println!("Running simulation for {} seconds", duration);
+
+    let controller_clone = controller.clone();
+    thread::spawn(move || {
+        let mut controller = controller_clone.lock().unwrap();
+        controller.run();
+    });
+
+    std::thread::sleep(std::time::Duration::from_secs(duration));
+    println!("Simulation completed");
+}
+
+fn run_gui_application(
+    event_sender: Sender<DroneEvent>,
+    command_receiver: Receiver<DroneCommand>,
+    config: Arc<Mutex<ParsedConfig>>,
+    drone_factory: Arc<dyn Fn(NodeId, Sender<DroneEvent>, Receiver<DroneCommand>, Receiver<Packet>, HashMap<NodeId, Sender<Packet>>, f32) -> Box<dyn Drone> + Send + Sync>,
+    config_path: &str,
+    gui_input_queue: SharedGuiInput,
+) -> Result<(), Box<dyn Error>> {
+    let options = eframe::NativeOptions::default();
 
 
-fn main() {
+    eframe::run_native(
+        "Drone Simulation",
+        options,
+        Box::new(|cc| {
+            Ok(Box::new(NetworkApp::new_with_network(
+                cc,
+                event_sender.clone(),
+                config.clone(),
+                drone_factory.clone(),
+                config_path,
+                gui_input_queue.clone(),
+            )))
+        }),
+    )?;
+    Ok(())
 
+}
+
+fn initialize_network_channels(
+    config_path: &str,
+) -> Result<
+    (
+        Sender<DroneEvent>,
+        Receiver<DroneEvent>,
+        Sender<DroneCommand>,
+        Receiver<DroneCommand>,
+        Receiver<Packet>,
+        HashMap<NodeId, Sender<Packet>>,
+        ParsedConfig,
+    ),
+    Box<dyn Error>,
+> {
+    let config = TOML_parser::parse_config(config_path)?;
+
+    let (event_sender, event_receiver) = unbounded::<DroneEvent>();
+    let (command_sender, command_receiver) = unbounded::<DroneCommand>();
+    let (packet_send, packet_recv) = unbounded::<Packet>();
+
+    let packet_send_map: HashMap<NodeId, Sender<Packet>> = config
+        .drone
+        .iter()
+        .map(|drone| (drone.id, packet_send.clone()))
+        .collect();
+
+    Ok((
+        event_sender,
+        event_receiver,
+        command_sender,
+        command_receiver,
+        packet_recv,
+        packet_send_map,
+        config,
+    ))
 }

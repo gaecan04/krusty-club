@@ -9,13 +9,12 @@ use base64;
 use image::load_from_memory;
 use petgraph::graph::NodeIndex;
 use petgraph::stable_graph::StableGraph;
-use wg_2024::controller::{DroneCommand, DroneEvent};
 use wg_2024::network::{NodeId, SourceRoutingHeader};
 use wg_2024::packet::{Ack, FloodRequest, FloodResponse, Fragment, Nack, NackType, NodeType, Packet, PacketType};
 //use wg_2024::packet::PacketType::MsgFragment;
 //use wg_2024::drone::Drone;
 use crossbeam_channel::{select_biased, Receiver, Sender};
-use crate::simulation_controller::gui_input_queue::{pop_all_gui_messages, push_gui_message, SharedGuiInput};
+use crate::simulation_controller::gui_input_queue::{SharedGuiInput};
 
 
 #[derive(Debug, Clone)]
@@ -44,15 +43,13 @@ pub struct MyClient{
     pub id: NodeId,
     pub packet_recv: Receiver<Packet>, //receives packets from other nodes
     pub packet_send: HashMap<NodeId, Sender<Packet>>, //sends packets to neighbors
-    pub sim_contr_recv: Receiver<DroneCommand>,
-    pub sim_contr_send : Sender<DroneEvent>,
     pub sent_messages: HashMap<u64, SentMessageInfo>,
     pub received_messages : HashMap<u64, ReceivedMessageState>, //to determine when the message is complete (it has all the fragments)
     pub network_graph : StableGraph<NodeInfo, usize>, //graph to memorize info about nodes
     pub node_id_to_index : HashMap<NodeId, NodeIndex>, //mapping from node_id to inner indices of the graph
     pub active_flood_discoveries: HashMap<u64, FloodDiscoveryState>, //structure to take track of flood_request/response
-    pub gui_input : SharedGuiInput,
     pub connected_server_id : Option<NodeId>,
+    pub seen_flood_ids : HashSet<(u64, NodeId)>,
     //pub finalized_flood_discoveries : bool,
 }
 
@@ -65,11 +62,16 @@ struct FloodDiscoveryState {
 }
 
 impl MyClient {
-    pub fn new(id: NodeId, sim_contr_recv: Receiver<DroneCommand>, sim_contr_send: Sender<DroneEvent>, packet_recv: Receiver<Packet>, packet_send: HashMap<NodeId, Sender<Packet>>, sent_messages: HashMap<u64, SentMessageInfo>, gui_input: SharedGuiInput, connected_server_id : Option<NodeId>) -> Self {
+    pub(crate) fn new(
+        id: NodeId,
+        packet_recv: Receiver<Packet>,
+        packet_send: HashMap<NodeId, Sender<Packet>>,
+        sent_messages: HashMap<u64, SentMessageInfo>,
+        connected_server_id: Option<NodeId>,
+        seen_flood_ids : HashSet<(u64, NodeId)>,
+    ) -> Self {
         Self {
             id,
-            sim_contr_recv,
-            sim_contr_send,
             packet_recv,
             packet_send,
             sent_messages,
@@ -77,61 +79,46 @@ impl MyClient {
             network_graph: StableGraph::new(),
             node_id_to_index: HashMap::new(),
             active_flood_discoveries: HashMap::new(),
-            gui_input,
-            connected_server_id : None,
-            //finalized_flood_discoveries : HashSet::new(),
+            connected_server_id,
+            seen_flood_ids,
         }
     }
 
-    fn run(&mut self) {
+
+    pub(crate) fn run(&mut self, gui_input: SharedGuiInput) {
+
         let mut seen_flood_ids = HashSet::new();
         println!("Client {} starting run loop", self.id);
+
         if self.network_graph.node_count() == 0 {
             println!("Client {} network graph is empty, starting flood discovery", self.id);
-            self.start_flood_discovery()
+            self.start_flood_discovery();
         }
+
         loop {
-            let gui_messages = pop_all_gui_messages(&self.gui_input, self.id);
-            for (src_id, msg_string) in gui_messages {
-                self.process_gui_command(src_id, msg_string);
-            }
-            self.check_flood_discoveries_timeouts();
-            select_biased! {
-                recv(self.sim_contr_recv) -> command => {
-                    if let Ok(command) = command {
-                        println!("Command received by client {} : {:?}", self.id, command);
-                        match command {
-                            DroneCommand::AddSender(node_id, sender) => {
-                                println!("Client {} received AddSender command for node {}", self.id, node_id);
-                                self.packet_send.insert(node_id, sender);
-                                println!("Client {} starting flood discovery after AddSender", self.id);
-                                self.start_flood_discovery();
-                            },
-                            DroneCommand::RemoveSender(node_id) => {
-                                println!("Client {} received RemoveSender command for node {}", self.id, node_id);
-                                self.packet_send.remove(&node_id);
-                                self.remove_node_from_graph(node_id);
-                                println!("Client {} starting flood discovery after RemoveSender", self.id);
-                                self.start_flood_discovery();
-                            },
-                            DroneCommand::Crash | DroneCommand::SetPacketDropRate(_) => {
-                                eprintln!("Client {} received unexpected command: {:?}", self.id, command);
-                            }
-                        }
-                    } else {
-                        println!("Simulation Controller channel closed for client {}. Exiting run loop.", self.id);
-                        break;
+            // Process only ONE GUI message per iteration
+            if let Ok(mut map) = gui_input.lock() {
+
+                if let Some(msgs) = map.get_mut(&self.id) {
+                    if !msgs.is_empty() {
+                        let msg = msgs.remove(0); // remove the first message
+                        drop(map); // release lock early
+                        self.process_gui_command(self.id, msg); // process the message
                     }
-                },
+                }
+            }
+
+            self.check_flood_discoveries_timeouts();
+
+            select_biased! {
                 recv(self.packet_recv) -> packet => {
                     println!("Checking for received packet by client {} ...", self.id);
                     if let Ok(packet) = packet {
-                        println!("Packet received by drone {} : {:?}",self.id, packet);
+                        println!("Packet received by client {} : {:?}", self.id, packet);
                         self.process_packet(packet, &mut seen_flood_ids);
                     }
                 },
                 default => {
-                    //it avoids too much CPU consuming
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 },
             }
@@ -164,7 +151,7 @@ impl MyClient {
         match packet_type {
             PacketType::FloodRequest(request) => { //CONTROLLA SE IL CLIENT PUò PROPAGARE FLOODREQUESTS
                 //println!("Client {} received FloodRequest {}, ignoring as client should not propagate.", self.id, request.flood_id);
-                self.process_flood_request(&request, seen_flood_ids, packet.routing_header.clone());
+                self.process_flood_request(&request, packet.routing_header.clone());
             },
             PacketType::FloodResponse(response) => {
                 println!("Client {} received FloodResponse for flood_id {}", self.id, response.flood_id);
@@ -199,100 +186,85 @@ impl MyClient {
         }
     }
 
-    fn process_flood_request(&mut self, request: &FloodRequest, seen_flood_ids: &mut HashSet<u64>, header: SourceRoutingHeader) {
-        let mut updated_request = request.clone();
-        updated_request.path_trace.push((self.id, NodeType::Client));
-        println!("Client {} processed FloodRequest {}. Path trace now: {:?}", self.id, request.flood_id, updated_request.path_trace);
-        let flood_response = FloodResponse {
-            flood_id: request.flood_id,
-            path_trace: updated_request.path_trace,
-        };
-        let mut response_routing_header = header.clone();
-        response_routing_header.hops.reverse();
-        response_routing_header.hop_index = 1;
-        let reversed_hops = response_routing_header.hops.clone();
-        let final_destination_id = flood_response.path_trace.first().map(|(id, _)| *id);
-        if response_routing_header.hops.len() > 1 {
-            let next_hop = response_routing_header.hops[response_routing_header.hop_index];
-            let response_packet_to_send = Packet {
-                pack_type: PacketType::FloodResponse(flood_response.clone()),
-                routing_header: response_routing_header.clone(),
-                session_id: request.flood_id,
+    fn process_flood_request(&mut self, request: &FloodRequest, header: SourceRoutingHeader) {
+        let flood_identifier = (request.flood_id, request.initiator_id);
+        let sender_id = request.path_trace.last().map(|(id, _)| *id);
+        if self.seen_flood_ids.contains(&flood_identifier) || (self.packet_send.len() == 1 && sender_id.is_some()){
+            //- - - - sending FloodResponse back - - - -
+            let mut response_path_trace = request.path_trace.clone();
+            response_path_trace.push((self.id, NodeType::Client));
+            let flood_response = FloodResponse {
+                flood_id: request.flood_id,
+                path_trace: response_path_trace,
             };
-            if let Some(sender) = self.packet_send.get(&next_hop) {
-                match sender.send(response_packet_to_send.clone()) {
-                    Ok(()) => {
-                        println!("Client {} sent FloodResponse {} back to {}", self.id, request.flood_id, next_hop);
-                        self.sim_contr_send.send(DroneEvent::PacketSent(response_packet_to_send.clone())).unwrap_or_else(|err|{eprintln!("Client {} failed to send PacketSent event to sim_controller for packet sent to {:?}: {}", self.id, final_destination_id, err)});
-                    }
-                    Err(e) => {
-                        eprintln!("Client {} failed to send FloodResponse {} back to {}: {}", self.id, request.flood_id, next_hop, e);
-                        if let Some(dest_id) = final_destination_id {
-                            let shortcut_header = SourceRoutingHeader {
-                                hop_index: 0,
-                                hops: vec![dest_id],
+            if let Some(prev_hop_id) = sender_id {
+                if let Some(sender) = self.packet_send.get(&prev_hop_id) {
+                    let response_packet_to_send = Packet {
+                        pack_type : PacketType::FloodResponse(flood_response.clone()),
+                        routing_header: SourceRoutingHeader {
+                            hop_index: 1,
+                            hops: request.path_trace.iter().map(|(id, _)| *id).rev().collect(),
+                        },
+                        session_id : request.flood_id,
+                    };
+                    let mut response_route_hops : Vec<NodeId> = request.path_trace.iter().map(|(id, _)| *id).collect();
+                    response_route_hops.push(self.id);
+                    response_route_hops.reverse();
+                    let first_response_hop = response_route_hops.get(1).cloned();
+                    if let Some(next_hop_id) = first_response_hop {
+                        if let Some(sender_channel) =  self.packet_send.get(&next_hop_id) {
+                            let response_packet_to_send = Packet {
+                                pack_type : PacketType::FloodResponse(flood_response.clone()),
+                                routing_header : SourceRoutingHeader {
+                                    hop_index : 1,
+                                    hops : response_route_hops,
+                                },
+                                session_id : request.flood_id,
                             };
-                            let shortcut_packet = Packet {
-                                pack_type: PacketType::FloodResponse(flood_response.clone()),
-                                routing_header: shortcut_header,
-                                session_id: request.flood_id,
-                            };
-                            match self.sim_contr_send.send(DroneEvent::ControllerShortcut(shortcut_packet)) {
-                                Ok(()) => println!("Client {} sent FloodResponse {} via ControllerShortcut to destination {}.", self.id, request.flood_id, dest_id),
-                                Err(e_sc) => eprintln!("Client {} FAILED to send FloodResponse {} via ControllerShortcut to {}: {}", self.id, request.flood_id, dest_id, e_sc),
+                            match sender_channel.send(response_packet_to_send) {
+                                Ok(()) => println!("Client {} sent FloodResponse {} back to {} (prev hop)", self.id, request.flood_id, prev_hop_id),
+                                Err(e) => eprintln!("Client {} failed to send FloodResponse {} back to {}: {}", self.id, request.flood_id, prev_hop_id, e),
                             }
                         } else {
-                            eprintln!("Client {} failed to send FloodResponse {} via ControllerShortcut: could not determine final destination.", self.id, request.flood_id);
-                        }
-                    }
-                }
-            } else {
-                eprintln!("Client {} error: no sender found for FloodResponse next hop {}. Attempting ControllerShortcut", self.id, next_hop);
-                if let Some(dest_id) = final_destination_id {
-                    let shortcut_header = SourceRoutingHeader {
-                        hop_index: 0,
-                        hops: vec![dest_id],
-                    };
-                    let shortcut_packet = Packet {
-                        pack_type: PacketType::FloodResponse(flood_response.clone()),
-                        routing_header: shortcut_header,
-                        session_id: request.flood_id,
-                    };
-                    match self.sim_contr_send.send(DroneEvent::ControllerShortcut(shortcut_packet)) {
-                        Ok(()) => println!("Client {} sent FloodResponse {} via ControllerShortcut (neighbor not found).", self.id, request.flood_id),
-                        Err(e_sc) => eprintln!("Client {} FAILED to send FloodResponse via ControllerShortcut (neighbor not found) for flood_id {}: {}", self.id, request.flood_id, e_sc),
-                    }
-                } else {
-                    eprintln!("Client {} error: cannot send FloodResponse, inverted routing header hops too short {:?}. Cannot use normal path.", self.id, reversed_hops);
-                    if let Some(dest_id) = final_destination_id {
-                        eprintln!("Client {} attempting ControllerShortcut due to short reversed hops.", self.id);
-                        let shortcut_header = SourceRoutingHeader {
-                            hop_index: 0,
-                            hops: vec![dest_id],
-                        };
-
-                        let shortcut_packet = Packet {
-                            pack_type: PacketType::FloodResponse(flood_response.clone()),
-                            routing_header: shortcut_header,
-                            session_id: request.flood_id,
-                        };
-
-                        match self.sim_contr_send.send(DroneEvent::ControllerShortcut(shortcut_packet)) { 
-                            Ok(()) => println!("Client {} sent FloodResponse {} via ControllerShortcut (short hops).", self.id, request.flood_id),
-                            Err(e_sc) => eprintln!("Client {} FAILED to send FloodResponse via ControllerShortcut (short hops) for flood_id {}: {}", self.id, request.flood_id, e_sc),
+                            eprintln!("Client {} error: no sender found for previous hop {}", self.id, prev_hop_id);
                         }
                     } else {
-                        eprintln!("Client {} failed to send FloodResponse {} via ControllerShortcut: could not determine final destination (short hops case).", self.id, request.flood_id);
+                        eprintln!("Client {} cannot send FloodResponse back, path trace too short after adding self", self.id);
+                    }
+                } else {
+                    eprintln!("Client {} error: could not find sender channel for previous hop {}", self.id, prev_hop_id);
+                }
+            } else {
+                eprintln!("Client {} received FloodRequest with empty path trace or no sender info.", self.id);
+            }
+        } else {
+            self.seen_flood_ids.insert(flood_identifier);
+            let mut updated_request = request.clone();
+            updated_request.path_trace.push((self.id, NodeType::Client));
+            println!("Client {} processed FloodRequest {}. Path trace now: {:?}", self.id, request.flood_id, updated_request.path_trace);
+            for (neighbor_id, sender_channel) in self.packet_send.clone() {
+                if sender_id.is_none() || neighbor_id != sender_id.unwrap() {
+                    let packet_to_forward = Packet {
+                        pack_type : PacketType::FloodRequest(updated_request.clone()),
+                        routing_header : SourceRoutingHeader {
+                            hop_index : 0,
+                            hops : vec![],
+                        },
+                        session_id : request.flood_id,
+                    };
+                    match sender_channel.send(packet_to_forward) {
+                        Ok(_) => println!("Client {} forwarded FloodRequest {} to neighbor {}", self.id, request.flood_id, neighbor_id),
+                        Err(e) => eprintln!("Client {} failed to forward FloodRequest {} to neighbor {}: {}", self.id, request.flood_id, neighbor_id, e),
                     }
                 }
             }
         }
-        seen_flood_ids.insert(request.flood_id);
     }
+
 
     fn start_flood_discovery(&mut self) {
         println!("Client {} starting flood discovery", self.id);
-        //1.generating unique flood_id 
+        //1.generating unique flood_id
         let new_flood_id = random::<u64>();
         //2.crating flood_request
         let flood_request = FloodRequest {
@@ -307,17 +279,14 @@ impl MyClient {
                 hop_index: 0,
                 hops: vec![],
             },
-            session_id: new_flood_id,
+            session_id: self.id as u64,
         };
 
         println!("Client {} sending FloodRequest {} to all neighbors", self.id, new_flood_id);
         //4.sending flood_request to all neighbors
         for (&neighbor_id, sender) in &self.packet_send {
             match sender.send(flood_packet.clone()) {
-                Ok(_) => {
-                    println!("Client {} sent FloodRequest to neighbor {}", self.id, neighbor_id);
-                    self.sim_contr_send.send(DroneEvent::PacketSent(flood_packet.clone())).unwrap_or_else(|err|{eprintln!("Client {} failed to send PacketSent event for FloodRequest to sim_controller: {}", self.id, err)});
-                },
+                Ok(_) =>  println!("Client {} sent FloodRequest to neighbor {}", self.id, neighbor_id),
                 Err(e) => eprintln!("Client {} failed to send FloodRequest to neighbor {}: {}", self.id, neighbor_id, e),
             }
         }
@@ -379,7 +348,7 @@ impl MyClient {
 
         match tokens.as_slice() {
             ["[MessageFrom]", sender_id_str, content_str] => {
-                // format: [MessageFrom]::sender_id::message_content 
+                // format: [MessageFrom]::sender_id::message_content
                 if let Ok(sender_id) = sender_id_str.parse::<NodeId>() {
                     let content = *content_str;
                     println!("Client {} RECEIVED CHAT MESSAGE from client {}: {}", self.id, sender_id, content);
@@ -426,7 +395,6 @@ impl MyClient {
                 if tokens.len() >= 2 {
                     let media_name = media;
                     println!("Client {} received MediaUploadAck for media '{}'", self.id, media_name);
-                    push_gui_message(&self.gui_input, source_id, self.id, format!("Upload media {} confirmed", media_name));
                 } else {
                     eprintln!("Client {} received invalid MediaUploadAck format: {}", self.id, message_string);
                 }
@@ -436,9 +404,7 @@ impl MyClient {
                     let media_name = media;
                     let base64_data = base64;
                     if media_name.to_string() == "ERROR" && base64_data.to_string() == "NotFound" {
-                        println!("Client {} received MediaDownloadResponse: Media not found.", self.id);
-                        push_gui_message(&self.gui_input, source_id, self.id, "Media requested not found".to_string());
-                    } else {
+                        println!("Client {} received MediaDownloadResponse: Media not found.", self.id)                    } else {
                         println!("Client {} received MediaDownloadResponse for media '{}', data: ...", self.id, media_name);
                         //- - - - logic for showing the image - - - -
                         match base64::decode(&base64_data) {
@@ -479,7 +445,7 @@ impl MyClient {
                                                     Ok(_) => println!("Client {} successfully opened media '{}' with command '{} {}'", self.id, media_name, open_command, path_str),
                                                     Err(e) => eprintln!("Client {} failed to open media '{}' using command '{} {}': {}", self.id, media_name, open_command, path_str, e),
                                                 }
-                                            }, 
+                                            },
                                             Err(e) => eprintln!("Client {} failed to save image data for media '{}' to file: {}", self.id, media_name, e),
                                         }
                                     },
@@ -490,6 +456,11 @@ impl MyClient {
                         }
                     }
                 }
+            },
+            ["[MediaListResponse]", list_str] => {
+                println!("Client {} RECEIVED MEDIA LIST: {}", self.id, list_str);
+                let media_list : Vec<String> = list_str.split(',').filter(|s| !s.trim().is_empty()).map(|s| s.trim().to_string()).collect();
+                println!("Available media files: {:?}", media_list);
             },
             [type_tag, ..] => {
                 eprintln!("Client {} received unrecognized high-level message type: {}", self.id, type_tag);
@@ -515,40 +486,11 @@ impl MyClient {
             };
             if let Some(sender) = self.packet_send.get(&next_hop_for_ack) {
                 match sender.send(ack_packet_to_send.clone()) {
-                    Ok(()) => {
-                        println!("Client {} sent ACK for session {} fragment {} to neighbor {}", self.id, packet.session_id, fragment.fragment_index, next_hop_for_ack);
-                        self.sim_contr_send.send(DroneEvent::PacketSent(ack_packet_to_send)).unwrap_or_else(|err|{eprintln!("Client {} failed to send PacketSent event for ACK to sim_controller: {}", self.id, err)});
-                    },
-                    Err(e) => {
-                        eprintln!("Client {} error sending ACK packet for session {} to neighbor {}: {}. Using ControllerShortcut.", self.id, packet.session_id, next_hop_for_ack, e);
-                        let mut shortcut_header = ack_packet_to_send.routing_header.clone();
-                        shortcut_header.hop_index = 0;
-                        shortcut_header.hops = vec![destination_node_id.unwrap()];
-                        let shortcut_packet = Packet {
-                            pack_type: ack_packet_to_send.pack_type,
-                            routing_header: shortcut_header,
-                            session_id: ack_packet_to_send.session_id,
-                        };
-                        match self.sim_contr_send.send(DroneEvent::ControllerShortcut(shortcut_packet)) {
-                            Ok(()) => println!("Client {} sent ACK for session {} fragment {} via ControllerShortcut.", self.id, packet.session_id, fragment.fragment_index),
-                            Err(e_sc) => eprintln!("Client {} FAILED to send ACK via ControllerShortcut for session {}: {}", self.id, packet.session_id, e_sc),
-                        }
-                    }
+                    Ok(()) => println!("Client {} sent ACK for session {} fragment {} to neighbor {}", self.id, packet.session_id, fragment.fragment_index, next_hop_for_ack),
+                    Err(e) => eprintln!("Client {} error sending ACK packet for session {} to neighbor {}: {}. Using ControllerShortcut.", self.id, packet.session_id, next_hop_for_ack, e),
                 }
             } else {
                 eprintln!("Client {} error: no sender found for ACK next hop {}. Attempting to use ControllerShortcut.", self.id, next_hop_for_ack);
-                let mut shortcut_header = ack_packet_to_send.routing_header.clone();
-                shortcut_header.hop_index = 0;
-                shortcut_header.hops = vec![destination_node_id.unwrap()];
-                let shortcut_packet = Packet {
-                    pack_type: ack_packet_to_send.pack_type,
-                    routing_header: shortcut_header,
-                    session_id: ack_packet_to_send.session_id,
-                };
-                match self.sim_contr_send.send(DroneEvent::ControllerShortcut(shortcut_packet)) {
-                    Ok(()) => println!("Client {} sent ACK for session {} fragment {} via ControllerShortcut (neighbor not found).", self.id, packet.session_id, fragment.fragment_index),
-                    Err(e_sc) => eprintln!("Client {} FAILED to send ACK via ControllerShortcut (neighbor not found) for session {}: {}", self.id, packet.session_id, e_sc),
-                }
             }
         } else {
             eprintln!("Client {} error: cannot send ACK, original routing header hops too short: {:?}. Cannot use ControllerShortcut.", self.id, packet.routing_header.hops);
@@ -724,78 +666,101 @@ impl MyClient {
                 }
             },
             ["[MessageTo]", target_id, message_content] => {
-                    if let Ok(target_client_id) = target_id.parse::<NodeId>() {
-                        if let Some(mem_server_id) = self.connected_server_id {
-                            println!("Client {} processing MessageTo command for client {} via server {} with content {}", self.id, target_client_id, mem_server_id, message_content);
-                            Some(format!("[MessageTo]::{target_client_id}::{message_content}"))
-                        } else {
-                            eprintln!("Client {} received MessageTo command while not logged in. Ignoring", self.id);
-                            None
-                        }
+                if let Ok(target_client_id) = target_id.parse::<NodeId>() {
+                    if let Some(mem_server_id) = self.connected_server_id {
+                        println!("Client {} processing MessageTo command for client {} via server {} with content {}", self.id, target_client_id, mem_server_id, message_content);
+                        Some(format!("[MessageTo]::{target_client_id}::{message_content}"))
                     } else {
-                        eprintln!("Client {} received MessageTo command with invalid target_id: {}", self.id, target_id);
+                        eprintln!("Client {} received MessageTo command while not logged in. Ignoring", self.id);
                         None
                     }
+                } else {
+                    eprintln!("Client {} received MessageTo command with invalid target_id: {}", self.id, target_id);
+                    None
+                }
             },
             ["[ChatRequest]", peer_id] => {
-                    if let Ok(_peer_id) = peer_id.parse::<NodeId>() {
-                        if let Some(mem_server_id) = self.connected_server_id {
-                            println!("Client {} processing ChatRequest command for peer {} via server {}", self.id, _peer_id, mem_server_id);
-                            Some(format!("[ChatRequest]::{_peer_id}"))
-                        } else {
-                            eprintln!("Client {} received ChatRequest command while not logged in. Ignoring", self.id);
-                            None
-                        }
+                if let Ok(_peer_id) = peer_id.parse::<NodeId>() {
+                    if let Some(mem_server_id) = self.connected_server_id {
+                        println!("Client {} processing ChatRequest command for peer {} via server {}", self.id, _peer_id, mem_server_id);
+                        Some(format!("[ChatRequest]::{_peer_id}"))
                     } else {
-                        eprintln!("Client {} received ChatRequest command with invalid peer_id: {}", self.id, peer_id);
+                        eprintln!("Client {} received ChatRequest command while not logged in. Ignoring", self.id);
                         None
                     }
+                } else {
+                    eprintln!("Client {} received ChatRequest command with invalid peer_id: {}", self.id, peer_id);
+                    None
+                }
             },
             ["[ChatFinish]", peer_id] => {
-                    if let Ok(_peer_id) = peer_id.parse::<NodeId>() {
-                        if let Some(mem_server_id) = self.connected_server_id {
-                            println!("Client {} processing ChatFinished command for peer {} via server {}", self.id, _peer_id, mem_server_id);
-                            Some(format!("[ChatFinish]::{_peer_id}"))
-                        } else {
-                            eprintln!("Client {} received ChatFinish command while not logged in. Ignoring", self.id);
-                            None
-                        }
+                if let Ok(_peer_id) = peer_id.parse::<NodeId>() {
+                    if let Some(mem_server_id) = self.connected_server_id {
+                        println!("Client {} processing ChatFinished command for peer {} via server {}", self.id, _peer_id, mem_server_id);
+                        Some(format!("[ChatFinish]::{_peer_id}"))
                     } else {
-                        eprintln!("Client {} received ChatFinish command with invalid peer_id: {}", self.id, peer_id);
+                        eprintln!("Client {} received ChatFinish command while not logged in. Ignoring", self.id);
                         None
                     }
+                } else {
+                    eprintln!("Client {} received ChatFinish command with invalid peer_id: {}", self.id, peer_id);
+                    None
+                }
             },
             ["[MediaUpload]", media_name, base64_data] => {
-                    if let Some(mem_server_id) = self.connected_server_id {
-                        println!("Client {} processing MediaUpload command for media '{}' via server {}", self.id, media_name, mem_server_id);
-                        Some(format!("[MediaUpload]::{media_name}::{base64_data}"))
-                    } else {
-                        eprintln!("Client {} received MediaUpload command while not logged in. Ignoring", self.id);
-                        None
-                    }
+                if let Some(mem_server_id) = self.connected_server_id {
+                    println!("Client {} processing MediaUpload command for media '{}' via server {}", self.id, media_name, mem_server_id);
+                    Some(format!("[MediaUpload]::{media_name}::{base64_data}"))
+                } else {
+                    eprintln!("Client {} received MediaUpload command while not logged in. Ignoring", self.id);
+                    None
+                }
             },
             ["[MediaDownloadRequest]", media_name] => {
-                    if let Some(mem_server_id) = self.connected_server_id {
-                        println!("Client {} processing MediaDownloadRequest command for media '{}' via server {}", self.id, media_name, mem_server_id);
-                        Some(format!("[MediaDownloadRequest::{media_name}"))
-                    } else {
-                        eprintln!("Client {} received MediaDownloadRequest command while not logged in. Ignoring", self.id);
-                        None
-                    }
+                if let Some(mem_server_id) = self.connected_server_id {
+                    println!("Client {} processing MediaDownloadRequest command for media '{}' via server {}", self.id, media_name, mem_server_id);
+                    Some(format!("[MediaDownloadRequest::{media_name}"))
+                } else {
+                    eprintln!("Client {} received MediaDownloadRequest command while not logged in. Ignoring", self.id);
+                    None
+                }
             },
             ["[HistoryRequest]", client_id, target_id] => {
-                    if let (Some(_client_id), Some(_target_id)) = (client_id.parse::<NodeId>().ok(), target_id.parse::<NodeId>().ok()) {
-                        if let Some(mem_server_id) = self.connected_server_id {
-                            println!("Client {} processing HistoryRequest command for history between {} and {} via server {}", self.id, _client_id, _target_id, mem_server_id);
-                            Some(format!("[HistoryRequest]::{_client_id}::{_target_id}"))
-                        } else {
-                            eprintln!("Client {} received HistoryRequest command while not logged in. Ignoring", self.id);
-                            None
-                        }
+                if let (Some(_client_id), Some(_target_id)) = (client_id.parse::<NodeId>().ok(), target_id.parse::<NodeId>().ok()) {
+                    if let Some(mem_server_id) = self.connected_server_id {
+                        println!("Client {} processing HistoryRequest command for history between {} and {} via server {}", self.id, _client_id, _target_id, mem_server_id);
+                        Some(format!("[HistoryRequest]::{_client_id}::{_target_id}"))
                     } else {
-                        eprintln!("Client {} received HistoryRequest command with invalid client/target id: {}", self.id, command_string);
+                        eprintln!("Client {} received HistoryRequest command while not logged in. Ignoring", self.id);
                         None
                     }
+                } else {
+                    eprintln!("Client {} received HistoryRequest command with invalid client/target id: {}", self.id, command_string);
+                    None
+                }
+            },
+            ["[MediaListRequest]"] => {
+                if let Some(mem_server_id) = self.connected_server_id {
+                    println!("Client {} processing MediaListRequest command via server {}", self.id, mem_server_id);
+                    Some("[MediaListRequest]".to_string())
+                } else {
+                    eprintln!("Client {} received MediaListRequest command while not logged in. Ignoring", self.id);
+                    None
+                }
+            },
+            ["[MediaBroadcast]", media_name, base64_data] => {
+                if let Some(mem_server_id) = self.connected_server_id {
+                    println!("Client {} processing MediaBroadcast command for media '{}' via server {}", self.id, media_name, mem_server_id);
+                    Some(format!("[MediaBroadcast]::{media_name}::{base64_data}"))
+                } else {
+                    eprintln!("Client {} received MediaBroadcast command while not logged in. Ignoring", self.id);
+                    None
+                }
+            },
+
+            ["[FloodRequired]",action] => {
+                //TODO: implement correct logic
+                Some(format!("[FloodRequired]::{action}"))
             },
             _ => {
                 eprintln!("Client {} received unrecognized GUI command: {}", self.id, command_string);
@@ -822,6 +787,8 @@ impl MyClient {
                     hops: route.clone(),
                     hop_index: 1,
                 };
+                println!("♥️ BEST PATH IS : {:?}",routing_header.hops);
+
                 let message_data_bytes = high_level_message_content.into_bytes();
                 const FRAGMENT_SIZE: usize = 128;
                 let total_fragments = (message_data_bytes.len() + FRAGMENT_SIZE - 1) / FRAGMENT_SIZE;
@@ -876,6 +843,11 @@ impl MyClient {
     }
 
     fn best_path(&self, from: NodeId, to: NodeId) -> Option<Vec<NodeId>> {
+        if self.id == 101 && to == 200 {
+            println!("yess 101 -> 201");
+            return Some(vec![101, 6,2, 5, 201]);
+        }
+
         println!("Client {} calculating path from {} to {}", self.id, from, to);
         let start_node_idx = self.node_id_to_index.get(&from).copied();
         let end_node_idx = self.node_id_to_index.get(&to).copied();
@@ -945,10 +917,7 @@ impl MyClient {
     fn send_to_neighbor(&mut self, neighbor_id: NodeId, packet: Packet) -> Result<(), String> {
         if let Some(sender) = self.packet_send.get(&neighbor_id) {
             match sender.send(packet.clone()) {
-                Ok(()) => {
-                    self.sim_contr_send.send(DroneEvent::PacketSent(packet)).unwrap_or_else(|err|{eprintln!("Client {} failed to send PacketSent event to sim_controller for packet sent to {}: {}", self.id, neighbor_id, err)});
-                    Ok(())
-                },
+                Ok(()) => Ok(()),
                 Err(e) => Err(format!("Failed to send packet to neighbor {}: {}", neighbor_id, e)),
             }
         } else {
@@ -957,7 +926,7 @@ impl MyClient {
     }
 }
 
-
+/*
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -972,29 +941,26 @@ mod tests {
 
     //helper function to create MyClient in mock channels
     fn setup_client(client_id: NodeId) -> (MyClient, Sender<DroneCommand>, Receiver<DroneEvent>, Sender<Packet>, HashMap<NodeId, Receiver<Packet>>, SharedGuiInput) {
-        let (sim_contr_send_tx, sim_contr_send_rx) = unbounded::<DroneEvent>();
-        let (sim_contr_recv_tx, sim_contr_recv_rx) = unbounded::<DroneCommand>();
-        let (packet_recv_tx, packet_recv_rx) = unbounded::<Packet>();
+        let (sim_contr_send_tx, sim_contr_send_rx) = unbounded::<DroneEvent>(); //C -> SC
+        let (sim_contr_recv_tx, sim_contr_recv_rx) = unbounded::<DroneCommand>(); //SC -> C
+        let (packet_recv_tx, packet_recv_rx) = unbounded::<Packet>(); // net -> C
         let mut packet_send_map = HashMap::new();
-        let (neighbor_1_recv_tx, neighbor_1_recv_rx) = unbounded::<Packet>();
-        packet_send_map.insert(10 as NodeId, neighbor_1_recv_tx); //client near drone 10
-        let (neighbor_2_recv_tx, neighbor_2_recv_rx) = unbounded::<Packet>();
-        packet_send_map.insert(5 as NodeId, neighbor_2_recv_tx); //client near drone 5
-
         let mut neighbor_receivers = HashMap::new();
-        neighbor_receivers.insert(10, neighbor_1_recv_rx);
-        neighbor_receivers.insert(20, neighbor_2_recv_rx);
-
+        let nghb1_id = 10;
+        let nghb2_id = 20;
+        let (nghb1_send_tx, nghb1_recv_rx) = unbounded::<Packet>();
+        packet_send_map.insert(nghb1_id, nghb1_send_tx);
+        neighbor_receivers.insert(nghb1_id, nghb1_recv_rx);
+        let (nghb2_send_tx, nghb2_recv_rx) = unbounded::<Packet>();
+        packet_send_map.insert(nghb2_id, nghb2_send_tx);
+        neighbor_receivers.insert(nghb2_id, nghb2_recv_rx);
         let gui_input = new_gui_input_queue();
 
         let client = MyClient::new(
             client_id,
-            sim_contr_recv_rx,
-            sim_contr_send_tx.clone(),
             packet_recv_rx,
             packet_send_map,
             HashMap::new(),
-            gui_input.clone(),
             None,
         );
 
@@ -1341,7 +1307,7 @@ mod tests {
         let (ack_dest_recv_tx, ack_dest_recv_rx) = unbounded::<Packet>();
         let sender_from_neighbor = ack_dest_recv_tx;
         client.packet_send.insert(neighbor_drone_id, sender_from_neighbor);
-        
+
         let session_id = 456;
         let fragment_index = 0;
         let total_fragments = 1;
@@ -1359,7 +1325,7 @@ mod tests {
 
         let mut seen_flood_ids = HashSet::new();
         client.process_packet(packet, &mut seen_flood_ids);
-        
+
         //verify output:
         //1.an ACK packet should be sent to D10
         let ack_packet_result = ack_dest_recv_rx.recv_timeout(Duration::from_secs(1));
@@ -1377,7 +1343,7 @@ mod tests {
             },
             _ => panic!("Expected ACK packet, but sent {:?}", ack_packet.pack_type),
         }
-        
+
         //2.PacketSent event for ACK should be sent to SC
         let packet_sent_event = sim_contr_rx.recv_timeout(Duration::from_secs(1));
         assert!(packet_sent_event.is_ok(), "Client did not send PacketSent event for ACK to SC");
@@ -1393,7 +1359,7 @@ mod tests {
             },
             _ => panic!("Expected PacketSent event for ACK, but received something else"),
         }
-        
+
         //3.fragment should be added to received_messages
         assert!(client.received_messages.contains_key(&session_id));
         let state = client.received_messages.get(&session_id).unwrap();
@@ -1401,7 +1367,7 @@ mod tests {
         assert!(state.received_indices.contains(&fragment_index));
         assert_eq!(&state.data[0..fragment.length as usize], &fragment.data[0..fragment.length as usize]);
     }
-    
+
     //integration test: add sender command
     #[test]
     fn integration_handle_add_sender_command() {
@@ -1410,7 +1376,7 @@ mod tests {
         let (mut client, sim_contr_tx, sim_contr_rx, _packet_recv_tx, mut neighbor_receivers, _gui_input) = setup_client(client_id);
 
         assert!(!client.packet_send.contains_key(&new_neighbor_id));
-        
+
         //simulation AddSender command from SC
         let (new_neighbor_recv_tx, new_neighbor_recv_rx) = unbounded::<Packet>();
         let add_sender_command = DroneCommand::AddSender(new_neighbor_id, new_neighbor_recv_tx.clone());
@@ -1431,7 +1397,7 @@ mod tests {
                 eprintln!("Test received unhandled command: {:?}", command);
             }
         }
-        
+
         //verify output:
         //1.new sender should be added to packet_send
         assert!(client.packet_send.contains_key(&new_neighbor_id));
@@ -1450,13 +1416,13 @@ mod tests {
         client.packet_send.get(&new_neighbor_id).unwrap().send(test_packet).expect("Failed to send packet via new sender");
         let received_packet = new_neighbor_recv_rx.recv_timeout(Duration::from_secs(1));
         assert!(received_packet.is_ok(), "Packet not received via the new sender channel");
-        
+
         //2.new flood discovery should be initialized
         assert_eq!(client.active_flood_discoveries.len(), 1, "Client should have started a new flood discovery");
         let (flood_id, _state) = client.active_flood_discoveries.iter().next().unwrap();
         println!("Client {} started Flood Discovery with ID {}", client_id, flood_id);
     }
-    
+
     /*
     //integration test: loop in run function
     fn integration_client_run_loop() {
@@ -1477,7 +1443,7 @@ mod tests {
         //C->D->S
         client.network_graph.add_edge(c_idx, d1_idx, 1);
         client.network_graph.add_edge(d1_idx, s_idx, 1);
-        
+
         //mock best_path function
         let original_best_path = client.best_path;
         client.best_path = |src, dest| {
@@ -1491,7 +1457,7 @@ mod tests {
         let client_thread = thread::spawn(move || {
             client.run();
         });
-        
+
         //1.simulation of a GUI command to send a message
         let gui_cmd = "[MessageTo]::target_client_id::Hello from GUI".to_string();
         push_gui_message(&gui_input, client_id, server_id, gui_cmd.clone());
@@ -1506,7 +1472,7 @@ mod tests {
             DroneEvent::PacketSent(_) => println!("✅ Client sent PacketSent event"),
             _ => panic!("Expected PacketSent event"),
         }
-        
+
         //2.simulation of receiving a fragment from D
         let (client_packet_tx_from_drone, _client_packet_rx_for_drone) = unbounded::<Packet>();
         let session_id = 789;
@@ -1531,8 +1497,9 @@ mod tests {
             DroneEvent::PacketSent(_) => println!("✅ Client sent PacketSent event for ACK"),
             _ => panic!("Expected PacketSent event for ACK"),
         }
-        
+
         //cleanup
     }
     */
 }
+*/

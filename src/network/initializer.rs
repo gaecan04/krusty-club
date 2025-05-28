@@ -25,9 +25,6 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use crossbeam::channel;
 
-//for testing
-use Krusty_Club::Krusty_C;
-// Assuming these are defined elsewhere or imported
 use wg_2024::network::NodeId;
 use crate::simulation_controller::SC_backend::SimulationController;
 use crate::simulation_controller::gui_input_queue::SharedGuiInput;
@@ -182,6 +179,7 @@ impl ParsedConfig {
         };
 
 
+
         // === DOUBLE CHAIN ===
         let is_double_chain = {
             let mut deg2 = 0;
@@ -315,8 +313,6 @@ impl ParsedConfig {
             }
         }
     }
-
-
 }
 
 
@@ -336,14 +332,7 @@ impl DroneImplementation for MyDrone {
     fn run(&mut self) {
         <Self as DroneTrait>::run(self);
     }
-
-    /*fn get_id(&self) -> NodeId {
-        self.get_id()
-    }*/
 }
-
-
-
 
 macro_rules! impl_drone_adapter {
     ($name:ty) => {
@@ -353,17 +342,10 @@ macro_rules! impl_drone_adapter {
 
                 }
 
-            /*fn get_id(&self) -> NodeId {
-                 println!("get id");
-                self.id // assumes all drones have an `id` field of type NodeId
-            }*/
+
         }
     };
 }
-
-
-
-
 
 // === Macro Calls for All 10 Drones ===
 impl_drone_adapter!(BagelBomber);
@@ -375,7 +357,7 @@ impl_drone_adapter!(LeDron_JamesDrone);
 impl_drone_adapter!(DrOnesDrone);
 impl_drone_adapter!(SkyLinkDrone);
 impl_drone_adapter!(RustasticDrone);
-impl_drone_adapter!(Krusty_C);
+impl_drone_adapter!(CppEnjoyersDrone);
 
 
 //So MyDrone is your fallback implementation, used only when a group’s implementation is missing or fails to register.
@@ -401,23 +383,23 @@ impl wg_2024::drone::Drone for MyDrone {
     fn run(&mut self) {
         println!("Running drone {} with PDR {}", self.id, self.pdr);
 
-        // Real implementation would handle packets and controller commands
-        loop {
-            select! {
-                recv(self.packet_recv) -> packet => {
-                    if let Ok(packet) = packet {
-                        println!("Drone {} received packet", self.id);
-                        // Process packet logic here
-                    }
-                }
-                recv(self.controller_recv) -> command => {
-                    if let Ok(command) = command {
-                        println!("Drone {} received command", self.id);
-                        // Process command logic here
-                    }
-                }
-            }
-        }
+        /* // Real implementation would handle packets and controller commands
+         loop {
+             select! {
+                 recv(self.packet_recv) -> packet => {
+                     if let Ok(packet) = packet {
+                         println!("Drone {} received packet", self.id);
+                         // Process packet logic here
+                     }
+                 }
+                 recv(self.controller_recv) -> command => {
+                     if let Ok(command) = command {
+                         println!("Drone {} received command", self.id);
+                         // Process command logic here
+                     }
+                 }
+             }
+         }*/
     }
 }
 
@@ -438,10 +420,12 @@ pub struct DroneWithId {
 pub struct NetworkInitializer {
     config: Config,
     drone_impls: Vec<DroneWithId>,
-    channels: HashMap<NodeId, Sender<Packet>>,
+    packet_senders: HashMap<NodeId, Sender<Packet>>,
+    packet_receivers: HashMap<NodeId, Receiver<Packet>>,
     controller_tx: Sender<DroneEvent>,
     controller_rx: Receiver<DroneCommand>,
     simulation_controller: Arc<Mutex<SimulationController>>,
+    packet_senders_arc: Arc<HashMap<NodeId, Sender<Packet>>>,
 }
 
 /*
@@ -459,19 +443,21 @@ Group Krusty_club buys:
  */
 
 use LeDron_James::Drone as LeDron_JamesDrone; //ok
-//use ap2024_unitn_cppenjoyers_drone::CppEnjoyersDrone; //ok
+use ap2024_unitn_cppenjoyers_drone::CppEnjoyersDrone; //ok
 use dr_ones::Drone as DrOnesDrone; //ok
 use skylink::SkyLinkDrone; //ok
 use rustastic_drone::RustasticDrone; //ok
 use bagel_bomber::BagelBomber; //ok
-use fungi_drone::FungiDrone; //ok
+use fungi_drone::FungiDrone;
+use Krusty_Club::Krusty_C;
+//ok
 use wg_2024_rust::drone::RustDrone; //ok
 use rustafarian_drone::RustafarianDrone; //ok
 use rolling_drone::RollingDrone;
 //ok
 
 impl NetworkInitializer {
-    pub fn new(config_path: &str, drone_impls: Vec<DroneWithId>,    simulation_controller: Arc<Mutex<SimulationController>>, ) -> Result<Self, Box<dyn Error>> {
+    pub fn new(config_path: &str, drone_impls: Vec<DroneWithId>,    simulation_controller: Arc<Mutex<SimulationController>>,packet_senders_arc: Arc<HashMap<NodeId, Sender<Packet>>>, ) -> Result<Self, Box<dyn Error>> {
         // Read config file
         let config_str = fs::read_to_string(config_path)?;
 
@@ -489,10 +475,13 @@ impl NetworkInitializer {
         Ok(NetworkInitializer {
             config,
             drone_impls,
-            channels: HashMap::new(),
+            packet_senders: HashMap::new(),
+            packet_receivers: HashMap::new(),
+
             controller_tx,
             controller_rx,
             simulation_controller,
+            packet_senders_arc,
         })
     }
 
@@ -510,7 +499,7 @@ impl NetworkInitializer {
         self.initialize_clients(gui_input_queue.clone());
 
         // Spawn server threads
-        self.initialize_servers();
+        self.initialize_servers(gui_input_queue.clone());
 
         // Spawn simulation controller thread
         self.spawn_controller();
@@ -764,10 +753,11 @@ impl NetworkInitializer {
 
         for node_id in all_node_ids {
             // Create packet channel for each node
-            let (tx, _rx) = unbounded::<Packet>();
+            let (tx, rx) = unbounded::<Packet>();
 
             // Save to local runtime channels
-            self.channels.insert(node_id, tx.clone());
+            self.packet_senders.insert(node_id, tx.clone());
+            self.packet_receivers.insert(node_id, rx);
 
             // Register with the Simulation Controller for ControllerShortcut
             if let Ok(mut controller) = self.simulation_controller.lock() {
@@ -790,54 +780,120 @@ impl NetworkInitializer {
             println!("Spawned drone {}", id);
         }
     }
+    /*
+        fn initialize_clients(&mut self,gui_input: SharedGuiInput) {
+            for client in &self.config.client {
+                let client_id = client.id;
+                let mut senders = HashMap::new();
+                for &drone_id in &client.connected_drone_ids {
+                    if let Some(tx) = self.packet_senders.get(&drone_id) {
+                        senders.insert(drone_id, tx.clone());
+                    }
+                }
+                let (client_tx, client_rx) = crossbeam_channel::unbounded();
+                self.packet_senders.insert(client_id, client_tx.clone());
 
-    fn initialize_clients(&mut self,gui_input: SharedGuiInput) {
+               // client2::start_client(client_id, client_rx, senders,gui_input.clone());
+                let mut cl2 = client2::MyClient::new(client_id,client_rx,senders);
+                let mut value = gui_input.clone();
+                thread::spawn(move || {
+                    println!("client2 spawned");
+                    cl2.run(value);
+                });        }
+
+        }*/
+
+    fn initialize_clients(&mut self, gui_input: SharedGuiInput) {
+        for (i, client) in self.config.client.iter().enumerate() {
+            let client_id = client.id;
+            let packet_send = Arc::clone(&self.packet_senders_arc); // stored once during setup
+
+            let mut senders = HashMap::new();
+            for &drone_id in &client.connected_drone_ids {
+                if let Some(tx) = packet_send.get(&drone_id) {
+                    senders.insert(drone_id, tx.clone());
+                }
+            }
+
+            let (client_tx, client_rx) = crossbeam_channel::unbounded();
+            self.packet_senders.insert(client_id, client_tx.clone());
+
+            let gui_clone = gui_input.clone();
+
+            if i % 2 == 0 {
+                thread::spawn(move || {
+                    let mut cl2 = client2::MyClient::new(client_id, client_rx, senders);
+                    cl2.run(gui_clone);
+                });
+            } else {
+                thread::spawn(move || {
+                    let mut cl1 = client1::MyClient::new(client_id, client_rx, senders, HashMap::new(), None, HashSet::new());
+                    cl1.run(gui_clone);
+                });
+            }
+        }
+    }/*
+    fn initialize_clients(&mut self, gui_input: SharedGuiInput) {
         for client in &self.config.client {
             let client_id = client.id;
             let mut senders = HashMap::new();
+
             for &drone_id in &client.connected_drone_ids {
-                if let Some(tx) = self.channels.get(&drone_id) {
+                if let Some(tx) = self.packet_senders.get(&drone_id) {
                     senders.insert(drone_id, tx.clone());
                 }
             }
-            let (client_tx, client_rx) = crossbeam_channel::unbounded();
-            self.channels.insert(client_id, client_tx.clone());
 
-            client1::start_client(client_id, client_rx, senders,gui_input.clone());
-            /*let mut client = client1::MyClient::new(client_id, sim_controller_recv.clone(), client_rx, senders, HashMap::new());
+            let (client_tx, client_rx) = crossbeam_channel::unbounded();
+            self.packet_senders.insert(client_id, client_tx.clone());
+
+            let gui_clone = gui_input.clone();
+
+            // Launch all clients as client1::MyClient
             thread::spawn(move || {
-                client.run();
-            });*/
+                println!("client1 spawned");
+                let sent_messages = HashMap::new();
+                let connected_server_id = None;
+                let seen_flood_ids : HashSet<(u64, NodeId>) = HashSet::new();
+                let mut cl1 = client1::MyClient::new(
+                    client_id,
+                    client_rx,
+                    senders,
+                    sent_messages,
+                    connected_server_id,
+                    seen_flood_ids,
+                );
+                cl1.run(gui_clone);
+            });
         }
     }
-
-
-    fn initialize_servers(&mut self) {
+*/
+    fn initialize_servers(&mut self, gui_input: SharedGuiInput) {
         for server in &self.config.server {
             let server_id = server.id;
+            let packet_send = Arc::clone(&self.packet_senders_arc);
 
-            // Gather packet senders to connected drones
             let mut senders = HashMap::new();
             for &drone_id in &server.connected_drone_ids {
-                if let Some(tx) = self.channels.get(&drone_id) {
+                if let Some(tx) = packet_send.get(&drone_id) {
                     senders.insert(drone_id, tx.clone());
                 }
             }
 
-            // Create and store receiver
             let (server_tx, server_rx) = crossbeam_channel::unbounded();
-            self.channels.insert(server_id, server_tx.clone());
+            self.packet_senders.insert(server_id, server_tx.clone());
 
-            // server::start_server(server_id, server_rx, senders);
-            let mut srv = server::server::new(server_id as u8, senders, server_rx);
+            let gui_clone = gui_input.clone();
             thread::spawn(move || {
-                srv.run();
-            });        }
+                let mut srv = server::server::new(server_id as u8, senders, server_rx);
+                srv.run(gui_clone);
+            });
+        }
     }
 
     fn spawn_controller(&self) {
         // Get all node IDs for the controller to manage
-        let nodes = self.channels.keys().cloned().collect::<Vec<_>>();
+        let nodes = self.packet_senders.keys().cloned().collect::<Vec<_>>();
 
         // Create controller send/receive channels for commands and events
         let (controller_tx, controller_rx) = channel::unbounded::<DroneEvent>();
@@ -871,7 +927,7 @@ impl NetworkInitializer {
         controller_send: Sender<DroneEvent>,
         controller_recv: Receiver<DroneCommand>,
         packet_recv: Receiver<Packet>,
-        packet_send: HashMap<NodeId, Sender<Packet>>,
+        packet_send: Arc<HashMap<NodeId, Sender<Packet>>>,
     ) -> Vec<DroneWithId> {
         let mut implementations: Vec<DroneWithId> = Vec::new();
 
@@ -891,7 +947,7 @@ impl NetworkInitializer {
                     controller_send.clone(),
                     controller_recv.clone(),
                     packet_recv.clone(),
-                    packet_send.clone(),
+                    (*packet_send).clone(),
                     pdr,
                 )) as Box<dyn DroneImplementation>;
                 // implementations.push(drone_impl);
@@ -940,7 +996,7 @@ impl NetworkInitializer {
                     controller_send.clone(),
                     controller_recv.clone(),
                     packet_recv.clone(),
-                    packet_send.clone(),
+                    (*packet_send).clone(),
                     pdr,
                 );
 
@@ -957,7 +1013,7 @@ impl NetworkInitializer {
                     controller_send.clone(),
                     controller_recv.clone(),
                     packet_recv.clone(),
-                    packet_send.clone(),
+                    (*packet_send).clone(),
                     pdr,
                 )) as Box<dyn DroneImplementation>;
 
@@ -983,7 +1039,7 @@ impl NetworkInitializer {
             Box::new(|id: NodeId, sim_contr_send: Sender<DroneEvent>, sim_contr_recv: Receiver<DroneCommand>,
                       packet_recv: Receiver<Packet>, packet_send: HashMap<NodeId, Sender<Packet>>, pdr: f32|
                       -> Box<dyn DroneImplementation> {
-                Box::new(RustafarianDrone::new(
+                Box::new(LeDron_JamesDrone::new(
                     id,
                     sim_contr_send,
                     sim_contr_recv,
@@ -999,7 +1055,7 @@ impl NetworkInitializer {
             "group_2".to_string(),
             Box::new(|id, sim_contr_send, sim_contr_recv, packet_recv, packet_send, pdr|
                       -> Box<dyn DroneImplementation> {
-                Box::new(LeDron_JamesDrone::new(
+                Box::new(SkyLinkDrone::new(
                     id,
                     sim_contr_send,
                     sim_contr_recv,
@@ -1014,7 +1070,7 @@ impl NetworkInitializer {
             "group_3".to_string(),
             Box::new(|id, sim_contr_send, sim_contr_recv, packet_recv, packet_send, pdr|
                       -> Box<dyn DroneImplementation> {
-                Box::new(LeDron_JamesDrone::new(
+                Box::new(CppEnjoyersDrone::new(
                     id,
                     sim_contr_send,
                     sim_contr_recv,
@@ -1029,7 +1085,7 @@ impl NetworkInitializer {
             "group_4".to_string(),
             Box::new(|id, sim_contr_send, sim_contr_recv, packet_recv, packet_send, pdr|
                       -> Box<dyn DroneImplementation> {
-                Box::new(DrOnesDrone::new(
+                Box::new(SkyLinkDrone::new(
                     id,
                     sim_contr_send,
                     sim_contr_recv,
@@ -1072,7 +1128,7 @@ impl NetworkInitializer {
             "group_7".to_string(),
             Box::new(|id, sim_contr_send, sim_contr_recv, packet_recv, packet_send, pdr|
                       -> Box<dyn DroneImplementation> {
-                Box::new(BagelBomber::new(
+                Box::new(SkyLinkDrone::new(
                     id,
                     sim_contr_send,
                     sim_contr_recv,
@@ -1163,35 +1219,452 @@ impl NetworkInitializer {
     }
 }
 
-/*
+
 #[cfg(test)]
-mod tests {
+mod channel_tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
-    use wg_2024::network::SourceRoutingHeader;
-    use wg_2024::packet::Fragment;
-    use wg_2024::packet::PacketType::MsgFragment;
+    use crate::TOML_parser::{Config, Drone, Client, Server};
     use crate::simulation_controller::SC_backend::SimulationController;
-/*
-    fn mock_controller(config: ParsedConfig) -> Arc<Mutex<SimulationController>> {
-        let (event_sender, event_receiver) = crossbeam_channel::unbounded::<DroneEvent>();
-        Arc::new(Mutex::new(SimulationController::new(Arc::new(Mutex::new(config)), event_receiver)))
+    use crossbeam_channel::unbounded;
+    use std::collections::HashMap;
+    use crate::ParsedConfig;
+    use wg_2024::controller::{DroneEvent, DroneCommand};
+    use wg_2024::network::{NodeId, SourceRoutingHeader};
+    use std::sync::{Arc, Mutex};
+    use wg_2024::packet::PacketType::Ack;
+    use wg_2024::packet::{Packet, PacketType::MsgFragment, Fragment};
+
+    /// Helper to build a dummy SimulationController for registration.
+    fn dummy_sim_controller() -> Arc<Mutex<SimulationController>> {
+        // Empty ParsedConfig just to satisfy the SC constructor
+        let pc = ParsedConfig {
+            drone: vec![],
+            client: vec![],
+            server: vec![],
+        };
+        let (evt_tx, evt_rx) = unbounded::<DroneEvent>();
+        // A factory that panics if actually used
+        let factory = Arc::new(
+            |_id, _send, _recv, _pr, _ps, _pdr| -> Box<dyn DroneTrait> {
+                panic!("Shouldn't be called in channel setup test")
+            },
+        );
+        Arc::new(Mutex::new(SimulationController::new(
+            Arc::new(Mutex::new(pc)),
+            evt_tx,
+            evt_rx,
+            factory,
+        )))
     }
 
     #[test]
-    fn test_channel_setup() {
-        // Create a mock config for testing
-        let config = Config {
+    fn test_setup_channels_creates_one_sender_per_node() {
+        // Build a minimal topology: 2 drones, 1 client, 1 server
+        let cfg = Config {
             drone: vec![
-                Drone { id: 1, connected_node_ids: vec![2], pdr: 0.9 },
-                Drone { id: 2, connected_node_ids: vec![1], pdr: 0.8 },
+                Drone { id: 1, connected_node_ids: vec![2], pdr: 0.8 },
+                Drone { id: 2, connected_node_ids: vec![1], pdr: 0.9 },
             ],
             client: vec![
                 Client { id: 3, connected_drone_ids: vec![1] },
             ],
             server: vec![
-                Server { id: 4, connected_drone_ids: vec![1] },
+                Server { id: 4, connected_drone_ids: vec![1, 2] },
             ],
+        };
+
+        // Controller channels (unused in this test)
+
+
+        let sim_ctrl = dummy_sim_controller();
+
+        let (controller_tx, _) = channel::unbounded();
+        let (_, controller_rx) = channel::unbounded();
+
+        let mut init = NetworkInitializer {
+            config: cfg.clone(),
+            drone_impls: vec![],
+            packet_senders: HashMap::new(),
+            packet_receivers: HashMap::new(),
+
+            controller_tx,
+            controller_rx,
+            simulation_controller: sim_ctrl,
+        };
+
+        // Run setup
+        init.setup_channels();
+
+        // We should have exactly one Sender per node ID
+        assert_eq!(init.packet_senders.len(), 4, "expected 4 nodes total");
+        for &node in &[1u8, 2, 3, 4] {
+            assert!(
+                init.packet_senders.contains_key(&node),
+                "missing packet channel for node {}",
+                node
+            );
+        }
+    }
+
+    #[test]
+    fn test_each_drone_has_senders_to_only_its_neighbors() {
+        // Same topology as above
+        let cfg = Config {
+            drone: vec![
+                Drone { id: 1, connected_node_ids: vec![2], pdr: 0.8 },
+                Drone { id: 2, connected_node_ids: vec![1], pdr: 0.9 },
+            ],
+            client: vec![],
+            server: vec![],
+        };
+
+        let (ctrl_tx, _) = unbounded::<DroneEvent>();
+        let (_, ctrl_rx) = unbounded::<DroneCommand>();
+        let sim_ctrl = dummy_sim_controller();
+
+
+        let mut init = NetworkInitializer {
+            config: cfg.clone(),
+            drone_impls: vec![],
+            packet_senders: HashMap::new(),
+            packet_receivers: HashMap::new(),
+
+            controller_tx: ctrl_tx,
+            controller_rx: ctrl_rx,
+            simulation_controller: sim_ctrl,
+        };
+
+        init.setup_channels();
+
+        // For each drone, check it has senders to exactly its connected_node_ids
+        for drone in &init.config.drone {
+            for &peer in &drone.connected_node_ids {
+                assert!(
+                    init.packet_senders.contains_key(&peer),
+                    "Drone {} should have a sender to node {}",
+                    drone.id,
+                    peer
+                );
+            }
+        }
+    }
+
+
+
+    /// A dummy SimulationController that just records registrations.
+    struct SpySimController {
+        pub registered: Vec<NodeId>,
+    }
+
+    impl SpySimController {
+        fn new() -> Arc<Mutex<Self>> {
+            Arc::new(Mutex::new(SpySimController { registered: vec![] }))
+        }
+        fn register_packet_sender(&mut self, node: NodeId, _tx: Sender<Packet>) {
+            self.registered.push(node);
+        }
+    }
+
+    impl SimulationController {
+        // Override for tests so NetworkInitializer can call it
+
+    }
+
+    fn make_minimal_config() -> Config {
+        Config {
+            drone: vec![
+                Drone { id: 1, connected_node_ids: vec![2], pdr: 0.8 },
+                Drone { id: 2, connected_node_ids: vec![1], pdr: 0.9 },
+            ],
+            client: vec![ Client { id: 3, connected_drone_ids: vec![1] } ],
+            server: vec![ Server { id: 4, connected_drone_ids: vec![1, 2] } ],
+        }
+    }
+
+    #[test]
+    fn test_setup_creates_senders_and_receivers_for_all_nodes() {
+        let pc = ParsedConfig {
+            drone: vec![],
+            client: vec![],
+            server: vec![],
+        };
+        let (evt_tx, _evt_rx) = unbounded::<DroneEvent>();
+        let (_cmd_tx, cmd_rx) = unbounded::<DroneCommand>();
+        let sim_ctrl = Arc::new(Mutex::new(SimulationController::new(
+            Arc::new(Mutex::new(pc)),
+            evt_tx.clone(),
+            _evt_rx.clone(),
+            Arc::new(|_id, _s, _r, _pr, _ps, _pdr| {
+                panic!("factory should not run here")
+            }),
+        )));
+
+        // 2) Build the initializer pointing at that same Arc
+        let mut init = NetworkInitializer {
+            config: make_minimal_config(),
+            drone_impls: vec![],
+            packet_senders: HashMap::new(),
+            packet_receivers: HashMap::new(),
+            controller_tx: evt_tx,
+            controller_rx: cmd_rx,
+            simulation_controller: sim_ctrl.clone(),
+        };
+
+        init.setup_channels();
+
+        // Every node should have one sender and one receiver
+        let all_ids = vec![1,2,3,4];
+        assert_eq!(init.packet_senders.len(), 4);
+        assert_eq!(init.packet_receivers.len(), 4);
+        for &id in &all_ids {
+            assert!(init.packet_senders.contains_key(&id),
+                    "missing packet sender for node {}", id);
+            assert!(init.packet_receivers.contains_key(&id),
+                    "missing packet receiver for node {}", id);
+        }
+    }
+
+    #[test]
+    fn test_simulated_forwarding_between_nodes() {
+        let cfg = make_minimal_config();
+        let pc = ParsedConfig {
+            drone: vec![],
+            client: vec![],
+            server: vec![],
+        };
+        let (evt_tx, _evt_rx) = unbounded::<DroneEvent>();
+        let (_cmd_tx, cmd_rx) = unbounded::<DroneCommand>();
+        let sim_ctrl = Arc::new(Mutex::new(SimulationController::new(
+            Arc::new(Mutex::new(pc)),
+            evt_tx.clone(),
+            _evt_rx.clone(),
+            Arc::new(|_id, _s, _r, _pr, _ps, _pdr| {
+                panic!("should not run")
+            }),
+        )));
+
+        let mut init = NetworkInitializer {
+            config: cfg,
+            drone_impls: vec![],
+            packet_senders: HashMap::new(),
+            packet_receivers: HashMap::new(),
+            controller_tx: evt_tx,
+            controller_rx: cmd_rx,
+            simulation_controller: sim_ctrl,
+        };
+        init.setup_channels();
+
+        // Simulate "drone 1" sending a packet into drone 2's inbox
+        let pkt = Packet::new_fragment(
+            SourceRoutingHeader::new(vec![1, 2, 3], 1),
+            99,
+            Fragment::from_string(0, 1, "yo!".to_string()),
+        );
+
+        // Normally drone1 would forward the packet to drone2 using its packet_sender
+        init.packet_senders[&2].send(pkt.clone()).unwrap();
+
+        // Expect drone 2 to receive it
+        let got = init.packet_receivers[&2].recv().unwrap();
+        assert_eq!(got.session_id, 99);
+    }
+
+    #[test]
+    fn test_sim_controller_sees_all_registrations() {
+        // 1) Build the real controller
+        let pc = ParsedConfig {
+            drone: vec![],
+            client: vec![],
+            server: vec![],
+        };
+        let (evt_tx, _evt_rx) = unbounded::<DroneEvent>();
+        let (_cmd_tx, cmd_rx) = unbounded::<DroneCommand>();
+        let sim_ctrl = Arc::new(Mutex::new(SimulationController::new(
+            Arc::new(Mutex::new(pc)),
+            evt_tx.clone(),
+            _evt_rx.clone(),
+            Arc::new(|_id, _s, _r, _pr, _ps, _pdr| {
+                panic!("factory should not run here")
+            }),
+        )));
+
+        // 2) Build the initializer pointing at that same Arc
+        let mut init = NetworkInitializer {
+            config: make_minimal_config(),
+            drone_impls: vec![],
+            packet_senders: HashMap::new(),
+            packet_receivers: HashMap::new(),
+            controller_tx: evt_tx,
+            controller_rx: cmd_rx,
+            simulation_controller: sim_ctrl.clone(),
+        };
+
+        // 3) Run setup
+        init.setup_channels();
+
+        // 4) Inspect the real controller’s registry
+        let regs = sim_ctrl.lock().unwrap().registered_nodes();
+        assert_eq!(regs.len(), 4);
+        for id in &[1,2,3,4] {
+            assert!(regs.contains(id),
+                    "node {} never got registered", id);
+        }
+    }
+
+
+    #[test]
+    fn test_drone_event_and_command_channels() {
+        let cfg = make_minimal_config();
+
+        let pc = ParsedConfig {
+            drone: vec![],
+            client: vec![],
+            server: vec![],
+        };
+        let (evt_tx, _evt_rx) = unbounded::<DroneEvent>();
+        let (_cmd_tx, cmd_rx) = unbounded::<DroneCommand>();
+        let sim_ctrl = Arc::new(Mutex::new(SimulationController::new(
+            Arc::new(Mutex::new(pc)),
+            evt_tx.clone(),
+            _evt_rx.clone(),
+            Arc::new(|_id, _s, _r, _pr, _ps, _pdr| {
+                panic!("factory should not run here")
+            }),
+        )));
+
+        // 2) Build the initializer pointing at that same Arc
+        let mut init = NetworkInitializer {
+            config: make_minimal_config(),
+            drone_impls: vec![],
+            packet_senders: HashMap::new(),
+            packet_receivers: HashMap::new(),
+            controller_tx: evt_tx,
+            controller_rx: cmd_rx,
+            simulation_controller: sim_ctrl.clone(),
+        };
+
+        let mut buf = [0u8; 128];
+        buf[0] = 0xAB;
+        let pkt = Packet::new_fragment(SourceRoutingHeader::new(vec![1, 2, 3], 1), 0, Fragment {
+            fragment_index: 0,
+            total_n_fragments: 1,
+            length: 1,
+            data:buf,
+        });
+
+
+        // Test that sending an event arrives in our evt_rx
+        let ev = DroneEvent::PacketSent(pkt);
+
+        init.controller_tx.send(ev.clone()).unwrap();
+        assert_eq!(_evt_rx.recv().unwrap(), ev);
+
+        // And that sending a command can be received on controller_rx
+        let cmd = DroneCommand::Crash;
+        _cmd_tx.send(cmd.clone()).unwrap();
+        assert_eq!(init.controller_rx.recv().unwrap(), cmd);
+    }
+
+    #[test]
+    fn test_fragment_ack_and_nack_response() {
+        use wg_2024::packet::{NackType, PacketType};
+
+        // Setup controller and empty config
+        let pc = ParsedConfig {
+            drone: vec![],
+            client: vec![],
+            server: vec![],
+        };
+        let (evt_tx, _evt_rx) = unbounded::<DroneEvent>();
+        let (_cmd_tx, cmd_rx) = unbounded::<DroneCommand>();
+
+        let sim_ctrl = Arc::new(Mutex::new(SimulationController::new(
+            Arc::new(Mutex::new(pc)),
+            evt_tx.clone(),
+            _evt_rx.clone(),
+            Arc::new(|_id, _s, _r, _pr, _ps, _pdr| {
+                panic!("factory should not run here")
+            }),
+        )));
+
+        // NetworkInitializer
+        let mut init = NetworkInitializer {
+            config: make_minimal_config(),
+            drone_impls: vec![],
+            packet_senders: HashMap::new(),
+            packet_receivers: HashMap::new(),
+            controller_tx: evt_tx,
+            controller_rx: cmd_rx,
+            simulation_controller: sim_ctrl.clone(),
+        };
+        init.setup_channels();
+
+        // Simulate Node 1 sending a fragment to Node 2
+        let mut buf = [0u8; 128];
+        buf[0] = 0xAB;
+        let fragment = Fragment {
+            fragment_index: 0,
+            total_n_fragments: 1,
+            length: 1,
+            data: buf,
+        };
+        let header = SourceRoutingHeader::new(vec![1, 2], 0);
+        let frag_packet = Packet::new_fragment(header.clone(), 42, fragment);
+        init.packet_senders[&2].send(frag_packet.clone()).unwrap();
+
+        // Node 2 simulates receiving the fragment and sending an ACK back to Node 1
+        let ack = Packet::new_ack(header.clone(), 42, frag_packet.get_fragment_index());
+        init.packet_senders[&1].send(ack.clone()).unwrap();
+
+        // Node 1 should now receive the ACK
+        let response = init.packet_receivers[&1].recv().unwrap();
+        match response.pack_type {
+            PacketType::Ack(a) => {
+                assert_eq!(a.fragment_index, 0);
+            }
+            other => panic!("Expected Ack, got {:?}", other),
+        }
+
+        // Now simulate a NACK instead
+        let nack = Packet::new_nack(header.clone(), 42, wg_2024::packet::Nack {
+            fragment_index: 0,
+            nack_type: NackType::Dropped,
+        });
+        init.packet_senders[&1].send(nack.clone()).unwrap();
+
+        // Node 1 should receive the NACK
+        let response = init.packet_receivers[&1].recv().unwrap();
+        match response.pack_type {
+            PacketType::Nack(n) => {
+                assert_eq!(n.fragment_index, 0);
+                assert_eq!(n.nack_type, NackType::Dropped);
+            }
+            other => panic!("Expected Nack, got {:?}", other),
+        }
+    }
+
+    fn mock_controller(config: ParsedConfig) -> Arc<Mutex<SimulationController>> {
+        let (event_sender, event_receiver) = unbounded::<DroneEvent>();
+        let dummy_factory = Arc::new(|_, _, _, _, _, _| {
+            panic!("Factory should not be called in this test");
+        });
+        Arc::new(Mutex::new(SimulationController::new(
+            Arc::new(Mutex::new(config)),
+            event_sender,
+            event_receiver,
+            dummy_factory,
+        )))
+    }
+
+    #[test]
+    fn test_channel_setup() {
+        let config = Config {
+            drone: vec![
+                Drone { id: 1, connected_node_ids: vec![2], pdr: 0.9 },
+                Drone { id: 2, connected_node_ids: vec![1], pdr: 0.8 },
+            ],
+            client: vec![Client { id: 3, connected_drone_ids: vec![1] }],
+            server: vec![Server { id: 4, connected_drone_ids: vec![1] }],
         };
 
         let parsed_config = ParsedConfig {
@@ -1206,33 +1679,34 @@ mod tests {
 
         let controller = mock_controller(parsed_config.clone());
 
-        let drone_impls = vec![]; // no implementations for channel setup test
-
         let mut initializer = NetworkInitializer {
             config,
-            drone_impls,
-            channels: HashMap::new(),
-            controller_tx: crossbeam_channel::unbounded().0,
-            controller_rx: crossbeam_channel::unbounded().1,
+            drone_impls: vec![],
+            packet_senders: HashMap::new(),
+            packet_receivers: HashMap::new(),
+            controller_tx: unbounded().0,
+            controller_rx: unbounded().1,
             simulation_controller: controller,
         };
 
         initializer.setup_channels();
 
         for drone in &parsed_config.drone {
-            assert!(initializer.channels.contains_key(&drone.id), "Missing channel for drone {}", drone.id);
+            assert!(initializer.packet_senders.contains_key(&drone.id), "Missing sender for drone {}", drone.id);
+            assert!(initializer.packet_receivers.contains_key(&drone.id), "Missing receiver for drone {}", drone.id);
         }
         for client in &parsed_config.client {
-            assert!(initializer.channels.contains_key(&client.id), "Missing channel for client {}", client.id);
+            assert!(initializer.packet_senders.contains_key(&client.id), "Missing sender for client {}", client.id);
+            assert!(initializer.packet_receivers.contains_key(&client.id), "Missing receiver for client {}", client.id);
         }
         for server in &parsed_config.server {
-            assert!(initializer.channels.contains_key(&server.id), "Missing channel for server {}", server.id);
+            assert!(initializer.packet_senders.contains_key(&server.id), "Missing sender for server {}", server.id);
+            assert!(initializer.packet_receivers.contains_key(&server.id), "Missing receiver for server {}", server.id);
         }
     }
 
     #[test]
     fn test_drone_initialization() {
-        let drone_count = 3;
         let drones = vec![
             Drone { id: 1, connected_node_ids: vec![2], pdr: 0.9 },
             Drone { id: 2, connected_node_ids: vec![1], pdr: 0.8 },
@@ -1249,30 +1723,32 @@ mod tests {
             server: vec![],
         };
 
-        let controller = mock_controller(parsed_config.clone());
+        let controller = mock_controller(parsed_config);
 
         let mut initializer = NetworkInitializer {
             config: Config { drone: drones, client: vec![], server: vec![] },
-            drone_impls: vec![Box::new(MyDrone::new(
-                0,
-                crossbeam_channel::unbounded().0,
-                crossbeam_channel::unbounded().1,
-                crossbeam_channel::unbounded().1,
-                HashMap::new(),
-                0.5,
-            ))],
-            channels: HashMap::new(),
-            controller_tx: crossbeam_channel::unbounded().0,
-            controller_rx: crossbeam_channel::unbounded().1,
+            drone_impls: vec![DroneWithId {
+                id: 0,
+                instance: Box::new(MyDrone::new(
+                    0,
+                    unbounded().0,
+                    unbounded().1,
+                    unbounded().1,
+                    HashMap::new(),
+                    0.5,
+                )),
+            }],
+            packet_senders: HashMap::new(),
+            packet_receivers: HashMap::new(),
+            controller_tx: unbounded().0,
+            controller_rx: unbounded().1,
             simulation_controller: controller,
         };
 
         initializer.setup_channels();
-        initializer.initialize_drones(); // Calls your new logic
+        initializer.initialize_drones();
 
-        // There's no deterministic way to test threads started here,
-        // so we rely on "it didn't panic" and print logs
-        assert_eq!(true, true);
+        assert_eq!(true, true); // placeholder success check
     }
 
     #[test]
@@ -1300,68 +1776,70 @@ mod tests {
             server: servers.clone(),
         };
 
-        let controller = mock_controller(parsed_config.clone());
+        let controller = mock_controller(parsed_config);
 
         let mut initializer = NetworkInitializer {
             config,
-            drone_impls: vec![Box::new(MyDrone::new(
-                0,
-                crossbeam_channel::unbounded().0,
-                crossbeam_channel::unbounded().1,
-                crossbeam_channel::unbounded().1,
-                HashMap::new(),
-                0.5,
-            ))],
-            channels: HashMap::new(),
-            controller_tx: crossbeam_channel::unbounded().0,
-            controller_rx: crossbeam_channel::unbounded().1,
+            drone_impls: vec![DroneWithId {
+                id: 0,
+                instance: Box::new(MyDrone::new(
+                    0,
+                    unbounded().0,
+                    unbounded().1,
+                    unbounded().1,
+                    HashMap::new(),
+                    0.5,
+                )),
+            }],
+            packet_senders: HashMap::new(),
+            packet_receivers: HashMap::new(),
+            controller_tx: unbounded().0,
+            controller_rx: unbounded().1,
             simulation_controller: controller,
         };
 
+        let gui_input= SharedGuiInput::new(Default::default());
         initializer.setup_channels();
         initializer.initialize_drones();
-        initializer.initialize_clients();
-        initializer.initialize_servers();
+        initializer.initialize_clients(gui_input.clone()); // Dummy SharedGuiInput
+        initializer.initialize_servers(gui_input.clone());
 
         for node_id in [1, 2, 3, 4] {
-            assert!(initializer.channels.contains_key(&node_id), "Missing channel for node {}", node_id);
+            assert!(initializer.packet_senders.contains_key(&node_id), "Missing channel for node {}", node_id);
         }
-    }*/
+    }
+
     #[test]
     fn test_process_event_packet_dropped() {
+        let mut data = [0u8; 128];
+        data[0] = 0xFF;
 
-        // Dummy packet to send in the event
-        let test_packet = Packet {
-            session_id: 42,
-            routing_header: SourceRoutingHeader  {
+        let test_packet = Packet::new_fragment(
+            SourceRoutingHeader {
+                hop_index: 0,
                 hops: vec![1, 2],
-                ..Default::default()
             },
-
-            pack_type: MsgFragment(Fragment {
+            42,
+            Fragment {
                 fragment_index: 0,
-                total_n_fragments: 0,
-                length: 0,
-                data: [2,128],
-            }),
-        };
+                total_n_fragments: 1,
+                length: 1,
+                data,
+            },
+        );
 
-        // Set up shared config
         let config = Arc::new(Mutex::new(ParsedConfig {
             drone: vec![],
             client: vec![],
             server: vec![],
         }));
 
-        // Create DroneEvent channel (shared between drones and controller)
-        let (event_sender, event_receiver) = crossbeam_channel::unbounded::<DroneEvent>();
+        let (event_sender, event_receiver) = unbounded::<DroneEvent>();
 
-        // Dummy drone factory (won't be used in this test)
         let dummy_factory = Arc::new(|_, _, _, _, _, _| {
             panic!("Drone factory should not be called in this test");
         });
 
-        // Instantiate the SimulationController
         let mut controller = SimulationController::new(
             config,
             event_sender.clone(),
@@ -1369,19 +1847,14 @@ mod tests {
             dummy_factory,
         );
 
-        // Send a PacketDropped event
         let event = DroneEvent::PacketDropped(test_packet.clone());
         event_sender.send(event).unwrap();
 
-        // Process the event using the controller
-        // NOTE: .run() loops forever, so we call .event_receiver.recv() directly here for the test
         if let Ok(received) = controller.event_receiver.try_recv() {
-            controller.process_event(received); // This will trigger println!
+            controller.process_event(received);
         } else {
             panic!("No DroneEvent received in SimulationController");
         }
-
-        // If you want, you can extend this test to assert side effects on controller state
     }
+
 }
-*/
