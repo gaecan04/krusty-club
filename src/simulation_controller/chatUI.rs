@@ -632,7 +632,10 @@ impl ChatUIState {
                                 self.chat_history.entry(key).or_default().push(msg.clone());
                             }
 
+
                             push_gui_message(&self.gui_input, from, format!("[MessageTo]::{to}::{}", msg.content));
+                            //solved : push_gui_message(&self.gui_input, self.selected_server.unwrap(), format!("[MsgTo]::{to}::{}", msg.content));
+
                             self.chat_input.clear();
                         }
                     }

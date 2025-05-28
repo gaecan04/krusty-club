@@ -715,9 +715,10 @@ impl MyClient {
                 }
             },
 
-            /*["[FloodRequired]",action] => {
+            ["[FloodRequired]",action] => {
                 //TODO: implement correct logic
-            },*/
+                Some(format!("[FloodRequired]::{action}"))
+            },
             _ => {
                 eprintln!("Client {} received unrecognized GUI command: {}", self.id, command_string);
                 None

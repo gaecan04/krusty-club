@@ -68,6 +68,7 @@ impl MyClient {
     }
 
     pub (crate) fn run(&mut self, gui_input: SharedGuiInput) {
+
         println!("Client {} starting run loop", self.id);
         self.send_flood_request();
         loop {
@@ -95,7 +96,7 @@ impl MyClient {
                 },
                 default => {
                    std::thread::sleep(std::time::Duration::from_millis(1));
-    }
+                 }
                 /*recv(self.sim_contr_recv) -> msg => {
                     info!("Checking for received command...");
                     if let Ok(msg) = msg {
@@ -656,6 +657,9 @@ impl MyClient {
             },
             ["[MediaListRequest]"] => {
                 info!("Requesting media list to server: {}" , self.get_server_id().unwrap_or(0));
+                Ok(command_string)
+            },
+            ["[FloodRequired]",action] => {
                 Ok(command_string)
             },
             _ => {
