@@ -25,6 +25,7 @@ use base64::{decode, Engine};
 use base64::engine::general_purpose::STANDARD;
 use std::io::Cursor;
 use image::{ImageReader, DynamicImage, open};
+use petgraph::visit::NodeIndexable;
 use serde::de::StdError;
 use serde::de::Unexpected::Str;
 use crate::simulation_controller::gui_input_queue::{push_gui_message, new_gui_input_queue, SharedGuiInput};
@@ -76,7 +77,6 @@ impl MyClient {
 
                 if let Some(msgs) = map.get_mut(&self.id) {
                     if !msgs.is_empty() {
-
                         let msg = msgs.remove(0);
                         drop(map); // Release lock early
                         let message = self.process_gui_command(msg).unwrap();
@@ -99,34 +99,11 @@ impl MyClient {
                 default => {
                    std::thread::sleep(std::time::Duration::from_millis(1));
                  }
-                /*recv(self.sim_contr_recv) -> msg => {
-                    info!("Checking for received command...");
-                    if let Ok(msg) = msg {
-                        info!("Command received: {:?}", msg);
-                        self.process_controller_command(msg);
-                    } else {
-                        info!("No command received or channel closed.");
-                    }
-                }*/
+
             }
         }
     }
-    /*
-    fn process_controller_command(&mut self, msg: DroneCommand) {
-        match &mut msg.clone(){
-            DroneCommand::RemoveSender(drone_id)=>{
-                self.packet_send.remove(drone_id);
-                info!("Removed sender packet for {}", drone_id);
-            }
-            DroneCommand::AddSender(drone_id, sender)=>{
-                self.packet_send.insert(*drone_id , sender.clone());
-                info!("Added sender packet for {}", drone_id);
-            }
-            _=>{
-                warn!("The command is not recognized by the client")
-            }
-        }
-    }*/
+
 
     fn process_packet (&mut self, packet: Packet) {
         match &mut packet.clone().pack_type {
@@ -244,24 +221,33 @@ impl MyClient {
         self.increment_ids(&SESSION_IDS)
     }
 
-    fn send_flood_request(&self){
+    fn send_flood_request(&self) {
+        println!(" 🦋🦋🦋Incrementing FLOOD_IDS...");
         self.increment_ids(&FLOOD_IDS);
-        let flood_request  = FloodRequest :: initialize(FLOOD_IDS.lock().unwrap().clone(), self.id, Client);
+
+        println!("🦋🦋🦋Building FloodRequest...");
+        let flood_request = FloodRequest::initialize(FLOOD_IDS.lock().unwrap().clone(), self.id, Client);
+
+        println!("🦋🦋🦋Building Packet...");
         let packet = Packet {
             pack_type: PacketType::FloodRequest(flood_request),
-            session_id: 18446744073709551615, // a session_id is reserved for the flood_requests
-            routing_header: SourceRoutingHeader{
-                hop_index: 1,
-                hops: [self.id].to_vec(),
+            session_id: 18446744073709551615,
+            routing_header: SourceRoutingHeader {
+                hop_index: 0,
+                hops: vec![self.id],
             }
         };
-        for  sender_tuple in self.packet_send.iter() { // we go through all the neighbours of the Client, and we send a FloodRequest to each of them
-            let sender = sender_tuple.1.clone();
-            sender.send(packet.clone()).unwrap_or_default();
-        }
-        info!("Starting the flood n. {}", FLOOD_IDS.lock().unwrap());
 
+        println!("🦋🦋🦋 Sending to neighbors...");
+        for sender in self.packet_send.values() {
+            if let Err(e) = sender.send(packet.clone()) {
+                println!("❌ Error sending FloodRequest: {:?}", e);
+            }
+        }
+        println!("🦋🦋🦋FloodRequest sent!");
+        info!("Starting the flood n. {}", FLOOD_IDS.lock().unwrap());
     }
+
 
     fn reassemble_packet (&mut self, fragment: &Fragment, packet : &mut Packet){
         let session_id = packet.session_id; // since each message sent has its own, that is the same for each of its fragments, session_id we use them to store
@@ -420,14 +406,44 @@ impl MyClient {
 
         info!("Updating known network topology.")
     }
-    fn add_edge_no_duplicate(&mut self, graph: &mut Graph<u8, u8, Undirected>, a: NodeIndex, b: NodeIndex, weight: u8) -> bool {
+   /* fn add_edge_no_duplicate(&mut self, graph: &mut Graph<u8, u8, Undirected>, a: NodeIndex, b: NodeIndex, weight: u8) -> bool {
         if !graph.contains_edge(a, b) {
             graph.add_edge(a, b, weight);
             true
         } else {
             false
         }
+    }*/
+
+    fn add_edge_no_duplicate(
+        &mut self,
+        graph: &mut Graph<u8, u8, Undirected>,
+        a: NodeIndex,
+        b: NodeIndex,
+        weight: u8,
+    ) -> bool {
+        // Ensure both nodes exist in the graph
+        let node_bound = graph.node_bound();
+        if a.index() < node_bound && b.index() < node_bound {
+            if !graph.contains_edge(a, b) {
+                graph.add_edge(a, b, weight);
+                true
+            } else {
+                false
+            }
+        } else {
+            // Optionally: print a warning
+            eprintln!(
+                "Tried to add edge between invalid indices: a = {:?}, b = {:?}, graph.node_bound = {}",
+                a,
+                b,
+                node_bound
+            );
+            false
+        }
     }
+
+
     fn add_node_no_duplicate(&mut self, graph: &mut Graph<u8, u8, Undirected>, node_map: &mut HashMap<NodeId, (NodeIndex, NodeType)>, value: u8 , node_type: NodeType) -> NodeIndex {
         if let Some(&idx) = node_map.get(&value) {
             // Node with this value already exists

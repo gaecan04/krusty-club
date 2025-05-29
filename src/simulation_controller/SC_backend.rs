@@ -195,18 +195,35 @@ impl SimulationController {
         match event {
             DroneEvent::PacketSent(packet) => {
                 // Log packet sent event
-                if let Some(&last_hop) = packet.routing_header.hops.last() {
-                    println!("Packet sent from {} to {}", packet.session_id, last_hop);
-                } else {
-                    println!("Packet sent from {} but routing header was empty", packet.session_id);
+                let hops = &packet.routing_header.hops;
+                match (hops.get(1), hops.last(), hops.get(0)) {
+                    (Some(hop1), Some(&last_hop), _) => {
+                        println!("Packet sent from {} to {}", hop1, last_hop);
+                    }
+                    (None, Some(&last_hop), Some(hop0)) => {
+                        // Less than 2 elements, fallback to hop0
+                        println!("Packet sent from {} to {}", hop0, last_hop);
+                    }
+                    (None, None, Some(hop0)) => {
+                        println!("Packet sent from {} but routing header was empty", hop0);
+                    }
+                    _ => {
+                        println!("Packet sent but hops vector is empty");
+                    }
                 }
             },
             DroneEvent::PacketDropped(packet) => {
-                // Log packet dropped event
-                if let Some(&last_hop) = packet.routing_header.hops.last() {
-                    println!("Packet dropped from {} to {}", packet.session_id, last_hop);
-                } else {
-                    println!("Packet dropped from {} but routing header was empty", packet.session_id);
+                let hops = &packet.routing_header.hops;
+                match (hops.get(0), hops.last()) {
+                    (Some(hop0), Some(&last_hop)) => {
+                        println!("Packet dropped from {} to {}", hop0, last_hop);
+                    }
+                    (Some(hop0), None) => {
+                        println!("Packet dropped from {} but routing header was empty", hop0);
+                    }
+                    _ => {
+                        println!("Packet dropped but hops vector is empty");
+                    }
                 }
             },
             DroneEvent::ControllerShortcut(packet) => {
