@@ -27,7 +27,7 @@ pub enum DroneEvent {
 
 pub struct SimulationController {
     network_config: Arc<Mutex<ParsedConfig>>,
-    pub(crate) event_receiver: Receiver<DroneEvent>,
+    //pub(crate) event_receiver: Receiver<DroneEvent>,
     pub(crate) command_sender: Sender<DroneCommand>,
     pub(crate) command_senders: HashMap<NodeId, Sender<DroneCommand>>,
     pub(crate) event_sender: Sender<DroneEvent>,
@@ -55,7 +55,7 @@ impl SimulationController {
     pub fn new(
         network_config: Arc<Mutex<ParsedConfig>>,
         event_sender: Sender<DroneEvent>,
-        event_receiver: Receiver<DroneEvent>,
+        //event_receiver: Receiver<DroneEvent>,
         command_sender: Sender<DroneCommand>,
         drone_factory: Arc<dyn Fn(NodeId, Sender<DroneEvent>, Receiver<DroneCommand>, Receiver<Packet>, HashMap<NodeId, Sender<Packet>>, f32) -> Box<dyn Drone> + Send + Sync>,
         gui_input: SharedGuiInput,
@@ -65,7 +65,7 @@ impl SimulationController {
         let mut controller = SimulationController {
             network_config: network_config.clone(),
             config: network_config.clone(),
-            event_receiver,
+            //event_receiver,
             event_sender: event_sender.clone(),
             command_sender: command_sender.clone(),            command_senders: HashMap::new(),
             network_graph: HashMap::new(),
@@ -180,19 +180,14 @@ impl SimulationController {
         self.packet_senders.insert(node_id, sender);
     }
 
-    pub fn start_background_thread(controller: Arc<Mutex<Self>>) {
+    pub fn start_background_thread(controller: Arc<Mutex<Self>>, event_receiver: Receiver<DroneEvent>) {
+        let controller_clone = controller.clone(); // No need to double-Arc
         std::thread::spawn(move || {
-            let mut c = controller.lock().unwrap();
-            c.run(); // Calls the existing event-processing loop
+            while let Ok(event) = event_receiver.recv() {
+                let mut ctrl = controller_clone.lock().unwrap();
+                ctrl.process_event(event);
+            }
         });
-    }
-
-
-    // Main loop to process events
-    pub fn run(&mut self) {
-        while let Ok(event) = self.event_receiver.recv() {
-            self.process_event(event);
-        }
     }
 
     // Process a drone event
@@ -201,9 +196,9 @@ impl SimulationController {
             DroneEvent::PacketSent(packet) => {
                 // Log packet sent event
                 if let Some(&last_hop) = packet.routing_header.hops.last() {
-                   // println!("Packet sent from {} to {}", packet.session_id, last_hop);
+                    println!("Packet sent from {} to {}", packet.session_id, last_hop);
                 } else {
-                    //println!("Packet sent from {} but routing header was empty", packet.session_id);
+                    println!("Packet sent from {} but routing header was empty", packet.session_id);
                 }
             },
             DroneEvent::PacketDropped(packet) => {

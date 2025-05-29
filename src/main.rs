@@ -17,6 +17,8 @@ use crate::network::initializer::{DroneImplementation, MyDrone, NetworkInitializ
 use crate::simulation_controller::gui_input_queue::{push_gui_message, new_gui_input_queue, SharedGuiInput};
 
 fn main() -> Result<(), Box<dyn Error>> {
+
+
     env_logger::init();
     // Config and duration
     let config_path = std::env::args()
@@ -56,11 +58,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let controller = Arc::new(Mutex::new(SimulationController::new(
         parsed_config.clone(),
         event_sender.clone(),
-        event_receiver.clone(),
         command_sender.clone(),
         drone_factory.clone(),              // <- Correct type and position
         gui_input_queue.clone(),
     )));
+
 
     let mut initializer = NetworkInitializer::new(
         &config_path,
@@ -87,7 +89,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("Network initialized successfully");
 
     println!("Starting GUI application");
-    SimulationController::start_background_thread(controller.clone());
+    SimulationController::start_background_thread(controller.clone(),event_receiver.clone());
     run_gui_application(
         event_sender.clone(),
         event_receiver.clone(),

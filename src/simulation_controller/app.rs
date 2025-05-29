@@ -503,7 +503,6 @@ impl NetworkApp {
     }
 
     fn render_chat_view(&mut self, ctx: &egui::Context) {
-        println!("🌱🌱🌱🌱🌱🌱chat to be opened");
         egui::CentralPanel::default().show(ctx, |ui| {
             // ✅ TEMPORARY BOOTSTRAP
             if self.chat_ui.client_status.is_empty() || self.chat_ui.servers.is_empty() {
@@ -569,7 +568,6 @@ impl NetworkApp {
         let controller = SimulationController::new(
             config.clone(),
             event_sender.clone(),
-            event_receiver,
             command_sender.clone(),
             drone_factory.clone(),
             gui_input.clone(),
@@ -580,8 +578,10 @@ impl NetworkApp {
 
         let controller_clone = controller.clone();
         let controller_thread = thread::spawn(move || {
-            let mut ctrl = controller_clone.lock().unwrap();
-            ctrl.run();
+            while let Ok(event) = event_receiver.recv() {
+                let mut ctrl = controller_clone.lock().unwrap();
+                ctrl.process_event(event);
+            }
         });
 
         app.controller_thread = Some(controller_thread);
