@@ -348,8 +348,8 @@ impl server {
                         self.registered_clients.push(client_id);
                         info!("Client {} registered to this server", client_id);
 
-                        let loging_acknowledgement= format!("[LoginAck]::{}", session_id);
-                        self.send_chat_message(session_id, client_id,loging_acknowledgement, routing_header);
+                        let login_acknowledgement= format!("[LoginAck]::{}", session_id);
+                        self.send_chat_message(session_id, client_id,login_acknowledgement, routing_header);
                     }
                 } else {
                     error!("server_id in Login request is not the id of the server receiving the fragment!")
