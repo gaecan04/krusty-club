@@ -179,6 +179,7 @@ impl ParsedConfig {
         };
 
 
+
         // === DOUBLE CHAIN ===
         let is_double_chain = {
             let mut deg2 = 0;
@@ -253,7 +254,7 @@ impl ParsedConfig {
             deg2 == 1 && deg4 == 2 && deg6 == 3 && deg3 == 4
         };
 
-    //subnet
+        //subnet
         let is_subnet = {
             let high_deg = connections.values().filter(|n| n.len() >= 4).count();
             high_deg >= 3
@@ -382,7 +383,7 @@ impl wg_2024::drone::Drone for MyDrone {
     fn run(&mut self) {
         println!("Running drone {} with PDR {}", self.id, self.pdr);
 
-        // Real implementation would handle packets and controller commands
+       /* // Real implementation would handle packets and controller commands
         loop {
             select! {
                 recv(self.packet_recv) -> packet => {
@@ -398,7 +399,7 @@ impl wg_2024::drone::Drone for MyDrone {
                     }
                 }
             }
-        }
+        }*/
     }
 }
 
@@ -424,6 +425,7 @@ pub struct NetworkInitializer {
     controller_tx: Sender<DroneEvent>,
     controller_rx: Receiver<DroneCommand>,
     simulation_controller: Arc<Mutex<SimulationController>>,
+    packet_senders_arc: Arc<HashMap<NodeId, Sender<Packet>>>,
 }
 
 /*
@@ -446,14 +448,16 @@ use dr_ones::Drone as DrOnesDrone; //ok
 use skylink::SkyLinkDrone; //ok
 use rustastic_drone::RustasticDrone; //ok
 use bagel_bomber::BagelBomber; //ok
-use fungi_drone::FungiDrone; //ok
+use fungi_drone::FungiDrone;
+use Krusty_Club::Krusty_C;
+//ok
 use wg_2024_rust::drone::RustDrone; //ok
 use rustafarian_drone::RustafarianDrone; //ok
 use rolling_drone::RollingDrone;
 //ok
 
 impl NetworkInitializer {
-    pub fn new(config_path: &str, drone_impls: Vec<DroneWithId>,    simulation_controller: Arc<Mutex<SimulationController>>, ) -> Result<Self, Box<dyn Error>> {
+    pub fn new(config_path: &str, drone_impls: Vec<DroneWithId>,    simulation_controller: Arc<Mutex<SimulationController>>,packet_senders_arc: Arc<HashMap<NodeId, Sender<Packet>>>, ) -> Result<Self, Box<dyn Error>> {
         // Read config file
         let config_str = fs::read_to_string(config_path)?;
 
@@ -477,6 +481,7 @@ impl NetworkInitializer {
             controller_tx,
             controller_rx,
             simulation_controller,
+            packet_senders_arc,
         })
     }
 
@@ -776,48 +781,92 @@ impl NetworkInitializer {
         }
     }
 
-    fn initialize_clients(&mut self,gui_input: SharedGuiInput) {
-        for client in &self.config.client {
+
+    fn initialize_clients(&mut self, gui_input: SharedGuiInput) {
+        for (i, client) in self.config.client.iter().enumerate() {
             let client_id = client.id;
+            let packet_send = Arc::clone(&self.packet_senders_arc); // stored once during setup
+
             let mut senders = HashMap::new();
             for &drone_id in &client.connected_drone_ids {
-                if let Some(tx) = self.packet_senders.get(&drone_id) {
+                if let Some(tx) = packet_send.get(&drone_id) {
                     senders.insert(drone_id, tx.clone());
                 }
             }
-            let (client_tx, client_rx) = crossbeam_channel::unbounded();
-            self.packet_senders.insert(client_id, client_tx.clone());
 
-            client2::start_client(client_id, client_rx, senders,gui_input.clone());
+           // let (client_tx, client_rx) = crossbeam_channel::unbounded();
+            //self.packet_senders.insert(client_id, client_tx.clone());
 
+            let client_rx = self
+                            .packet_receivers
+                            .get(&client_id)
+                            .expect("setup_channels must have created this")
+                            .clone();
+            let gui_clone = gui_input.clone();
+
+            if self.config.client.len() == 2 {
+                if client_id % 2 == 0 {
+                    // client2
+                    thread::spawn(move || {
+                        println!("client2 spawned");
+                        let mut cl2 = client2::MyClient::new(client_id, client_rx.clone(), senders);
+                        cl2.run(gui_clone);
+                    });
+                } else {
+                    // client1
+                    thread::spawn(move || {
+                        println!("client1 spawned");
+                        let mut cl1 = client1::MyClient::new(client_id, client_rx.clone(), senders, HashMap::new(), None,HashSet::new());
+
+                        cl1.run(gui_clone);
+                    });
+                }
+            } else {
+                if i % 2 == 0 {
+                    // client2 for even-indexed clients
+                    thread::spawn(move || {
+                        println!("client2 spawned");
+                        let mut cl2 = client2::MyClient::new(client_id, client_rx.clone(), senders);
+                        cl2.run(gui_clone);
+                    });
+                } else {
+                    // client1 for odd-indexed clients
+                    thread::spawn(move || {
+                        println!("client1 spawned");
+                        let mut cl1 = client1::MyClient::new(client_id, client_rx.clone(), senders, HashMap::new(), None,HashSet::new());
+                        cl1.run(gui_clone);
+                    });
+                }
+            }
         }
     }
 
-
-    fn initialize_servers(&mut self,gui_input: SharedGuiInput) {
+    fn initialize_servers(&mut self, gui_input: SharedGuiInput) {
         for server in &self.config.server {
-            println!("server initi");
             let server_id = server.id;
+            let packet_send = Arc::clone(&self.packet_senders_arc);
 
-            // Gather packet senders to connected drones
             let mut senders = HashMap::new();
             for &drone_id in &server.connected_drone_ids {
-                if let Some(tx) = self.packet_senders.get(&drone_id) {
+                if let Some(tx) = packet_send.get(&drone_id) {
                     senders.insert(drone_id, tx.clone());
                 }
             }
 
-            // Create and store receiver
-            let (server_tx, server_rx) = crossbeam_channel::unbounded();
-            self.packet_senders.insert(server_id, server_tx.clone());
+           // let (server_tx, server_rx) = crossbeam_channel::unbounded();
+            //self.packet_senders.insert(server_id, server_tx.clone());
+            let server_rx = self
+                .packet_receivers
+                .get(&server_id)
+                .expect("setup_channels must have created this")
+                .clone();
 
-           // server::start_server(server_id, server_rx, senders);
-            let mut srv = server::server::new(server_id as u8, senders, server_rx);
-            let mut value = gui_input.clone();
+            let gui_clone = gui_input.clone();
             thread::spawn(move || {
-                println!("server spawned");
-                srv.run(value);
-            });        }
+                let mut srv = server::server::new(server_id as u8, senders, server_rx.clone());
+                srv.run(gui_clone);
+            });
+        }
     }
 
     fn spawn_controller(&self) {
@@ -856,7 +905,7 @@ impl NetworkInitializer {
         controller_send: Sender<DroneEvent>,
         controller_recv: Receiver<DroneCommand>,
         packet_recv: Receiver<Packet>,
-        packet_send: HashMap<NodeId, Sender<Packet>>,
+        packet_send: Arc<HashMap<NodeId, Sender<Packet>>>,
     ) -> Vec<DroneWithId> {
         let mut implementations: Vec<DroneWithId> = Vec::new();
 
@@ -876,10 +925,10 @@ impl NetworkInitializer {
                     controller_send.clone(),
                     controller_recv.clone(),
                     packet_recv.clone(),
-                    packet_send.clone(),
+                    (*packet_send).clone(),
                     pdr,
                 )) as Box<dyn DroneImplementation>;
-               // implementations.push(drone_impl);
+                // implementations.push(drone_impl);
                 implementations.push((DroneWithId {
                     id,
                     instance:drone_impl,}));
@@ -925,11 +974,11 @@ impl NetworkInitializer {
                     controller_send.clone(),
                     controller_recv.clone(),
                     packet_recv.clone(),
-                    packet_send.clone(),
+                    (*packet_send).clone(),
                     pdr,
                 );
 
-               // implementations.push(drone_impl);
+                // implementations.push(drone_impl);
                 implementations.push((DroneWithId {
                     id,
                     instance:drone_impl,}));
@@ -942,7 +991,7 @@ impl NetworkInitializer {
                     controller_send.clone(),
                     controller_recv.clone(),
                     packet_recv.clone(),
-                    packet_send.clone(),
+                    (*packet_send).clone(),
                     pdr,
                 )) as Box<dyn DroneImplementation>;
 
@@ -968,7 +1017,7 @@ impl NetworkInitializer {
             Box::new(|id: NodeId, sim_contr_send: Sender<DroneEvent>, sim_contr_recv: Receiver<DroneCommand>,
                       packet_recv: Receiver<Packet>, packet_send: HashMap<NodeId, Sender<Packet>>, pdr: f32|
                       -> Box<dyn DroneImplementation> {
-                Box::new(RustafarianDrone::new(
+                Box::new(LeDron_JamesDrone::new(
                     id,
                     sim_contr_send,
                     sim_contr_recv,
@@ -984,7 +1033,7 @@ impl NetworkInitializer {
             "group_2".to_string(),
             Box::new(|id, sim_contr_send, sim_contr_recv, packet_recv, packet_send, pdr|
                       -> Box<dyn DroneImplementation> {
-                Box::new(LeDron_JamesDrone::new(
+                Box::new(SkyLinkDrone::new(
                     id,
                     sim_contr_send,
                     sim_contr_recv,
@@ -999,7 +1048,7 @@ impl NetworkInitializer {
             "group_3".to_string(),
             Box::new(|id, sim_contr_send, sim_contr_recv, packet_recv, packet_send, pdr|
                       -> Box<dyn DroneImplementation> {
-                Box::new(LeDron_JamesDrone::new(
+                Box::new(CppEnjoyersDrone::new(
                     id,
                     sim_contr_send,
                     sim_contr_recv,
@@ -1014,7 +1063,7 @@ impl NetworkInitializer {
             "group_4".to_string(),
             Box::new(|id, sim_contr_send, sim_contr_recv, packet_recv, packet_send, pdr|
                       -> Box<dyn DroneImplementation> {
-                Box::new(DrOnesDrone::new(
+                Box::new(SkyLinkDrone::new(
                     id,
                     sim_contr_send,
                     sim_contr_recv,
@@ -1057,7 +1106,7 @@ impl NetworkInitializer {
             "group_7".to_string(),
             Box::new(|id, sim_contr_send, sim_contr_recv, packet_recv, packet_send, pdr|
                       -> Box<dyn DroneImplementation> {
-                Box::new(BagelBomber::new(
+                Box::new(SkyLinkDrone::new(
                     id,
                     sim_contr_send,
                     sim_contr_recv,
@@ -1730,8 +1779,8 @@ mod channel_tests {
         let gui_input= SharedGuiInput::new(Default::default());
         initializer.setup_channels();
         initializer.initialize_drones();
-        initializer.initialize_clients(gui_input); // Dummy SharedGuiInput
-        initializer.initialize_servers();
+        initializer.initialize_clients(gui_input.clone()); // Dummy SharedGuiInput
+        initializer.initialize_servers(gui_input.clone());
 
         for node_id in [1, 2, 3, 4] {
             assert!(initializer.packet_senders.contains_key(&node_id), "Missing channel for node {}", node_id);

@@ -31,6 +31,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Initialize network and shared channels
     let (event_sender, event_receiver, command_sender, command_receiver, packet_recv, packet_send_map, config) =
         initialize_network_channels(&config_path)?;
+    let gui_input_queue = new_gui_input_queue();
+    println!("🔗 GUI_INPUT addr (main): {:p}", &*gui_input_queue.lock().unwrap());
 
     let parsed_config = Arc::new(Mutex::new(config.clone()));
 
@@ -54,6 +56,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         event_sender.clone(),
         event_receiver,
         drone_factory.clone(),
+        gui_input_queue.clone(),
     )));
 
     // Create drone implementations using the NetworkInitializer
@@ -62,12 +65,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         event_sender.clone(),
         command_receiver.clone(),
         packet_recv,
-        packet_send_map,
+        packet_send_map.clone(),
     );
 
     // Initialize the network
-    let mut initializer = NetworkInitializer::new(&config_path, drone_impls, controller.clone())?;
-    let gui_input_queue = new_gui_input_queue();
+    let mut initializer = NetworkInitializer::new(&config_path, drone_impls, controller.clone(),Arc::clone(&packet_send_map.clone()),)?;
 
     initializer.initialize(gui_input_queue.clone())?;
     println!("Network initialized successfully");
@@ -111,7 +113,7 @@ fn run_gui_application(
     gui_input_queue: SharedGuiInput,
 ) -> Result<(), Box<dyn Error>> {
     let options = eframe::NativeOptions::default();
-    
+
 
     eframe::run_native(
         "Drone Simulation",
@@ -140,7 +142,7 @@ fn initialize_network_channels(
         Sender<DroneCommand>,
         Receiver<DroneCommand>,
         Receiver<Packet>,
-        HashMap<NodeId, Sender<Packet>>,
+        Arc<HashMap<NodeId, Sender<Packet>>>,
         ParsedConfig,
     ),
     Box<dyn Error>,
@@ -151,11 +153,13 @@ fn initialize_network_channels(
     let (command_sender, command_receiver) = unbounded::<DroneCommand>();
     let (packet_send, packet_recv) = unbounded::<Packet>();
 
-    let packet_send_map: HashMap<NodeId, Sender<Packet>> = config
-        .drone
-        .iter()
-        .map(|drone| (drone.id, packet_send.clone()))
-        .collect();
+    let mut packet_send_map = HashMap::new();
+    for node in config.drone.iter().map(|d| d.id)
+        .chain(config.client.iter().map(|c| c.id))
+        .chain(config.server.iter().map(|s| s.id))
+    {
+        packet_send_map.insert(node, packet_send.clone());
+    }
 
     Ok((
         event_sender,
@@ -163,7 +167,7 @@ fn initialize_network_channels(
         command_sender,
         command_receiver,
         packet_recv,
-        packet_send_map,
+        Arc::new(packet_send_map),
         config,
     ))
 }

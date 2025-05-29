@@ -14,7 +14,7 @@ use wg_2024::drone::Drone;
 use wg_2024::network::NodeId;
 use wg_2024::packet::Packet;
 use crate::simulation_controller::chatUI::{ChatMessage, ChatUIState, ClientStatus};
-use crate::simulation_controller::gui_input_queue::{push_gui_message, SharedGuiInput};
+use crate::simulation_controller::gui_input_queue::{push_gui_message, SharedGuiInput,broadcast_topology_change};
 
 enum AppState {
     Welcome,
@@ -409,13 +409,15 @@ impl NetworkApp {
                                             let mut lock = ctrl.lock().unwrap();
                                         if let Err(e) = lock.spawn_drone(self.new_drone_id, self.new_drone_pdr, connections.clone()) {
                                             self.simulation_log.push(format!("Failed to spawn drone: {}", e));
-                                return;
+
+                                            return;
                             }
                         }
 
                         // 3b) immediately update the UI renderer
                         if let Some(renderer) = self.network_renderer.as_mut() {
                             renderer.add_drone(self.new_drone_id, self.new_drone_pdr, connections.clone());
+
                         }
 
                                 self.new_drone_connections_str.clear();
@@ -563,7 +565,7 @@ impl NetworkApp {
 
         // Create Simulation Controller
         let (event_tx, event_rx) = unbounded::<DroneEvent>(); // GUI won't use this receiver directly
-        let controller = SimulationController::new(config.clone(),controller_send.clone(), event_rx, drone_factory);
+        let controller = SimulationController::new(config.clone(),controller_send.clone(), event_rx, drone_factory,gui_input.clone());
         let controller = Arc::new(Mutex::new(controller));
         app.simulation_controller = Some(controller.clone());
 
@@ -577,7 +579,7 @@ impl NetworkApp {
         app.controller_thread = Some(controller_thread);
 
         // Init GUI renderer
-        app.network_renderer = Some(NetworkRenderer::new_from_config("custom", 50.0, 50.0, config.clone(),&cc.egui_ctx));
+        app.network_renderer = Some(NetworkRenderer::new_from_config("custom", 50.0, 50.0, config.clone(),&cc.egui_ctx,gui_input.clone()));
         if let Some(renderer) = &mut app.network_renderer {
             renderer.set_controller_sender(controller_send);
             renderer.set_simulation_controller(controller.clone());
@@ -607,7 +609,6 @@ impl NetworkApp {
     pub fn get_packet_sender(&self, id: NodeId) -> Option<&Sender<Packet>> {
         self.packet_senders.get(&id)
     }
-
 
 }
 

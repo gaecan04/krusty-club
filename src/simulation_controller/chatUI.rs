@@ -350,7 +350,12 @@ impl ChatUIState {
                                             }
                                         }
                                     }
-
+                                    ui.separator();
+                                    if ui.button("Request Media List").clicked() {
+                                        if let Some(client_id) = self.selected_client {
+                                            push_gui_message(&self.gui_input, client_id, "[MediaListRequest]".to_string());
+                                        }
+                                    }
                                     ui.separator();
                                     ui.label("Download Media:");
                                     ui.horizontal(|ui| {
@@ -627,7 +632,10 @@ impl ChatUIState {
                                 self.chat_history.entry(key).or_default().push(msg.clone());
                             }
 
+
                             push_gui_message(&self.gui_input, from, format!("[MessageTo]::{to}::{}", msg.content));
+                            //solved : push_gui_message(&self.gui_input, self.selected_server.unwrap(), format!("[MsgTo]::{to}::{}", msg.content));
+
                             self.chat_input.clear();
                         }
                     }
