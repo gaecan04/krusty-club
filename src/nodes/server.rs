@@ -128,7 +128,7 @@ impl NetworkGraph {
             let source_type = self.node_types.get(&source).map(|t| format!("{:?}", t)).unwrap_or("Unknown".to_string());
             let target_type = self.node_types.get(&target).map(|t| format!("{:?}", t)).unwrap_or("Unknown".to_string());
 
-            //println!("{} ({}) <-> {} ({}) with {} drops", source, source_type, target, target_type, weight);
+            println!("{} ({}) <-> {} ({}) with {} drops", source, source_type, target, target_type, weight);
         }
     }
 }
@@ -211,7 +211,7 @@ impl server {
                         self.initiate_network_discovery();
                         info!("✅ Server {} initiated network discovery", self.id);
                     }
-                    self.network_graph.print_graph();
+                    //self.network_graph.print_graph();
                     if let Ok(mut buffer) = gui_buffer_input.lock() {
                         buffer.entry(self.id as NodeId).or_insert_with(Vec::new);
 

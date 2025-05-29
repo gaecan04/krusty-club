@@ -28,8 +28,9 @@ pub enum DroneEvent {
 pub struct SimulationController {
     network_config: Arc<Mutex<ParsedConfig>>,
     pub(crate) event_receiver: Receiver<DroneEvent>,
-    event_sender: Sender<DroneEvent>,
-    pub(crate) command_senders: HashMap<NodeId, Sender<DroneCommand>>, // Map of NodeId -> CommandSender
+    pub(crate) command_sender: Sender<DroneCommand>,
+    pub(crate) command_senders: HashMap<NodeId, Sender<DroneCommand>>,
+    pub(crate) event_sender: Sender<DroneEvent>,
     network_graph: HashMap<NodeId, HashSet<NodeId>>, // Adjacency list of the network
     packet_senders: HashMap<NodeId, Sender<Packet>>,
     drone_factory: Arc<dyn Fn(
@@ -55,19 +56,18 @@ impl SimulationController {
         network_config: Arc<Mutex<ParsedConfig>>,
         event_sender: Sender<DroneEvent>,
         event_receiver: Receiver<DroneEvent>,
-        drone_factory: Arc<dyn Fn(NodeId,Sender<DroneEvent>,Receiver<DroneCommand>,Receiver<Packet>,HashMap<NodeId, Sender<Packet>>,f32, ) -> Box<dyn Drone> + Send + Sync>,
+        command_sender: Sender<DroneCommand>,
+        drone_factory: Arc<dyn Fn(NodeId, Sender<DroneEvent>, Receiver<DroneCommand>, Receiver<Packet>, HashMap<NodeId, Sender<Packet>>, f32) -> Box<dyn Drone> + Send + Sync>,
         gui_input: SharedGuiInput,
-
     ) -> Self {
         println!("🔗 GUI_INPUT addr (SC_backend): {:p}", &*gui_input.lock().unwrap());
 
         let mut controller = SimulationController {
             network_config: network_config.clone(),
             config: network_config.clone(),
-
-            event_sender,
             event_receiver,
-            command_senders: HashMap::new(),
+            event_sender: event_sender.clone(),
+            command_sender: command_sender.clone(),            command_senders: HashMap::new(),
             network_graph: HashMap::new(),
             packet_senders: HashMap::new(),
             drone_factory,
@@ -515,7 +515,7 @@ impl SimulationController {
 
         // 7) Spawn the drone thread
         let factory = Arc::clone(&self.drone_factory);
-        let controller_send = self.event_sender.clone();
+        let controller_send = self.event_sender.clone(); // must be Sender<DroneEvent>
         std::thread::spawn(move || {
             let mut drone =
                 factory(id, controller_send, cmd_rx, pkt_rx, packet_send_map, pdr);
