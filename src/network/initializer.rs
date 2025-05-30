@@ -784,10 +784,9 @@ impl NetworkInitializer {
         for (id, sendmap) in &self.packet_senders {
             println!("Node {} can send to {:?}", id, sendmap.keys().collect::<Vec<_>>());
         }
-        for (id, _) in &self.packet_receivers {
+        for (id, _) in receivers.clone() {
             println!("Node {} has a receiver", id);
         }
-
 
         self.packet_receivers = receivers;
     }
@@ -1069,7 +1068,7 @@ impl NetworkInitializer {
             "group_4".to_string(),
             Box::new(|id, sim_contr_send, sim_contr_recv, packet_recv, packet_send, pdr|
                       -> Box<dyn DroneImplementation> {
-                Box::new(SkyLinkDrone::new(
+                Box::new(BagelBomber::new(
                     id,
                     sim_contr_send,
                     sim_contr_recv,
@@ -1084,7 +1083,7 @@ impl NetworkInitializer {
             "group_5".to_string(),
             Box::new(|id, sim_contr_send, sim_contr_recv, packet_recv, packet_send, pdr|
                       -> Box<dyn DroneImplementation> {
-                Box::new(SkyLinkDrone::new(
+                Box::new(DrOnesDrone::new(
                     id,
                     sim_contr_send,
                     sim_contr_recv,

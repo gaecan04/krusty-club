@@ -79,8 +79,14 @@ impl MyClient {
                     if !msgs.is_empty() {
                         let msg = msgs.remove(0);
                         drop(map); // Release lock early
-                        let message = self.process_gui_command(msg).unwrap();
-                        self.send_packet(message);
+                        match self.process_gui_command(msg) {
+                            Ok(message) => {
+                                self.send_packet(message);
+                            }
+                            Err(e) => {
+                                println!("⚠ Errore durante process_gui_command: {:?}", e);
+                            }
+                        }
                     }
                 }
             }
@@ -88,8 +94,8 @@ impl MyClient {
                 recv(self.packet_recv) -> packet => {
                     println!("Checking for received packet by client {}...",self.id);
                     if let Ok(packet) = packet {
-                        info!("Packet received by drone {} : {:?}",packet.routing_header.hops[packet.routing_header.hop_index], packet);
-                        println!("♥️♥️ Packet received by client {} : {:?}", self.id, packet);
+                        info!("Packet received by client {}: {:?}", self.id, packet);
+                        println!("♥♥ Packet received by client {} : {:?}", self.id, packet);
 
                         self.process_packet(packet);
                     } else {
@@ -197,12 +203,12 @@ impl MyClient {
             let packet = Packet{ // we encapsulate the fragment in the packet to be sent through the threads
                 routing_header: SourceRoutingHeader{
                     hop_index : 1, // the hop index is initialized to 1 to stay consistent with the logic of the drones
-                    hops : self.best_path(self.id , self.get_server_id().unwrap_or(0)).unwrap_or_default(),
+                    hops : vec![100, 1, 6, 10, 200],
                 },
                 session_id: SESSION_IDS.lock().unwrap().clone(),
                 pack_type: MsgFragment(fragment),
             };
-            println!("♥️♥️ BEST PATH IS : {:?}",packet.routing_header.hops);
+            println!("♥♥ BEST PATH IS : {:?}",packet.routing_header.hops);
 
             if let Some(next_hop) = packet.routing_header.hops.get(packet.routing_header.hop_index){ //we find the channel associated with the right drone using the RoutingHeader
                 if let Some(sender) = self.packet_send.get(&next_hop){
@@ -231,7 +237,7 @@ impl MyClient {
         println!("🦋🦋🦋Building Packet...");
         let packet = Packet {
             pack_type: PacketType::FloodRequest(flood_request),
-            session_id: 18446744073709551615,
+            session_id: SESSION_IDS.lock().unwrap().clone(),
             routing_header: SourceRoutingHeader {
                 hop_index: 0,
                 hops: vec![self.id],
@@ -246,6 +252,7 @@ impl MyClient {
         }
         println!("🦋🦋🦋FloodRequest sent!");
         info!("Starting the flood n. {}", FLOOD_IDS.lock().unwrap());
+        self.increment_ids(&SESSION_IDS);
     }
 
 
@@ -324,14 +331,16 @@ impl MyClient {
         let mut updated_header = header.clone();
         updated_header.append_hop(self.id);
         updated_header.increase_hop_index();
-        let mut updated_request = request.clone();
+        let mut updated_request = request.get_incremented(self.id , Client);
         if self.seen_flood_ids.contains(&(request.flood_id , request.initiator_id)) || self.packet_send.len() == 1{
-            updated_request.path_trace.push((self.id , Client) );
+            //updated_request.path_trace.push((self.id , Client) );
             //each time a FloodRequest arrives and its flood_id and initiator_id tuple matches one present in our seen_flood_ids we create a FloodResponse based on the request
-            let response_packet = request.generate_response(0);
+            let mut response_packet = updated_request.generate_response(SESSION_IDS.lock().unwrap().clone());
+            response_packet.routing_header.hop_index += 1;
             let response_sender = self.packet_send.get(&updated_request.path_trace[updated_request.path_trace.len()-2].0).unwrap();
             (*response_sender).send(response_packet).unwrap_or_default();
-            println!("Successfully sent response packet");
+            println!("Successfully sent response packet to {:?} from {:?}, RResponse: {:?}" , request.initiator_id , self.id , updated_request.path_trace);
+            self.increment_ids(&SESSION_IDS);
         }
         else {
             self.seen_flood_ids.insert((request.flood_id , request.initiator_id));
@@ -351,7 +360,7 @@ impl MyClient {
                         path_trace: updated_request.path_trace.clone(),
                     }),
                     routing_header: updated_header.clone(),
-                    session_id:0,
+                    session_id:SESSION_IDS.lock().unwrap().clone(),
                 };
                 if Some(*neighbor_id) != sender_id{
                     sender.send(packet.clone()).unwrap_or_default();
@@ -361,6 +370,7 @@ impl MyClient {
                 }
 
             }
+            self.increment_ids(&SESSION_IDS);
         }
     }
 
@@ -388,32 +398,35 @@ impl MyClient {
     }
 
     fn process_flood_response (&mut self, response: &FloodResponse) {
+        info!("Clienttt {:?} is processing response: {:?}", self.id, response.path_trace);
         let mut graph_copy = self.net_graph.clone();
         let mut map_copy = self.node_map.clone();
         for i in 0 .. response.path_trace.len()-1{
             let node1 = self.add_node_no_duplicate(&mut graph_copy, &mut map_copy, response.path_trace[i].clone().0 , response.path_trace[i].1);
             let node2 = self.add_node_no_duplicate(&mut graph_copy, &mut map_copy, response.path_trace[i+1].clone().0 , response.path_trace[i+1].1);
-
             self.add_edge_no_duplicate(&mut self.net_graph.clone(), node1, node2, 1);
         }
         for i in 0 .. response.path_trace.len(){
             if response.path_trace[i].1 == Server {
                 if !self.available_servers.contains(&(response.path_trace[i].0, true)) && !self.available_servers.contains(&(response.path_trace[i].0, false)) {
                     self.available_servers.insert((response.path_trace[i].0, false));
+                    info!("♥♥♥♥♥♥ Adding server {:?}" , response.path_trace[i]);
                 }
+                else{info!("🤢🤢🤢")}
             }
         }
 
-        info!("Updating known network topology.")
+        info!("Updating known network topology.");
+        warn!("Node map of client: {:?} ==>{:?}", self.id , self.node_map)
     }
-   /* fn add_edge_no_duplicate(&mut self, graph: &mut Graph<u8, u8, Undirected>, a: NodeIndex, b: NodeIndex, weight: u8) -> bool {
-        if !graph.contains_edge(a, b) {
-            graph.add_edge(a, b, weight);
-            true
-        } else {
-            false
-        }
-    }*/
+    /* fn add_edge_no_duplicate(&mut self, graph: &mut Graph<u8, u8, Undirected>, a: NodeIndex, b: NodeIndex, weight: u8) -> bool {
+         if !graph.contains_edge(a, b) {
+             graph.add_edge(a, b, weight);
+             true
+         } else {
+             false
+         }
+     }*/
 
     fn add_edge_no_duplicate(
         &mut self,
@@ -427,13 +440,15 @@ impl MyClient {
         if a.index() < node_bound && b.index() < node_bound {
             if !graph.contains_edge(a, b) {
                 graph.add_edge(a, b, weight);
+                self.net_graph = graph.clone();
+                info!("adding edge");
                 true
             } else {
                 false
             }
         } else {
             // Optionally: print a warning
-            eprintln!(
+            info!(
                 "Tried to add edge between invalid indices: a = {:?}, b = {:?}, graph.node_bound = {}",
                 a,
                 b,
@@ -447,11 +462,15 @@ impl MyClient {
     fn add_node_no_duplicate(&mut self, graph: &mut Graph<u8, u8, Undirected>, node_map: &mut HashMap<NodeId, (NodeIndex, NodeType)>, value: u8 , node_type: NodeType) -> NodeIndex {
         if let Some(&idx) = node_map.get(&value) {
             // Node with this value already exists
+            info!("Node with ID: {:?} , is already present for {:?}" , value , self.id);
             idx.0
         } else {
             // Create new node
+            info!("Adding node: {:?} to {:?}" , value , self.id);
             let idx = graph.add_node(value);
             node_map.insert(value, (idx , node_type));
+            self.node_map = node_map.clone();
+            self.net_graph = graph.clone();
             idx
         }
     }
@@ -543,6 +562,7 @@ impl MyClient {
         while let Some(indexes) = self.node_map.values().next(){
             if indexes.1 == Server {
                 server_value = *indexes;
+                info!("Server found");
             }
         }
         //Once I hve found the Server tuple I find the associated NodeId
@@ -613,86 +633,97 @@ impl MyClient {
     }
 
     fn process_gui_command(&mut self, command_string: String)->Result<String , Box<dyn std::error::Error>> {
-        println!("Client {} processing GUI command '{}'", self.id, command_string);
-
+        println!("Client {} processing GUI command '{}'", self.id, command_string.clone());
         let tokens: Vec<&str> = command_string.trim().split("::").collect();
-        match tokens.as_slice() {
-            ["[Login]", server_id_str] => { // when logging in to a server we change its connection status from false to true
-                let server_id: u64 = (*server_id_str).parse().expect("Failed to parse u64");
-                self.available_servers.remove(&(server_id as NodeId, false));
-                self.available_servers.insert((server_id as NodeId, true));
-                info!("Login to {}", server_id_str);
-                Ok(command_string)
-            },
-            ["[Logout]"] => {
-                if (*CHATTING_STATUS.lock().unwrap()).0 == true { //we make sure to not log out while in the middle of a chat
-                    Err(Box::new(io::Error::new(io::ErrorKind::Interrupted, "You are still in a chat with another user. End the chat before logging out")))
-                } else if let Some(to_disconnect) = self.available_servers.iter().find(|(_, connected)| *connected == true).cloned() {
-                    let mut new_status = self.available_servers.take(&to_disconnect).unwrap();
-                    new_status.1 = false; //since we are connected to a server we can actually log out and change the status of the server back to false
-                    self.available_servers.insert(new_status);
-                    info!("Logout from {:#?}", self.get_server_id());
-                    Ok(command_string)
-                } else { //if we are yet to log in to any server we can log out of it
-                    Err(Box::new(io::Error::new(io::ErrorKind::NotFound, "You have yet to login to any server")))
-                }
-            },
-            ["[ClientListRequest]"] => {
-                info!("Requesting the list of clients available for chat");
-                Ok(command_string)
-            },
-            ["[MessageTo]", client_id, message_str] => {
-                info!("Sending message: {} to client {}", message_str, client_id);
-                Ok(command_string)
-            },
-            ["[ChatRequest]", client_id] => {
-                if (*CHATTING_STATUS.lock().unwrap()).eq(&(false, 0)) { //when requesting a chat we need to make sure that we are not in the middle of chatting with someone else
-                    info!("Requesting to chat with client: {}", client_id);
-                    let peer_id: NodeId = (*client_id).parse().expect("Failed to parse u64");
-                    self.change_chat_status(peer_id);
-                    Ok(command_string)
-                } else {
-                    Err(Box::new(io::Error::new(io::ErrorKind::Interrupted, "You are already in a chat with another user.")))
-                }
-            },
-            ["[HistoryRequest]", personal_id, peer_id] => {
-                info!("Requesting chat history between client {} and client {}", personal_id, peer_id);
-                Ok(command_string)
-            },
-            ["[MediaUpload]", media_name, encoded_media] => {
-                info!("Uploading media with name: {} , encoded as: {}", media_name, encoded_media);
-                Ok(command_string)
-            },
-            ["[MediaDownloadRequest]", media_name] => {
-                info!("Requesting to download media: {}", media_name);
-                Ok(command_string)
-            },
-            ["[ChatFinish]"] => {
-                if (*CHATTING_STATUS.lock().unwrap()).0 == true {
-                    info!("Requesting to end current chat");
-                    self.change_chat_status(0);
-                    Ok(command_string)
-                } else {
-                    Err(Box::new(io::Error::new(io::ErrorKind::Interrupted, "You are not chatting with any user.")))
-                }
-            },
-            ["[MediaBroadcast]"] => {
-                info!("Broadcasting media to all connected clients");
-                Ok(command_string)
-            },
-            ["[MediaListRequest]"] => {
-                info!("Requesting media list to server: {}" , self.get_server_id().unwrap_or(0));
-                Ok(command_string)
-            },
-            ["[FloodRequired]",action] => {
-                Ok(command_string)
-            },
-            _ => {
-                info!("Unknown format");
-                Err(Box::new(io::Error::new(io::ErrorKind::NotFound, "Unknown format")))
-            },
+        println!("{:?}" , tokens);
+        if self.available_servers.is_empty(){
+            info!("SENDING {}" , command_string);
+            Ok(command_string)
         }
-    }
+        else{
+            match tokens.as_slice() {
+                ["[Login]", server_id_str] => { // when logging in to a server we change its connection status from false to true
+                    let server_id: u64 = match server_id_str.parse() {
+                        Ok(id) => id,
+                        Err(e) => {
+                            return Err(Box::new(e))
+                        },
+                    };
+                    self.available_servers.remove(&(server_id as NodeId, false));
+                    self.available_servers.insert((server_id as NodeId, true));
+                    info!("Sending login request to server: {}", self.get_server_id().unwrap_or(0));
+                    Ok(command_string)
+                },
+                ["[Logout]"] => {
+                    if (*CHATTING_STATUS.lock().unwrap()).0 == true { //we make sure to not log out while in the middle of a chat
+                        Err(Box::new(io::Error::new(io::ErrorKind::Interrupted, "You are still in a chat with another user. End the chat before logging out")))
+                    } else if let Some(to_disconnect) = self.available_servers.iter().find(|(_, connected)| *connected == true).cloned() {
+                        let mut new_status = self.available_servers.take(&to_disconnect).unwrap();
+                        new_status.1 = false; //since we are connected to a server we can actually log out and change the status of the server back to false
+                        self.available_servers.insert(new_status);
+                        info!("Logout from {:#?}", self.get_server_id());
+                        Ok(command_string)
+                    } else { //if we are yet to log in to any server we can log out of it
+                        Err(Box::new(io::Error::new(io::ErrorKind::NotFound, "You have yet to login to any server")))
+                    }
+                },
+                ["[ClientListRequest]"] => {
+                    info!("Requesting the list of clients available for chat");
+                    Ok(command_string)
+                },
+                ["[MessageTo]", client_id, message_str] => {
+                    info!("Sending message: {} to client {}", message_str, client_id);
+                    Ok(command_string)
+                },
+                ["[ChatRequest]", client_id] => {
+                    if (*CHATTING_STATUS.lock().unwrap()).eq(&(false, 0)) { //when requesting a chat we need to make sure that we are not in the middle of chatting with someone else
+                        info!("Requesting to chat with client: {}", client_id);
+                        let peer_id: NodeId = (*client_id).parse().expect("Failed to parse u64");
+                        self.change_chat_status(peer_id);
+                        Ok(command_string)
+                    } else {
+                        Err(Box::new(io::Error::new(io::ErrorKind::Interrupted, "You are already in a chat with another user.")))
+                    }
+                },
+                ["[HistoryRequest]", personal_id, peer_id] => {
+                    info!("Requesting chat history between client {} and client {}", personal_id, peer_id);
+                    Ok(command_string)
+                },
+                ["[MediaUpload]", media_name, encoded_media] => {
+                    info!("Uploading media with name: {} , encoded as: {}", media_name, encoded_media);
+                    Ok(command_string)
+                },
+                ["[MediaDownloadRequest]", media_name] => {
+                    info!("Requesting to download media: {}", media_name);
+                    Ok(command_string)
+                },
+                ["[ChatFinish]"] => {
+                    if (*CHATTING_STATUS.lock().unwrap()).0 == true {
+                        info!("Requesting to end current chat");
+                        self.change_chat_status(0);
+                        Ok(command_string)
+                    } else {
+                        Err(Box::new(io::Error::new(io::ErrorKind::Interrupted, "You are not chatting with any user.")))
+                    }
+                },
+                ["[MediaBroadcast]"] => {
+                    info!("Broadcasting media to all connected clients");
+                    Ok(command_string)
+                },
+                ["[MediaListRequest]"] => {
+                    info!("Requesting media list to server: {}" , self.get_server_id().unwrap_or(0));
+                    Ok(command_string)
+                },
+                ["[FloodRequired]",action] => {
+                    info!("Starting a flood for {}", action);
+                    Ok(command_string)
+                },
+                _ => {
+                    println!("Unknown format");
+                    Err(Box::new(io::Error::new(io::ErrorKind::NotFound, "Unknown format")))
+                },
+            }
+        }}
 }
 
 
@@ -1072,7 +1103,7 @@ impl MyClient{
             let node1 = Self::add_node_no_duplicate(&mut graph, &mut node_map, response.path_trace[i].clone());
             let node2 = Self::add_node_no_duplicate(&mut graph, &mut node_map, response.path_trace[i+1].clone());
             Self::add_edge_no_duplicate(graph , node1 , node2 , 1.0);
-        }
-    }
+        }
+    }
 }
- */
+ */

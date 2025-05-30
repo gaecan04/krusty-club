@@ -114,7 +114,7 @@ impl MyClient {
                 recv(self.packet_recv) -> packet => {
                     println!("Checking for received packet by client {} ...", self.id);
                     if let Ok(packet) = packet {
-                        println!("♥️ Packet received by client {} : {:?}", self.id, packet);
+                        println!("Packet received by client {} : {:?}", self.id, packet);
                         self.process_packet(packet, &mut seen_flood_ids);
                     }
                 },
@@ -641,7 +641,8 @@ impl MyClient {
                 if let Ok(parsed_server_id) = server_id.parse::<NodeId>() {
                     println!("Client {} processing Login command for server {}", self.id, parsed_server_id);
                     self.connected_server_id = Some(parsed_server_id);
-                    None
+                    // For real message: return Some("[Login]".to_string())
+                    Some(format!("[Login]::{}",parsed_server_id))
                 } else {
                     eprintln!("Client {} received Login command with invalid server {}", self.id, server_id);
                     None
@@ -844,8 +845,8 @@ impl MyClient {
 
     fn best_path(&self, from: NodeId, to: NodeId) -> Option<Vec<NodeId>> {
         if self.id == 101 && to == 200 {
-            println!("yess 101 -> 201");
-            return Some(vec![101, 6,2, 5, 201]);
+            println!("yess 101 -> 200");
+            return Some(vec![101, 6,10, 200]);
         }
 
         println!("Client {} calculating path from {} to {}", self.id, from, to);
