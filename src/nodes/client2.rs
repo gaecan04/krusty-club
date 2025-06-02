@@ -189,11 +189,13 @@ impl MyClient {
 
     fn send_packet(&self, input : String){
         let bytes = input.trim_end();
+        println!(" 🩵 🩵 🩵 🩵msg sent by gaetano {}",bytes.clone());
+
         let chunks: Vec<Vec<u8>> = bytes.as_bytes().chunks(128).map(|chunk| chunk.to_vec()).collect();//we break down the message in smaller chunks
         for i in 0..chunks.len() {
             let mut data:[u8;128] = [0;128];
             for j in 0..chunks[i].len(){
-                data[i] = chunks[i][j];
+                data[j] = chunks[i][j];
             };
             let fragment:Fragment = Fragment { // we create the fragments based on the chunks
                 fragment_index: i as u64,
@@ -649,6 +651,8 @@ impl MyClient {
     fn process_gui_command(&mut self, command_string: String)->Result<String , Box<dyn std::error::Error>> {
         println!("Client {} processing GUI command '{}'", self.id, command_string.clone());
         let tokens: Vec<&str> = command_string.trim().split("::").collect();
+
+        println!(" 🩵 🩵 🩵 🩵 🩵CLIENT len of tokens {} and tokens are {:?}",tokens.len(), tokens);
 
         match tokens.as_slice() {
             ["[Login]", server_id_str] => { // when logging in to a server we change its connection status from false to true
