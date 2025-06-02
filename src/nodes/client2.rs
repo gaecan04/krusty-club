@@ -34,7 +34,7 @@ use crate::simulation_controller::gui_input_queue::{push_gui_message, new_gui_in
 //the two global variable are kept to ensure consistency throughout the various chats
 static FLOOD_IDS: Lazy<Mutex<u64>> = Lazy::new(|| Mutex::new(0));
 static SESSION_IDS: Lazy<Mutex<u64>> = Lazy::new(|| Mutex::new(0));
-static CHATTING_STATUS: Lazy<Mutex<(bool , NodeId)>> = Lazy::new(|| Mutex::new((false , 0)));
+static CHATTING_STATUS: Lazy<Mutex<(bool , NodeId , NodeId)>> = Lazy::new(|| Mutex::new((false , 0 , 0)));
 
 #[derive(Debug,Clone)]
 pub struct MyClient{
@@ -81,10 +81,12 @@ impl MyClient {
                         drop(map); // Release lock early
                         match self.process_gui_command(msg) {
                             Ok(message) => {
-                                self.send_packet(message);
+                                if message != "NOPE".to_string(){
+                                    self.send_packet(message);
+                                }
                             }
                             Err(e) => {
-                                println!("⚠ Errore durante process_gui_command: {:?}", e);
+                                println!("⚠️ Errore durante process_gui_command: {:?}", e);
                             }
                         }
                     }
@@ -95,7 +97,7 @@ impl MyClient {
                     println!("Checking for received packet by client {}...",self.id);
                     if let Ok(packet) = packet {
                         info!("Packet received by client {}: {:?}", self.id, packet);
-                        println!("♥♥ Packet received by client {} : {:?}", self.id, packet);
+                        println!("♥️♥️ Packet received by client {} : {:?}", self.id, packet);
 
                         self.process_packet(packet);
                     } else {
@@ -142,7 +144,7 @@ impl MyClient {
                             let sender_id = &packet.routing_header.hops[packet.routing_header.hops.len()-2];
                             let sender = self.packet_send.get(sender_id).unwrap();
                             let mut new_packet = packet.clone();
-                            new_packet.routing_header.hops = self.best_path(self.id , self.get_server_id().unwrap_or(0)).unwrap(); // since the packet has already been dropped on the previous route we try to find out if there is a better route
+                            new_packet.routing_header.hops = self.best_path(self.id , (*CHATTING_STATUS.lock().unwrap()).1).unwrap_or_default(); // since the packet has already been dropped on the previous route we try to find out if there is a better route
                             (*sender).send(packet.clone()).unwrap_or_default();
                         }
                     }
@@ -203,12 +205,12 @@ impl MyClient {
             let packet = Packet{ // we encapsulate the fragment in the packet to be sent through the threads
                 routing_header: SourceRoutingHeader{
                     hop_index : 1, // the hop index is initialized to 1 to stay consistent with the logic of the drones
-                    hops : vec![100, 1, 6, 10, 200],
+                    hops : self.best_path(self.id , (*CHATTING_STATUS.lock().unwrap()).2).unwrap_or_default(),
                 },
                 session_id: SESSION_IDS.lock().unwrap().clone(),
                 pack_type: MsgFragment(fragment),
             };
-            println!("♥♥ BEST PATH IS : {:?}",packet.routing_header.hops);
+            println!("♥️♥️ BEST PATH IS : {:?}",packet.routing_header.hops);
 
             if let Some(next_hop) = packet.routing_header.hops.get(packet.routing_header.hop_index){ //we find the channel associated with the right drone using the RoutingHeader
                 if let Some(sender) = self.packet_send.get(&next_hop){
@@ -296,7 +298,7 @@ impl MyClient {
                     info!("Chat started successfully");
                 }
                 else {
-                    self.change_chat_status(0);
+                    self.change_chat_status(false,0 , CHATTING_STATUS.lock().unwrap().2);
                     info!("Chat start failed");
                 }
             }
@@ -338,6 +340,7 @@ impl MyClient {
             let mut response_packet = updated_request.generate_response(SESSION_IDS.lock().unwrap().clone());
             response_packet.routing_header.hop_index += 1;
             let response_sender = self.packet_send.get(&updated_request.path_trace[updated_request.path_trace.len()-2].0).unwrap();
+            info!("SFR to {:?} from {:?} with trace ==>{:?} /// going through ==>{:?}" , updated_request.initiator_id , self.id, updated_request.path_trace, response_packet.clone().routing_header.hops);
             (*response_sender).send(response_packet).unwrap_or_default();
             println!("Successfully sent response packet to {:?} from {:?}, RResponse: {:?}" , request.initiator_id , self.id , updated_request.path_trace);
             self.increment_ids(&SESSION_IDS);
@@ -406,18 +409,18 @@ impl MyClient {
             let node2 = self.add_node_no_duplicate(&mut graph_copy, &mut map_copy, response.path_trace[i+1].clone().0 , response.path_trace[i+1].1);
             self.add_edge_no_duplicate(&mut self.net_graph.clone(), node1, node2, 1);
         }
-        for i in 0 .. response.path_trace.len(){
+        /*for i in 0 .. response.path_trace.len(){
             if response.path_trace[i].1 == Server {
                 if !self.available_servers.contains(&(response.path_trace[i].0, true)) && !self.available_servers.contains(&(response.path_trace[i].0, false)) {
                     self.available_servers.insert((response.path_trace[i].0, false));
-                    info!("♥♥♥♥♥♥ Adding server {:?}" , response.path_trace[i]);
+                    info!("♥️♥️♥️♥️♥️♥️ Adding server {:?}" , response.path_trace[i]);
                 }
-                else{info!("🤢🤢🤢")}
+                else{info!("Server is already present")}
             }
-        }
+        }*/
 
         info!("Updating known network topology.");
-        warn!("Node map of client: {:?} ==>{:?}", self.id , self.node_map)
+
     }
     /* fn add_edge_no_duplicate(&mut self, graph: &mut Graph<u8, u8, Undirected>, a: NodeIndex, b: NodeIndex, weight: u8) -> bool {
          if !graph.contains_edge(a, b) {
@@ -517,9 +520,9 @@ impl MyClient {
     }
 
     fn best_path(&self, source: NodeId, target: NodeId) -> Option<Vec<NodeId>> {
-        if self.id == 100 && target == 200 {
-            println!("yess 100 -> 200");
-            return Some(vec![100, 1, 6, 10, 200]);
+        if target == 0 {
+            info!("Best path is empty due to incorrect unwrap");
+            return None;
         }
         let source_idx = *self.node_map.get(&source)?;
         let target_idx = *self.node_map.get(&target)?;
@@ -556,7 +559,15 @@ impl MyClient {
         path.reverse();
         Some(path)
     }
-    fn get_server_id(&self) -> Option<NodeId> {
+    /*fn get_server_id(&self) -> Option<NodeId> {
+        let servers: Option<NodeId> = self.available_servers.iter()
+            .find(|(_, b)| *b)
+            .map(|(id, _)| *id);
+        info!("{:?}", servers);
+        servers
+
+
+
         let mut server_value= (NodeIndex::new(0) , Server);
         //I look for the tuple of the server based on the knowledge that it is of NodeType::Server
         while let Some(indexes) = self.node_map.values().next(){
@@ -580,16 +591,19 @@ impl MyClient {
             },
         }
     }
+         */
+
 
     fn increment_ids( &self , counter: &Lazy<Mutex<u64>>) {
         let mut val = counter.lock().unwrap();
         *val += 1;
     }
 
-    fn change_chat_status(&self, peer_id : NodeId){
+    fn change_chat_status(&self,chatting: bool, peer_id : NodeId, server_id : NodeId) {
         let mut status = CHATTING_STATUS.lock().unwrap();
-        (*status).0 = !(*status).0;
+        (*status).0 = chatting;
         (*status).1 = peer_id;
+        (*status).2 = server_id;
     }
 
     fn display_image(base64_data: &str, media_name: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -635,95 +649,94 @@ impl MyClient {
     fn process_gui_command(&mut self, command_string: String)->Result<String , Box<dyn std::error::Error>> {
         println!("Client {} processing GUI command '{}'", self.id, command_string.clone());
         let tokens: Vec<&str> = command_string.trim().split("::").collect();
-        println!("{:?}" , tokens);
-        if self.available_servers.is_empty(){
-            info!("SENDING {}" , command_string);
-            Ok(command_string)
-        }
-        else{
-            match tokens.as_slice() {
-                ["[Login]", server_id_str] => { // when logging in to a server we change its connection status from false to true
-                    let server_id: u64 = match server_id_str.parse() {
+
+        match tokens.as_slice() {
+            ["[Login]", server_id_str] => { // when logging in to a server we change its connection status from false to true
+                let server_id: NodeId = match server_id_str.parse() {
+                    Ok(id) => id,
+                    Err(e) => {
+                        return Err(Box::new(e))
+                    },
+                };
+
+                self.change_chat_status(false, 0 , server_id);
+                info!("Sending login request to server: {}", (*CHATTING_STATUS.lock().unwrap()).2);
+                Ok(command_string)
+            },
+            ["[Logout]"] => {
+                if (*CHATTING_STATUS.lock().unwrap()).0 == true { //we make sure to not log out while in the middle of a chat
+                    Err(Box::new(io::Error::new(io::ErrorKind::Interrupted, "You are still in a chat with another user. End the chat before logging out")))
+                } else if (*CHATTING_STATUS.lock().unwrap()).2 != 0 {
+                    self.change_chat_status(false, 0 , 0);
+                    Ok(command_string)
+                } else { //if we are yet to log in to any server we can log out of it
+                    Err(Box::new(io::Error::new(io::ErrorKind::NotFound, "You have yet to login to any server")))
+                }
+            },
+            ["[ClientListRequest]"] => {
+                info!("Requesting the list of clients available for chat");
+                Ok(command_string)
+            },
+            ["[MessageTo]", client_id, message_str] => {
+                info!("Sending message: {} to client {}", message_str, client_id);
+                Ok(command_string)
+            },
+            ["[ChatRequest]", client_id] => {
+                let chat_tuple = ((*CHATTING_STATUS.lock().unwrap()).0 , (*CHATTING_STATUS.lock().unwrap()).1);
+                if chat_tuple.eq(&(false, 0 )) { //when requesting a chat we need to make sure that we are not in the middle of chatting with someone else
+                    info!("Requesting to chat with client: {}", client_id);
+                    let peer_id: NodeId = match client_id.parse() {
                         Ok(id) => id,
                         Err(e) => {
                             return Err(Box::new(e))
                         },
                     };
-                    self.available_servers.remove(&(server_id as NodeId, false));
-                    self.available_servers.insert((server_id as NodeId, true));
-                    info!("Sending login request to server: {}", self.get_server_id().unwrap_or(0));
+                    self.change_chat_status(true , peer_id , (*CHATTING_STATUS.lock().unwrap()).2);
                     Ok(command_string)
-                },
-                ["[Logout]"] => {
-                    if (*CHATTING_STATUS.lock().unwrap()).0 == true { //we make sure to not log out while in the middle of a chat
-                        Err(Box::new(io::Error::new(io::ErrorKind::Interrupted, "You are still in a chat with another user. End the chat before logging out")))
-                    } else if let Some(to_disconnect) = self.available_servers.iter().find(|(_, connected)| *connected == true).cloned() {
-                        let mut new_status = self.available_servers.take(&to_disconnect).unwrap();
-                        new_status.1 = false; //since we are connected to a server we can actually log out and change the status of the server back to false
-                        self.available_servers.insert(new_status);
-                        info!("Logout from {:#?}", self.get_server_id());
-                        Ok(command_string)
-                    } else { //if we are yet to log in to any server we can log out of it
-                        Err(Box::new(io::Error::new(io::ErrorKind::NotFound, "You have yet to login to any server")))
-                    }
-                },
-                ["[ClientListRequest]"] => {
-                    info!("Requesting the list of clients available for chat");
+                } else {
+                    Err(Box::new(io::Error::new(io::ErrorKind::Interrupted, "You are already in a chat with another user.")))
+                }
+            },
+            ["[HistoryRequest]", personal_id, peer_id] => {
+                info!("Requesting chat history between client {} and client {}", personal_id, peer_id);
+                Ok(command_string)
+            },
+            ["[MediaUpload]", media_name, encoded_media] => {
+                info!("Uploading media with name: {} , encoded as: {}", media_name, encoded_media);
+                Ok(command_string)
+            },
+            ["[MediaDownloadRequest]", media_name] => {
+                info!("Requesting to download media: {}", media_name);
+                Ok(command_string)
+            },
+            ["[ChatFinish]"] => {
+                if (*CHATTING_STATUS.lock().unwrap()).0 == true {
+                    info!("Requesting to end current chat");
+                    self.change_chat_status(false , 0 , CHATTING_STATUS.lock().unwrap().2);
                     Ok(command_string)
-                },
-                ["[MessageTo]", client_id, message_str] => {
-                    info!("Sending message: {} to client {}", message_str, client_id);
-                    Ok(command_string)
-                },
-                ["[ChatRequest]", client_id] => {
-                    if (*CHATTING_STATUS.lock().unwrap()).eq(&(false, 0)) { //when requesting a chat we need to make sure that we are not in the middle of chatting with someone else
-                        info!("Requesting to chat with client: {}", client_id);
-                        let peer_id: NodeId = (*client_id).parse().expect("Failed to parse u64");
-                        self.change_chat_status(peer_id);
-                        Ok(command_string)
-                    } else {
-                        Err(Box::new(io::Error::new(io::ErrorKind::Interrupted, "You are already in a chat with another user.")))
-                    }
-                },
-                ["[HistoryRequest]", personal_id, peer_id] => {
-                    info!("Requesting chat history between client {} and client {}", personal_id, peer_id);
-                    Ok(command_string)
-                },
-                ["[MediaUpload]", media_name, encoded_media] => {
-                    info!("Uploading media with name: {} , encoded as: {}", media_name, encoded_media);
-                    Ok(command_string)
-                },
-                ["[MediaDownloadRequest]", media_name] => {
-                    info!("Requesting to download media: {}", media_name);
-                    Ok(command_string)
-                },
-                ["[ChatFinish]"] => {
-                    if (*CHATTING_STATUS.lock().unwrap()).0 == true {
-                        info!("Requesting to end current chat");
-                        self.change_chat_status(0);
-                        Ok(command_string)
-                    } else {
-                        Err(Box::new(io::Error::new(io::ErrorKind::Interrupted, "You are not chatting with any user.")))
-                    }
-                },
-                ["[MediaBroadcast]"] => {
-                    info!("Broadcasting media to all connected clients");
-                    Ok(command_string)
-                },
-                ["[MediaListRequest]"] => {
-                    info!("Requesting media list to server: {}" , self.get_server_id().unwrap_or(0));
-                    Ok(command_string)
-                },
-                ["[FloodRequired]",action] => {
-                    info!("Starting a flood for {}", action);
-                    Ok(command_string)
-                },
-                _ => {
-                    println!("Unknown format");
-                    Err(Box::new(io::Error::new(io::ErrorKind::NotFound, "Unknown format")))
-                },
-            }
-        }}
+                } else {
+                    Err(Box::new(io::Error::new(io::ErrorKind::Interrupted, "You are not chatting with any user.")))
+                }
+            },
+            ["[MediaBroadcast]"] => {
+                info!("Broadcasting media to all connected clients");
+                Ok(command_string)
+            },
+            ["[MediaListRequest]"] => {
+                info!("Requesting media list to server: {}" , (*CHATTING_STATUS.lock().unwrap()).2);
+                Ok(command_string)
+            },
+            ["[FloodRequired]",action] => {
+                info!("Starting a flood for {}", action);
+                self.send_flood_request();
+                Ok("NOPE".to_string())
+            },
+            _ => {
+                println!("Unknown format");
+                Err(Box::new(io::Error::new(io::ErrorKind::NotFound, "Unknown format")))
+            },
+        }
+    }
 }
 
 
@@ -1103,7 +1116,7 @@ impl MyClient{
             let node1 = Self::add_node_no_duplicate(&mut graph, &mut node_map, response.path_trace[i].clone());
             let node2 = Self::add_node_no_duplicate(&mut graph, &mut node_map, response.path_trace[i+1].clone());
             Self::add_edge_no_duplicate(graph , node1 , node2 , 1.0);
-        }
-    }
+        }
+    }
 }
- */
+ */
