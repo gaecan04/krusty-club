@@ -338,9 +338,13 @@ impl server {
         let message_string = String::from_utf8_lossy(&message).to_string();
         let session_id: u64 = key.0;
         let client_id = key.1;
+        println!(" 🩵 🩵 🩵 🩵msg revceived  by leo {}",message_string.clone());
+
 
         //create a format to handle the
         let tokens: Vec<&str> = message_string.trim().splitn(3, "::").collect();
+        println!(" 🩵 🩵 🩵 🩵SERVER len of tokens {} and tokens are {:?}",tokens.len(), tokens);
+
         info!("Handling complete message");
         match tokens.as_slice() {
 
