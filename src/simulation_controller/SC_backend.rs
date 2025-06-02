@@ -196,7 +196,7 @@ impl SimulationController {
             DroneEvent::PacketSent(packet) => {
                 // Log packet sent event
                 let hops = &packet.routing_header.hops;
-                match (hops.get(1), hops.last(), hops.get(0)) {
+                match (hops.get(0), hops.last(), hops.get(0)) {
                     (Some(hop1), Some(&last_hop), _) => {
                         println!("Packet sent from {} to {}", hop1, last_hop);
                     }
