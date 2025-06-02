@@ -17,6 +17,8 @@ use crate::network::initializer::{DroneImplementation, MyDrone, NetworkInitializ
 use crate::simulation_controller::gui_input_queue::{push_gui_message, new_gui_input_queue, SharedGuiInput};
 
 fn main() -> Result<(), Box<dyn Error>> {
+
+
     env_logger::init();
     // Config and duration
     let config_path = std::env::args()
@@ -28,12 +30,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(60);
 
-    // Initialize network and shared channels
-    let (event_sender, event_receiver, command_sender, command_receiver, packet_recv, packet_send_map, config) =
-        initialize_network_channels(&config_path)?;
+    let (event_sender, event_receiver) = unbounded::<DroneEvent>();
+    let (command_sender, command_receiver) = unbounded::<DroneCommand>();
+
     let gui_input_queue = new_gui_input_queue();
+
     println!("🔗 GUI_INPUT addr (main): {:p}", &*gui_input_queue.lock().unwrap());
 
+    let config = TOML_parser::parse_config(&config_path)?;
     let parsed_config = Arc::new(Mutex::new(config.clone()));
 
     // ✅ Create drone_factory closure => Required by updated SC constructor
@@ -54,40 +58,53 @@ fn main() -> Result<(), Box<dyn Error>> {
     let controller = Arc::new(Mutex::new(SimulationController::new(
         parsed_config.clone(),
         event_sender.clone(),
-        event_receiver,
-        drone_factory.clone(),
+        command_sender.clone(),
+        drone_factory.clone(),              // <- Correct type and position
         gui_input_queue.clone(),
     )));
+
+
+    let mut initializer = NetworkInitializer::new(
+        &config_path,
+        vec![], // temporary, you'll assign drone_impls after setup_channels()
+        controller.clone(),
+    )?;
+
+   initializer.setup_channels();
 
     // Create drone implementations using the NetworkInitializer
     let drone_impls = NetworkInitializer::create_drone_implementations(
         &config,
         event_sender.clone(),
         command_receiver.clone(),
-        packet_recv,
-        packet_send_map,
+        &initializer.packet_receivers,
+        &initializer.packet_senders,
     );
 
-    // Initialize the network
-    let mut initializer = NetworkInitializer::new(&config_path, drone_impls, controller.clone())?;
+
+
+    initializer.drone_impls = drone_impls;
 
     initializer.initialize(gui_input_queue.clone())?;
     println!("Network initialized successfully");
 
-    // Decide mode
-    if std::env::args().any(|arg| arg == "--headless") {
-        println!("Running in headless mode");
-        run_headless_simulation(simulation_duration, parsed_config.clone(), controller.clone());
-    } else {
-        println!("Starting GUI application");
-        SimulationController::start_background_thread(controller.clone());
-        run_gui_application(event_sender.clone(), command_receiver, parsed_config, drone_factory,&config_path,gui_input_queue.clone())?;
-    }
+    println!("Starting GUI application");
+    SimulationController::start_background_thread(controller.clone(),event_receiver.clone());
+    run_gui_application(
+        event_sender.clone(),
+        event_receiver.clone(),
+        command_sender.clone(),
+        command_receiver.clone(),
+        parsed_config,
+        drone_factory,
+        &config_path,
+        gui_input_queue.clone(),
+    )?;
 
     Ok(())
 }
 
-fn run_headless_simulation(
+/*fn run_headless_simulation(
     duration: u64,
     _config: Arc<Mutex<ParsedConfig>>,
     controller: Arc<Mutex<SimulationController>>,
@@ -102,10 +119,12 @@ fn run_headless_simulation(
 
     std::thread::sleep(std::time::Duration::from_secs(duration));
     println!("Simulation completed");
-}
+}*/
 
 fn run_gui_application(
     event_sender: Sender<DroneEvent>,
+    event_receiver: Receiver<DroneEvent>,
+    command_sender: Sender<DroneCommand>,
     command_receiver: Receiver<DroneCommand>,
     config: Arc<Mutex<ParsedConfig>>,
     drone_factory: Arc<dyn Fn(NodeId, Sender<DroneEvent>, Receiver<DroneCommand>, Receiver<Packet>, HashMap<NodeId, Sender<Packet>>, f32) -> Box<dyn Drone> + Send + Sync>,
@@ -113,7 +132,7 @@ fn run_gui_application(
     gui_input_queue: SharedGuiInput,
 ) -> Result<(), Box<dyn Error>> {
     let options = eframe::NativeOptions::default();
-    
+
 
     eframe::run_native(
         "Drone Simulation",
@@ -122,18 +141,21 @@ fn run_gui_application(
             Ok(Box::new(NetworkApp::new_with_network(
                 cc,
                 event_sender.clone(),
+                event_receiver.clone(),
+                command_sender.clone(),
+                command_receiver.clone(),
                 config.clone(),
                 drone_factory.clone(),
                 config_path,
                 gui_input_queue.clone(),
-            )))
+                )))
         }),
     )?;
     Ok(())
 
 }
 
-fn initialize_network_channels(
+/*fn initialize_network_channels(
     config_path: &str,
 ) -> Result<
     (
@@ -142,7 +164,7 @@ fn initialize_network_channels(
         Sender<DroneCommand>,
         Receiver<DroneCommand>,
         Receiver<Packet>,
-        HashMap<NodeId, Sender<Packet>>,
+        Arc<HashMap<NodeId, Sender<Packet>>>,
         ParsedConfig,
     ),
     Box<dyn Error>,
@@ -153,11 +175,13 @@ fn initialize_network_channels(
     let (command_sender, command_receiver) = unbounded::<DroneCommand>();
     let (packet_send, packet_recv) = unbounded::<Packet>();
 
-    let packet_send_map: HashMap<NodeId, Sender<Packet>> = config
-        .drone
-        .iter()
-        .map(|drone| (drone.id, packet_send.clone()))
-        .collect();
+    let mut packet_send_map = HashMap::new();
+    for node in config.drone.iter().map(|d| d.id)
+        .chain(config.client.iter().map(|c| c.id))
+        .chain(config.server.iter().map(|s| s.id))
+    {
+        packet_send_map.insert(node, packet_send.clone());
+    }
 
     Ok((
         event_sender,
@@ -165,11 +189,11 @@ fn initialize_network_channels(
         command_sender,
         command_receiver,
         packet_recv,
-        packet_send_map,
+        Arc::new(packet_send_map),
         config,
     ))
 }
-
+*/
 
 
 

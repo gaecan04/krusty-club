@@ -27,9 +27,10 @@ pub enum DroneEvent {
 
 pub struct SimulationController {
     network_config: Arc<Mutex<ParsedConfig>>,
-    pub(crate) event_receiver: Receiver<DroneEvent>,
-    event_sender: Sender<DroneEvent>,
-    pub(crate) command_senders: HashMap<NodeId, Sender<DroneCommand>>, // Map of NodeId -> CommandSender
+    //pub(crate) event_receiver: Receiver<DroneEvent>,
+    pub(crate) command_sender: Sender<DroneCommand>,
+    pub(crate) command_senders: HashMap<NodeId, Sender<DroneCommand>>,
+    pub(crate) event_sender: Sender<DroneEvent>,
     network_graph: HashMap<NodeId, HashSet<NodeId>>, // Adjacency list of the network
     packet_senders: HashMap<NodeId, Sender<Packet>>,
     drone_factory: Arc<dyn Fn(
@@ -54,20 +55,19 @@ impl SimulationController {
     pub fn new(
         network_config: Arc<Mutex<ParsedConfig>>,
         event_sender: Sender<DroneEvent>,
-        event_receiver: Receiver<DroneEvent>,
-        drone_factory: Arc<dyn Fn(NodeId,Sender<DroneEvent>,Receiver<DroneCommand>,Receiver<Packet>,HashMap<NodeId, Sender<Packet>>,f32, ) -> Box<dyn Drone> + Send + Sync>,
+        //event_receiver: Receiver<DroneEvent>,
+        command_sender: Sender<DroneCommand>,
+        drone_factory: Arc<dyn Fn(NodeId, Sender<DroneEvent>, Receiver<DroneCommand>, Receiver<Packet>, HashMap<NodeId, Sender<Packet>>, f32) -> Box<dyn Drone> + Send + Sync>,
         gui_input: SharedGuiInput,
-
     ) -> Self {
         println!("🔗 GUI_INPUT addr (SC_backend): {:p}", &*gui_input.lock().unwrap());
 
         let mut controller = SimulationController {
             network_config: network_config.clone(),
             config: network_config.clone(),
-
-            event_sender,
-            event_receiver,
-            command_senders: HashMap::new(),
+            //event_receiver,
+            event_sender: event_sender.clone(),
+            command_sender: command_sender.clone(),            command_senders: HashMap::new(),
             network_graph: HashMap::new(),
             packet_senders: HashMap::new(),
             drone_factory,
@@ -180,19 +180,14 @@ impl SimulationController {
         self.packet_senders.insert(node_id, sender);
     }
 
-    pub fn start_background_thread(controller: Arc<Mutex<Self>>) {
+    pub fn start_background_thread(controller: Arc<Mutex<Self>>, event_receiver: Receiver<DroneEvent>) {
+        let controller_clone = controller.clone(); // No need to double-Arc
         std::thread::spawn(move || {
-            let mut c = controller.lock().unwrap();
-            c.run(); // Calls the existing event-processing loop
+            while let Ok(event) = event_receiver.recv() {
+                let mut ctrl = controller_clone.lock().unwrap();
+                ctrl.process_event(event);
+            }
         });
-    }
-
-
-    // Main loop to process events
-    pub fn run(&mut self) {
-        while let Ok(event) = self.event_receiver.recv() {
-            self.process_event(event);
-        }
     }
 
     // Process a drone event
@@ -200,11 +195,36 @@ impl SimulationController {
         match event {
             DroneEvent::PacketSent(packet) => {
                 // Log packet sent event
-                println!("Packet sent from {} to {}", packet.session_id, packet.routing_header.hops[packet.routing_header.hops.len() - 1]);
+                let hops = &packet.routing_header.hops;
+                match (hops.get(1), hops.last(), hops.get(0)) {
+                    (Some(hop1), Some(&last_hop), _) => {
+                        println!("Packet sent from {} to {}", hop1, last_hop);
+                    }
+                    (None, Some(&last_hop), Some(hop0)) => {
+                        // Less than 2 elements, fallback to hop0
+                        println!("Packet sent from {} to {}", hop0, last_hop);
+                    }
+                    (None, None, Some(hop0)) => {
+                        println!("Packet sent from {} but routing header was empty", hop0);
+                    }
+                    _ => {
+                        println!("Packet sent but hops vector is empty");
+                    }
+                }
             },
             DroneEvent::PacketDropped(packet) => {
-                // Log packet dropped event
-                println!("Packet dropped from {} to {}", packet.session_id, packet.routing_header.hops[packet.routing_header.hops.len() - 1]);
+                let hops = &packet.routing_header.hops;
+                match (hops.get(0), hops.last()) {
+                    (Some(hop0), Some(&last_hop)) => {
+                        println!("Packet dropped from {} to {}", hop0, last_hop);
+                    }
+                    (Some(hop0), None) => {
+                        println!("Packet dropped from {} but routing header was empty", hop0);
+                    }
+                    _ => {
+                        println!("Packet dropped but hops vector is empty");
+                    }
+                }
             },
             DroneEvent::ControllerShortcut(packet) => {
                 // Handle direct routing for critical packets
@@ -507,7 +527,7 @@ impl SimulationController {
 
         // 7) Spawn the drone thread
         let factory = Arc::clone(&self.drone_factory);
-        let controller_send = self.event_sender.clone();
+        let controller_send = self.event_sender.clone(); // must be Sender<DroneEvent>
         std::thread::spawn(move || {
             let mut drone =
                 factory(id, controller_send, cmd_rx, pkt_rx, packet_send_map, pdr);

@@ -507,11 +507,17 @@ impl NetworkApp {
             // ✅ TEMPORARY BOOTSTRAP
             if self.chat_ui.client_status.is_empty() || self.chat_ui.servers.is_empty() {
                 if let Some(ctrl) = &self.simulation_controller {
+                    println!("🌱🌱🌱🌱🌱🌱BEFORE LOCK");
                     let ctrl = ctrl.lock().unwrap();
-                    for client_id in ctrl.get_all_client_ids() {
+                    let client_ids = ctrl.get_all_client_ids();
+                    let server_ids = ctrl.get_all_server_ids();
+                    println!("🟢🟢🟢🟢🟢after LOCK");
+                    drop(ctrl); // Explicitly release the lock
+
+                    for client_id in client_ids {
                         self.chat_ui.client_status.insert(client_id, ClientStatus::Offline);
                     }
-                    self.chat_ui.servers = ctrl.get_all_server_ids();
+                    self.chat_ui.servers = server_ids;
                 }
             }
 
@@ -546,52 +552,53 @@ impl NetworkApp {
 
     pub fn new_with_network(
         cc: &eframe::CreationContext<'_>,
-        controller_send: Sender<DroneEvent>,
+        event_sender: Sender<DroneEvent>,
+        event_receiver: Receiver<DroneEvent>,
+        command_sender: Sender<DroneCommand>,
+        command_receiver: Receiver<DroneCommand>,
         config: Arc<Mutex<ParsedConfig>>,
-        arc: Arc<dyn Fn(NodeId, Sender<DroneEvent>, Receiver<DroneCommand>, Receiver<Packet>, HashMap<NodeId, Sender<Packet>>, f32) -> Box<dyn Drone> + Send + Sync>,
+        drone_factory: Arc<dyn Fn(NodeId, Sender<DroneEvent>, Receiver<DroneCommand>, Receiver<Packet>, HashMap<NodeId, Sender<Packet>>, f32) -> Box<dyn wg_2024::drone::Drone> + Send + Sync>,
         config_path: &str,
         gui_input: SharedGuiInput,
     ) -> Self {
         let mut app = Self::new(cc);
 
-        app.controller_send = Some(controller_send.clone());
+        app.controller_send = Some(event_sender.clone());
 
-        // Create drone_factory closure
-        let drone_factory = Arc::new(
-            |id, controller_send, controller_recv, packet_recv, packet_send, pdr| {
-                Box::new(MyDrone::new(id, controller_send, controller_recv, packet_recv, packet_send, pdr)) as Box<dyn Drone>
-            }
+        let controller = SimulationController::new(
+            config.clone(),
+            event_sender.clone(),
+            command_sender.clone(),
+            drone_factory.clone(),
+            gui_input.clone(),
         );
 
-        // Create Simulation Controller
-        let (event_tx, event_rx) = unbounded::<DroneEvent>(); // GUI won't use this receiver directly
-        let controller = SimulationController::new(config.clone(),controller_send.clone(), event_rx, drone_factory,gui_input.clone());
         let controller = Arc::new(Mutex::new(controller));
         app.simulation_controller = Some(controller.clone());
 
-        // Start controller in background thread
         let controller_clone = controller.clone();
         let controller_thread = thread::spawn(move || {
-            let mut ctrl = controller_clone.lock().unwrap();
-            ctrl.run();
+            while let Ok(event) = event_receiver.recv() {
+                let mut ctrl = controller_clone.lock().unwrap();
+                ctrl.process_event(event);
+            }
         });
 
         app.controller_thread = Some(controller_thread);
 
-        // Init GUI renderer
-        app.network_renderer = Some(NetworkRenderer::new_from_config("custom", 50.0, 50.0, config.clone(),&cc.egui_ctx,gui_input.clone()));
+        app.network_renderer = Some(NetworkRenderer::new_from_config("custom", 50.0, 50.0, config.clone(), &cc.egui_ctx, gui_input.clone()));
+
         if let Some(renderer) = &mut app.network_renderer {
-            renderer.set_controller_sender(controller_send);
+            renderer.set_controller_sender(event_sender);
             renderer.set_simulation_controller(controller.clone());
             app.simulation_log.push("Controller connected to network renderer".to_string());
         }
 
-
         app.chat_ui = ChatUIState::new(gui_input.clone());
         app.network_config = Some(config.clone());
-        app.detect_and_log_topology(&config_path, config.clone());
+        app.detect_and_log_topology(config_path, config.clone());
         app.topology_selected = true;
-        app.state=AppState::Welcome;
+        app.state = AppState::Welcome;
         app
     }
 
