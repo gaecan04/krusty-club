@@ -151,7 +151,7 @@ pub struct server {
     seen_floods:HashSet<(u64, NodeId)>,
     registered_clients: Vec<NodeId>,
     network_graph: NetworkGraph,
-    sent_fragments: HashMap<(u64,u64), (Fragment, NodeId)>, //needed because in case of Nack::Dropped I need to resend the lost fragment
+    sent_fragments: HashMap<(u64,u64), (Fragment, NodeId)>,
     chat_history: HashMap<(NodeId,NodeId), VecDeque<String>>,
     media_storage: HashMap<String, (NodeId,String)>, // media name --> (uploader_id, associated base64 encoding as String)
 
@@ -256,6 +256,28 @@ impl server {
                                             self.send_chat_message(0, target_id, forward.clone());
                                         }
                                         info!("Broadcasted media '{}' from GUI for server {}", media_name, self.id);
+                                    }
+                                }
+
+                                ///IN TEORIA THIS IS WHAT SERVER SHOULD DO:
+                                if let Some(stripped) = message.strip_prefix("[FloodRequired]::") {
+                                    info!("Server {} received message from GUI: FloodRequired::{:?}", self.id, stripped);
+                                    match stripped {
+                                        "AddSender" => {
+                                            info!("--> FloodRequired: AddSender detected. Triggering rediscovery.");
+                                            self.initiate_network_discovery();
+                                        },
+                                        "SpawnDrone" => {
+                                            info!("--> FloodRequired: SpawnDrone detected. Triggering rediscovery.");
+                                            self.initiate_network_discovery();
+                                        },
+                                        "RemoveSender" => {
+                                            info!("--> FloodRequired: RemoveSender detected. Triggering rediscovery.");
+                                            self.initiate_network_discovery();
+                                        },
+                                        other => {
+                                            warn!("⚠️ Unknown FloodRequired action: {}", other);
+                                        }
                                     }
                                 }
                             }
@@ -510,10 +532,6 @@ impl server {
                 self.registered_clients.retain(|&id| id != client_id);
                 info!("Client {} logged out from session {}", client_id, session_id);
             },
-            ["[FloodRequired]",action] => {
-                //TODO: implement correct logic
-                // call initiate_network_discovery() --> every type SC sends command "crash" or "add drone" must to the flooding again.
-            },
             _ => {
                 warn!("Unrecognized message: {}", message_string);
                 info!("Reassembled message for session {:?}: {:?}", key, message);
@@ -595,6 +613,7 @@ impl server {
                     Some(NodeType:: Client) => {
                         warn!("Attempted to remove client node {} — action skipped.", crashed_node_id);
                     }
+                    //the crashed node is a Drone
                     Some(drone_type) => {
                         warn!("Detected crashed {:?} node {} due to ErrorInRouting.", drone_type, crashed_node_id);
                         // REMOVE the crashed node from the network graph
