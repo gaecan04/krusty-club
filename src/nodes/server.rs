@@ -151,6 +151,7 @@ pub struct server {
     seen_floods:HashSet<(u64, NodeId)>,
     registered_clients: Vec<NodeId>,
     network_graph: NetworkGraph,
+    sent_fragments: HashMap<(u64,u64), (Fragment, NodeId)>, //needed because in case of Nack::Dropped I need to resend the lost fragment
     chat_history: HashMap<(NodeId,NodeId), VecDeque<String>>,
     media_storage: HashMap<String, (NodeId,String)>, // media name --> (uploader_id, associated base64 encoding as String)
 
@@ -172,6 +173,7 @@ impl server {
             seen_floods: HashSet::new(),
             registered_clients: Vec::new(),
             network_graph: NetworkGraph::new(),
+            sent_fragments: Default::default(),
             chat_history:HashMap::new(),
             media_storage: HashMap::new(),
         }
@@ -245,11 +247,13 @@ impl server {
                                             );
                                         }
                                         info!("Registered clients to server: {:?}", self.registered_clients);
-                                        for &target_id in &self.registered_clients {
+                                        let clients= self.registered_clients.clone();
+
+                                        for target_id in clients {
                                             info!("Registered clients in {} are {:?}", self.id, self.registered_clients);
                                             let forward = format!("[MediaDownloadResponse]::{}::{}", media_name, base64_data);
                                             info!("Broadcasting {}", forward);
-                                            self.send_chat_message(0, target_id, forward);
+                                            self.send_chat_message(0, target_id, forward.clone());
                                         }
                                         info!("Broadcasted media '{}' from GUI for server {}", media_name, self.id);
                                     }
@@ -271,7 +275,8 @@ impl server {
                                     self.handle_fragment(packet.session_id, fragment, packet.routing_header);
                                 }
                                 PacketType::Nack(nack) => {
-                                    self.handle_nack(packet.session_id, nack, packet.routing_header);
+                                    self.handle_nack(packet.session_id, nack, &packet.clone(), packet.routing_header);
+                                    //RECUPERO SESSION ID E FRAGMENT INDEX;
                                 }
                                 PacketType::Ack(_) => { /* no-op */
                                     info!("Server {} received ACK packet", self.id);
@@ -351,8 +356,8 @@ impl server {
                         self.registered_clients.push(client_id);
                         info!("Client {} registered to this server", client_id);
 
-                        let loging_acknowledgement= format!("[LoginAck]::{}", session_id);
-                        self.send_chat_message(session_id, client_id,loging_acknowledgement);
+                        let login_acknowledgement= format!("[LoginAck]::{}", session_id);
+                        self.send_chat_message(session_id, client_id,login_acknowledgement);
                         info!("🚗🚗🚗🚗 LoginAck sent");
                     }
                 } else {
@@ -362,11 +367,11 @@ impl server {
             },
             ["[ClientListRequest]"] => {
                 info!(" --------------------------- Received ClientListRequest -----------------------------");
-                if let Some(sender) = self.packet_sender.get(&client_id) {
-                    let clients = self.registered_clients.clone();
-                    let response = format!("[ClientListResponse]::{:?}", clients);
-                    self.send_chat_message(session_id, client_id, response);
-                }
+                let clients = self.registered_clients.clone();
+                info!("server has the following connected clients: {:?}", clients);
+                let response = format!("[ClientListResponse]::{:?}", clients);
+                self.send_chat_message(session_id, client_id, response);
+
             },
             ["[ChatRequest]", target_id_str] => {
                 info!(" --------------------------- Received ChatRequest ----------------------------");
@@ -421,17 +426,13 @@ impl server {
                 }
             },
 
-            ["[MediaUpload]", image_info] => {
+            ["[MediaUpload]", media_name, base64_data] => { // da modificare
                 info!(" ------------------------ Received MediaUpload ---------------------------");
-                let parts: Vec<&str> = image_info.splitn(2, "::").collect();
-                if parts.len() == 2 {
-                    let media_name = parts[0].to_string();
-                    let base64_data = parts[1].to_string();
-                    // Save the image media in the hashmap
-                    self.media_storage.insert(media_name.clone(), (client_id, base64_data));
-                    let confirm = format!("[MediaUploadAck]::{}", media_name);
-                    self.send_chat_message(session_id, client_id, confirm);
-                }
+                // Save the image media in the hashmap
+                self.media_storage.insert(media_name.clone().parse().unwrap(), (client_id, base64_data.parse().unwrap()));
+                let confirm = format!("[MediaUploadAck]::{}", media_name);
+                self.send_chat_message(session_id, client_id, confirm);
+
             },
             //Providing Media list if asked by client --> so they can get to know before what to download
             ["[MediaListRequest]"] => {
@@ -445,7 +446,7 @@ impl server {
             },
             ["[MediaDownloadRequest]", media_name] => {
                 info!(" ------------------------ Received MediaDownload Request -----------------------");
-                let response = if let Some((owner,base64_data)) = self.media_storage.get(*media_name) {
+                let response = if let Some((_owner,base64_data)) = self.media_storage.get(*media_name) {
                     format!("[MediaDownloadResponse]::{}::{}", media_name, base64_data)
                 } else {
                     "[MediaDownloadResponse]::ERROR::NotFound".to_string()
@@ -457,7 +458,9 @@ impl server {
             ["[MediaBroadcast]", media_name, base64_data] => {
                 info!(" ------------------------ Received MediaBroadcast message by client: {} --------------------", client_id);
                 self.media_storage.insert(media_name.to_string(), (client_id, base64_data.to_string()));
-                for &target_id in &self.registered_clients {
+
+                let clients= self.registered_clients.clone();
+                for target_id in clients {
                     // Avoid sending to the sender
                     if target_id != client_id {
                         let msg = format!("[MediaDownloadResponse]::{}::{}", media_name, base64_data);
@@ -479,7 +482,18 @@ impl server {
                 if let Some(((id1, id2), history)) = entry {
                     let full_entry = ((*id1, *id2), history.clone());
                     if let Ok(serialized) = serde_json::to_string(&full_entry) {
-                        for (&node_id, _ ) in self.network_graph.node_types.iter() {
+                        let server_node_ids: Vec<NodeId> = self.network_graph
+                            .node_types
+                            .iter()
+                            .filter_map(|(&node_id, node_type)| {
+                                if node_id != self.id && *node_type == NodeType::Server {
+                                    Some(node_id)
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        for node_id in server_node_ids {
                             if self.network_graph.get_node_type(node_id) == Some(&NodeType::Server) && node_id != self.id {
                                 if let Some(route) = self.compute_best_path(self.id, node_id) {
                                     let routing_header = SourceRoutingHeader::with_first_hop(route);
@@ -509,21 +523,12 @@ impl server {
 
 
     //fn process_nack(&mut self, nack: &Nack, packet: &mut Packet)
-    fn handle_nack(&mut self, session_id: u64, nack: &Nack, routing_header: SourceRoutingHeader) {
+    fn handle_nack(&mut self, session_id: u64, nack: &Nack, packet: &Packet, routing_header: SourceRoutingHeader) {
 
         info!("Recieved NACK for fragment {} with type {:?} in session {}", nack.fragment_index, nack.nack_type, session_id);
 
         match nack.nack_type {
             NackType::Dropped => { // the only case i recieve nack Dropped is when i am forwarding the fragments to the second client
-                /*
-                    Una volta costruito il grafo ad ogni nack::Dropped che ricevo vado a modificare il peso di tutti i
-                    collegamenti relativi a quel drone. Gli altri nack implicano che c'è qualche problema del tipo crashed Drone.
-                    Come gestisco? Mando floodRequest, riceverò floodResponse che mi indicheranno il drone problematico, carpita
-                    questa informazione lo vado a rimuovere dal grafo.
-                 */
-                //quando ricevo un nack::ErrorInRouting ... faccio un flooding normale (creo una flood_request normale),
-                //poi riceverò flood_response e agisco sul grafo come al solito.
-
                 // grafo fatto con pet_graph.
                 warn!("Server {}: Received Nack::Dropped", self.id);
                 //ricevo nack::Dropped --> modifico il costo nel grafo
@@ -536,7 +541,45 @@ impl server {
                         info!("Increased drop cost between {} and {}", from, to);
                     }
                 }
-                warn!("Received Nack::Dropped, modifying the costs in the graph")
+                warn!("Received Nack::Dropped, modifying the costs in the graph");
+
+                ///TO DO: DEVO RIMANDARE IL PACCHETTO CHE VIENE PERSO
+                let session_id= packet.session_id.clone();
+                let fragment_index= nack.fragment_index;
+                if let Some(fragment) = self.sent_fragments.get(&(session_id, fragment_index)).cloned() {
+
+                    let target_id = fragment.1;
+
+                    // Recompute best path
+                    if let Some(hops) = self.network_graph.best_path(self.id, target_id) {
+                        let new_packet = Packet {
+                            session_id,
+                            routing_header: SourceRoutingHeader {
+                                hop_index: 1, // restart from the beginning
+                                hops: hops.clone(),
+                            },
+                            pack_type: PacketType::MsgFragment(fragment.0.clone()),
+                        };
+
+                        // Send to first hop in new path
+                        if let Some(&next_hop_id) = new_packet.routing_header.hops.get(1) {
+                            if let Some(sender) = self.packet_sender.get(&next_hop_id) {
+                                match sender.send(new_packet) {
+                                    Ok(()) => info!("⌚⌚⌚⌚⌚⌚ Retransmitted dropped fragment {} via new path {:?} in session {} ⌚⌚⌚⌚⌚⌚",fragment_index, hops, session_id),
+                                    Err(e) => error!("❌ Failed to retransmit dropped fragment: {:?}", e),
+                                }
+                            } else {
+                                error!("❌ No sender available for node {}", next_hop_id);
+                            }
+                        } else {
+                            error!("❌ Routing header missing next hop — cannot retransmit dropped fragment");
+                        }
+                    } else {
+                        error!("❌ No valid path to {} — cannot retransmit dropped fragment", target_id);
+                    }
+                } else {
+                    error!("❌ Fragment with session {} and index {} not found in sent_fragments — cannot retransmit", session_id, fragment_index);
+                }
             },
 
             NackType::ErrorInRouting(crashed_node_id) => {
@@ -729,7 +772,7 @@ impl server {
 
     }
 
-    fn send_chat_message(&self, session_id:u64, target_id: NodeId, msg: String) {
+    fn send_chat_message(&mut self, session_id:u64, target_id: NodeId, msg: String) {
         let data = msg.as_bytes();
         let mut fragment_data = [0u8; 128];
         let length = data.len().min(128);
@@ -758,8 +801,12 @@ impl server {
                 hop_index: 1,
                 hops,
             },
-            pack_type: PacketType::MsgFragment(fragment),
+            pack_type: PacketType::MsgFragment(fragment.clone()),
         };
+
+        //insert the sent packet in the hashmap sent_fragments --> in case of nack::Dropped i can retrieve the missing fragment.
+        self.sent_fragments.insert((session_id, fragment.fragment_index.clone()), (fragment.clone(), target_id));
+
         let next_hop = packet.routing_header.hops.get(1)
             .or_else(|| packet.routing_header.hops.get(0));  // fallback to first node if only one exists
         if let Some(&next_hop_id) = next_hop {
