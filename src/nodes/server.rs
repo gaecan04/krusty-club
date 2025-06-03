@@ -362,7 +362,6 @@ impl server {
                 } else {
                     error!("server_id in Login request is not the id of the server receiving the fragment!")
                 }
-
             },
             ["[ClientListRequest]"] => {
                 info!(" --------------------------- Received ClientListRequest -----------------------------");

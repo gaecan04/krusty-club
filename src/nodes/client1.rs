@@ -846,7 +846,7 @@ impl MyClient {
     fn best_path(&self, from: NodeId, to: NodeId) -> Option<Vec<NodeId>> {
         if self.id == 101 && to == 200 {
             println!("yess 101 -> 200");
-            return Some(vec![101, 6,10, 200]);
+            return Some(vec![101,6,10,200]);
         }
 
         println!("Client {} calculating path from {} to {}", self.id, from, to);

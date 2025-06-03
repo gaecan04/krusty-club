@@ -289,7 +289,7 @@ impl MyClient {
         let message_string = String::from_utf8_lossy(&message).to_string();
         let tokens: Vec<&str> = message_string.trim().splitn(3, "::").collect();
         match tokens.as_slice() {
-            ["LoginAck" , _session]=>{
+            ["[LoginAck]" , _session]=>{
                 info!("You successfully logged in!");
             }
             ["[MessageFrom]", client_id, msg]=>{
@@ -310,10 +310,10 @@ impl MyClient {
             ["[HistoryResponse]", response]=>{
                 info!("Most recent chat history with current client: {}" , response);
             }
-            ["MediaUploadAck", media_name]=>{
+            ["[MediaUploadAck]", media_name]=>{
                 info!("The media {} has been uploaded", media_name);
             }
-            ["MediaListResponse" , media_list]=>{
+            ["[MediaListResponse]" , media_list]=>{
                 info!("Here's a list of the media available for download: {}" , media_list);
             }
             ["[MediaDownloadResponse]","ERROR","NotFound"]=>{

@@ -194,40 +194,51 @@ impl SimulationController {
     pub(crate) fn process_event(&mut self, event: DroneEvent) {
         match event {
             DroneEvent::PacketSent(packet) => {
-                // Log packet sent event
                 let hops = &packet.routing_header.hops;
-                match (hops.get(0), hops.last(), hops.get(0)) {
-                    (Some(hop1), Some(&last_hop), _) => {
-                        println!("Packet sent from {} to {}", hop1, last_hop);
+                let hop_index = packet.routing_header.hop_index;
+
+                if hop_index > 0 && hop_index < hops.len() {
+                    let sender = hops[hop_index - 1];
+                    let receiver = hops[hop_index];
+                    println!("Packet sent from {} to {}", sender, receiver);
+                } else if hop_index == 0 && !hops.is_empty() {
+                    // This means the sender is the first hop, and the receiver is the next hop if present
+                    let sender = hops[0];
+                    let receiver = hops.get(1).copied();
+                    match receiver {
+                        Some(r) => println!("Packet sent from {} to {}", sender, r),
+                        None => println!("Packet sent from {} but no receiver (single-hop)", sender),
                     }
-                    (None, Some(&last_hop), Some(hop0)) => {
-                        // Less than 2 elements, fallback to hop0
-                        println!("Packet sent from {} to {}", hop0, last_hop);
-                    }
-                    (None, None, Some(hop0)) => {
-                        println!("Packet sent from {} but routing header was empty", hop0);
-                    }
-                    _ => {
-                        println!("Packet sent but hops vector is empty");
-                    }
+                } else {
+                    println!(
+                        "Packet sent but routing header or hop_index is invalid: hop_index={}, hops={:?}",
+                        hop_index, hops
+                    );
                 }
             },
             DroneEvent::PacketDropped(packet) => {
                 let hops = &packet.routing_header.hops;
-                match (hops.get(0), hops.last()) {
-                    (Some(hop0), Some(&last_hop)) => {
-                        println!("Packet dropped from {} to {}", hop0, last_hop);
+                let hop_index = packet.routing_header.hop_index;
+
+                if hop_index > 0 && hop_index < hops.len() {
+                    let sender = hops[hop_index - 1];
+                    let receiver = hops[hop_index];
+                    println!("Packet dropped from {} to {}", sender, receiver);
+                } else if hop_index == 0 && !hops.is_empty() {
+                    let sender = hops[0];
+                    let receiver = hops.get(1).copied();
+                    match receiver {
+                        Some(r) => println!("Packet dropped from {} to {}", sender, r),
+                        None => println!("Packet dropped from {} but no receiver (single-hop)", sender),
                     }
-                    (Some(hop0), None) => {
-                        println!("Packet dropped from {} but routing header was empty", hop0);
-                    }
-                    _ => {
-                        println!("Packet dropped but hops vector is empty");
-                    }
+                } else {
+                    println!(
+                        "Packet dropped but routing header or hop_index is invalid: hop_index={}, hops={:?}",
+                        hop_index, hops
+                    );
                 }
             },
             DroneEvent::ControllerShortcut(packet) => {
-                // Handle direct routing for critical packets
                 if let Some(dest_id) = packet.routing_header.destination() {
                     if let Some(sender) = self.packet_senders.get(&dest_id) {
                         if let Err(e) = sender.send(packet.clone()) {
@@ -535,7 +546,6 @@ impl SimulationController {
         });
        broadcast_topology_change(&self.gui_input, &self.config,&"[FloodRequired]::SpawnDrone".to_string());
 
-
         Ok(())
     }
 
@@ -554,7 +564,6 @@ impl SimulationController {
                 return Err(format!("Connection node {} does not exist", conn_id).into());
             }
         }
-
         // Check that the network will remain valid
         // (This is a simplified check - you might need more validation)
         Ok(true)

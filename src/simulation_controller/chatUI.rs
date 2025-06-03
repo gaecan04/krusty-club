@@ -51,6 +51,9 @@ pub struct ChatUIState {
     pub history_code_success: bool,
 
     pub media_files: Vec<(String, String)>, // (media_name, full_path)
+    pub broadcast_files: Vec<(String, String)>, // (media_name, full_path)
+
+
     pub show_server_popup: Option<NodeId>,
     pub show_upload_media_list: bool,
     pub download_media_name_input: String,
@@ -60,6 +63,7 @@ pub struct ChatUIState {
 
     broadcast_result_message: Option <String>,
     pub broadcast_result_time: Option<Instant>,
+    pub show_broadcast_media_list: bool,
 }
 
 impl ChatUIState {
@@ -88,6 +92,7 @@ impl ChatUIState {
             history_code_failed: false,
             history_code_success: false,
             media_files: load_media_files(),
+            broadcast_files:load_broadcast_files(),
             show_server_popup: None,
             show_upload_media_list: false,
             download_media_name_input: String::new(),
@@ -97,6 +102,7 @@ impl ChatUIState {
 
             broadcast_result_message: None,
             broadcast_result_time: None,
+            show_broadcast_media_list: false,
         }
     }
 
@@ -351,6 +357,31 @@ impl ChatUIState {
                                         }
                                     }
                                     ui.separator();
+                                    if ui.button("Broadcast Media").clicked(){
+                                        self.show_broadcast_media_list = !self.show_broadcast_media_list;
+                                    }
+                                    if self.show_broadcast_media_list {
+                                        ui.label("Available Media Files:");
+                                        for (media_name, path) in &self.broadcast_files {
+                                            if ui.button(media_name).clicked() {
+                                                if let Some(client_id) = self.selected_client {
+                                                    match std::fs::read(path) {
+                                                        Ok(bytes) => {
+                                                            let base64_data = base64::encode(bytes);
+                                                            let msg = format!("[MediaBroadcast]::{}::{}", media_name, base64_data);
+                                                            push_gui_message(&self.gui_input, client_id, msg);
+                                                        }
+                                                        Err(e) => {
+                                                            eprintln!("Error reading image file '{}': {}", path, e);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+
+                                    ui.separator();
                                     if ui.button("Request Media List").clicked() {
                                         if let Some(client_id) = self.selected_client {
                                             push_gui_message(&self.gui_input, client_id, "[MediaListRequest]".to_string());
@@ -463,7 +494,7 @@ impl ChatUIState {
 
                 if self.show_broadcast_list {
                     ui.label("Choose file:");
-                    for (media_name, path) in &self.media_files {
+                    for (media_name, path) in &self.broadcast_files {
                         if ui.button(media_name).clicked() {
                             match std::fs::read(path) {
                                 Ok(bytes) => {
@@ -706,7 +737,24 @@ impl ChatUIState {
 
 
 fn load_media_files() -> Vec<(String, String)> {
-    let media_dir = "assets"; // relative path
+    let media_dir = "media"; // relative path
+    let mut files = Vec::new();
+    if let Ok(entries) = fs::read_dir(media_dir) {
+        for entry in entries.flatten() {
+            let path: PathBuf = entry.path();
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                if ["jpg", "jpeg", "png"].contains(&ext.to_lowercase().as_str()) {
+                    if let Some(fname) = path.file_name().and_then(|f| f.to_str()) {
+                        files.push((fname.to_string(), path.to_string_lossy().to_string()));
+                    }
+                }
+            }
+        }
+    }
+    files
+}
+fn load_broadcast_files() -> Vec<(String, String)> {
+    let media_dir = "broadcast media"; // relative path
     let mut files = Vec::new();
     if let Ok(entries) = fs::read_dir(media_dir) {
         for entry in entries.flatten() {
