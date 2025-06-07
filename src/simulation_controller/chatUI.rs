@@ -13,7 +13,7 @@ pub struct ChatMessage {
     pub content: String,
 }
 
-#[derive(PartialEq, Eq, Clone, Copy)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum ClientStatus {
     Offline,
     Connected,
@@ -274,7 +274,7 @@ impl ChatUIState {
                     ui.horizontal(|ui| {
                         ui.label("Start Chat With:");
                         for (&other_id, &other_status) in self.client_status.iter() {
-                            if other_id != client_id && other_status == ClientStatus::Connected {
+                            if other_id != client_id && other_status == ClientStatus::Connected && self.pending_chat_request.is_none() {
                                 let same_server = self.server_client_map.iter().any(|(_, list)| {
                                     list.contains(&client_id) && list.contains(&other_id)
                                 });
@@ -283,6 +283,7 @@ impl ChatUIState {
                                 }
                             }
                         }
+
                     });
 
                     if let Some(peer_id) = requested_chat_with {
