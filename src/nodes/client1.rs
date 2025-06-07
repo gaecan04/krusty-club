@@ -1137,19 +1137,5 @@ mod tests {
         assert!(*new_weight > initial_weight);
     }
 
-    //unit test: creation and updating topology from FloodResponse
-    #[test]
-    fn test_create_topology() {
-        let client_id = 1;
-        let (mut client, _sim_contr_tx, _sim_contr_rx, _packet_tx, _neighbor_rx, _gui_input) = setup_client(client_id);
-
-        //simulation FloodResponse tracking a path
-        let path_trace: Vec<(NodeId, PktNodeType)> = vec![
-            (10, PktNodeType::Drone),
-            (20, PktNodeType::Drone),
-            (30, PktNodeType::Drone),
-            (100, PktNodeType::Drone),
-        ];
-        let flood_response = FloodResponse { flood_id : 99, path_trace : path_trace.clone()
-        };
- */
+    //unit test: creation an
+*/

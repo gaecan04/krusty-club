@@ -274,7 +274,7 @@ impl ChatUIState {
                     ui.horizontal(|ui| {
                         ui.label("Start Chat With:");
                         for (&other_id, &other_status) in self.client_status.iter() {
-                            if other_id != client_id && other_status == ClientStatus::Connected && self.pending_chat_request.is_none() {
+                            if other_id != client_id && other_status == ClientStatus::Connected {
                                 let same_server = self.server_client_map.iter().any(|(_, list)| {
                                     list.contains(&client_id) && list.contains(&other_id)
                                 });
@@ -283,21 +283,26 @@ impl ChatUIState {
                                 }
                             }
                         }
-
                     });
 
                     if let Some(peer_id) = requested_chat_with {
-                        if let Some(server_id) = self.selected_server {
+                        // find the server they both share
+                        if let Some((&server_id, _)) = self.server_client_map
+                            .iter()
+                            .find(|(_sid, clients)| {
+                                clients.contains(&client_id) && clients.contains(&peer_id)
+                            })
+                        {
                             self.pending_chat_request = Some((client_id, peer_id));
                             push_gui_message(&self.gui_input, client_id, format!("[ChatRequest]::{peer_id}"));
-
-                            // 🔧 Select the target so that the popup is usable
                             self.selected_client = Some(peer_id);
+                            // and if you were using selected_server elsewhere:
+                            self.selected_server = Some(server_id);
                         }
                     }
 
-                    ui.horizontal(|ui| {
 
+                    ui.horizontal(|ui| {
                         ui.label("Interact with server:");
                         for &server_id in &self.servers {
                             // Only display the server the selected client is logged into
@@ -358,7 +363,7 @@ impl ChatUIState {
                                         }
                                     }
                                     ui.separator();
-                                    if ui.button("Broadcast Media").clicked(){
+                                    if ui.button("Broadcast Media").clicked() {
                                         self.show_broadcast_media_list = !self.show_broadcast_media_list;
                                     }
                                     if self.show_broadcast_media_list {
@@ -380,7 +385,6 @@ impl ChatUIState {
                                             }
                                         }
                                     }
-
 
                                     ui.separator();
                                     if ui.button("Request Media List").clicked() {
@@ -427,19 +431,30 @@ impl ChatUIState {
                                                 clients.retain(|&c| c != client_id);
                                             }
 
-                                            // 3. Clear selected_client if needed (optional)
+                                            // 3. Clear chat state if this client was involved
+                                            if let Some((req, tgt)) = self.pending_chat_request {
+                                                if req == client_id || tgt == client_id {
+                                                    self.pending_chat_request = None;
+                                                }
+                                            }
+                                            if let Some((c1, c2)) = self.active_chat_pair {
+                                                if c1 == client_id || c2 == client_id {
+                                                    self.active_chat_pair = None;
+                                                }
+                                            }
+
+                                            // 4. Clear selected_client if needed
                                             if self.selected_client == Some(client_id) {
                                                 self.selected_client = None;
                                             }
 
-                                            // 4. Clear selected_server to avoid showing Broadcast UI
+                                            // 5. Clear selected_server to avoid showing Broadcast UI
                                             self.selected_server = None;
 
-                                            // 5. Push logout message
+                                            // 6. Push logout message
                                             push_gui_message(&self.gui_input, client_id, "[Logout]".to_string());
                                             self.show_server_popup = None;
                                             self.show_upload_media_list = false;
-
                                         }
                                     }
                                     ui.separator();
@@ -450,16 +465,11 @@ impl ChatUIState {
                                         self.download_result_message = None;
                                     }
 
-
-
-
                                     ui.separator();
                                 });
                         }
                     });
-
                 }
-
 
 
                 ClientStatus::Chatting(peer_id) => {
@@ -577,6 +587,7 @@ impl ChatUIState {
                         self.client_status.insert(target, ClientStatus::Chatting(requester));
                         self.active_chat_pair = Some((requester, target));
                         self.selected_sender = Some(target);
+
                         self.pending_chat_request = None;
                         self.pending_chat_type = None;
 
@@ -628,6 +639,7 @@ impl ChatUIState {
                         self.client_status.insert(peer, ClientStatus::Connected);
                         self.active_chat_pair = None;
                         self.pending_chat_termination = None;
+                        self.pending_chat_request = None;
                     } else if cancel_clicked {
                         self.pending_chat_termination = None;
                     }

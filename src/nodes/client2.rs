@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::string::String;
 use std::default::Default;
-use std::io;
+use std::{fs, io};
 use std::io::Write;
 use wg_2024::controller::{DroneCommand, DroneEvent};
 use wg_2024::network::{NodeId, SourceRoutingHeader};
@@ -182,7 +182,7 @@ impl MyClient {
 
 
 
-    fn send_packet(&self, input : String){
+    fn send_packet(&mut self, input : String){
         let bytes = input.trim_end();
         let chunks: Vec<Vec<u8>> = bytes.as_bytes().chunks(128).map(|chunk| chunk.to_vec()).collect();//we break down the message in smaller chunks
         for i in 0..chunks.len() {
@@ -206,7 +206,7 @@ impl MyClient {
                 pack_type: MsgFragment(fragment),
             };
             println!("♥♥ BEST PATH IS : {:?}",packet.routing_header.hops);
-
+            self.sent_messages.insert(packet.session_id, Vec::new());
             if let Some(next_hop) = packet.routing_header.hops.get(packet.routing_header.hop_index){ //we find the channel associated with the right drone using the RoutingHeader
                 if let Some(sender) = self.packet_send.get(&next_hop){
                     match sender.try_send(packet.clone()) {
@@ -313,9 +313,12 @@ impl MyClient {
                 info!("The media could not be found.");
             }
             ["[MediaDownloadResponse]", media_name, base64_data]=>{
-                if let Err(e) = Self::display_image(base64_data, media_name) {
+                if let Err(e) = Self::display_media(base64_data, media_name) {
                     info!("Failed to display image: {}", e);
                 }
+            }
+            ["[MediaBroadcastAck]", media_name, "Broadcasted"]=>{
+                info!("{} successful broadcast",media_name);
             }
             _=>{
                 warn!("Wrong message format. The message: {} , doesn't respect any known format", message_string);
@@ -515,51 +518,107 @@ impl MyClient {
     }
 
     fn best_path(&self, source: NodeId, target: NodeId) -> Option<Vec<NodeId>> {
+        use std::collections::{BinaryHeap, HashMap};
+        use std::cmp::Reverse;
+
+        // Handle edge cases
         if target == 0 {
-            info!("Best path is empty due to incorrect unwrap");
             return None;
         }
-        let source_idx = *self.node_map.get(&source)?;
-        let target_idx = *self.node_map.get(&target)?;
 
-        // Dijkstra: I take note of where I come from (predecessor)
+        if source == target {
+            return Some(vec![source]);
+        }
+
+        // Get node indices for source and target
+        let source_idx = self.node_map.get(&source)?.0;
+        let target_idx = self.node_map.get(&target)?.0;
+
+        // Initialize distances and predecessors
+        let mut distances: HashMap<NodeIndex, u32> = HashMap::new();
         let mut predecessors: HashMap<NodeIndex, NodeIndex> = HashMap::new();
-        let _ = dijkstra(&self.net_graph, source_idx.0, Some(target_idx.0), |e| {
-            let from = e.source();
-            let to = e.target();
+        let mut heap = BinaryHeap::new();
 
-            // Find the NodeType of to by matching its NodeIndex in node_map
-            if let Some((_, &(_, ref node_type))) = self.node_map.iter().find(|(_, &(idx, _))| idx == to) {
-                // Only track this edge if to is not a Server or is the target
-                if *node_type != NodeType::Server || to == target_idx.0 {
-                    predecessors.entry(to).or_insert(from);
+        // Set all distances to infinity except source
+        for node_idx in self.net_graph.node_indices() {
+            distances.insert(node_idx, u32::MAX);
+        }
+        distances.insert(source_idx, 0);
+        heap.push(Reverse((0u32, source_idx)));
+
+        // Dijkstra's algorithm
+        while let Some(Reverse((current_distance, current_node))) = heap.pop() {
+            // Skip if we've already processed this node with a better distance
+            if current_distance > distances[&current_node] {
+                continue;
+            }
+
+            // Stop early if we reached the target
+            if current_node == target_idx {
+                break;
+            }
+
+            // Process all neighbors
+            for edge in self.net_graph.edges(current_node) {
+                let neighbor_idx = edge.target();
+                let edge_weight = *edge.weight() as u32;
+
+                // Find the NodeId for this neighbor to check its type
+                let neighbor_id = self.node_map.iter()
+                    .find(|(_, &(idx, _))| idx == neighbor_idx)
+                    .map(|(id, _)| *id);
+
+                if let Some(neighbor_node_id) = neighbor_id {
+                    // Check if this neighbor is a Server node
+                    let is_server = if let Some(&(_, node_type)) = self.node_map.get(&neighbor_node_id) {
+                        node_type == NodeType::Server
+                    } else {
+                        false
+                    };
+
+                    // Skip Server nodes unless they are our target
+                    if is_server && neighbor_node_id != target {
+                        continue;
+                    }
+
+                    let new_distance = current_distance.saturating_add(edge_weight);
+
+                    if new_distance < distances[&neighbor_idx] {
+                        distances.insert(neighbor_idx, new_distance);
+                        predecessors.insert(neighbor_idx, current_node);
+                        heap.push(Reverse((new_distance, neighbor_idx)));
                     }
                 }
-
-            // Always return the weight so Dijkstra works correctly
-            *e.weight()
-        });
-
-        // If I fail to find my target I exit
-        if !predecessors.contains_key(&target_idx.0) {
-            warn!("No path found");
-            return None;
-        }
-
-        // I recreate the path using the predecessors
-        let mut path = vec![self.net_graph[target_idx.0]];
-        let mut current = target_idx.0;
-        while current != source_idx.0 {
-            if let Some(&prev) = predecessors.get(&current) {
-                path.push(self.net_graph[prev]);
-                current = prev;
-            } else {
-                warn!("No path found");
-                return None;
             }
         }
 
+        // Check if target is reachable
+        if distances.get(&target_idx) == Some(&u32::MAX) {
+            return None;
+        }
+
+        // Reconstruct path from target back to source
+        let mut path = Vec::new();
+        let mut current = target_idx;
+
+        loop {
+            // Find NodeId for current NodeIndex
+            let node_id = self.node_map.iter()
+                .find(|(_, &(idx, _))| idx == current)
+                .map(|(id, _)| *id)?;
+
+            path.push(node_id);
+
+            if current == source_idx {
+                break;
+            }
+
+            current = *predecessors.get(&current)?;
+        }
+
+        // Reverse to get path from source to target
         path.reverse();
+
         Some(path)
     }
     /*fn get_server_id(&self) -> Option<NodeId> {
@@ -609,44 +668,144 @@ impl MyClient {
         (*status).2 = server_id;
     }
 
-    fn display_image(base64_data: &str, media_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    fn display_media(media_name: &str, base64_data: &str) -> Result<(), Box<dyn std::error::Error>> {
         // Decode base64
-        let decoded = match STANDARD.decode( base64_data) {
+        let decoded = match STANDARD.decode(base64_data) {
             Ok(d) => d,
             Err(e) => {
-                info!("Base64 decode error: {}", e);
+                warn!("Base64 decode error: {}", e);
                 return Err(Box::new(e));
             }
         };
 
+        // Determine file extension based on media type
+        let file_extension = Self::detect_media_format(&decoded)?;
+        let file_path = format!("{}.{}", media_name, file_extension);
+
+        // Handle different media types
+        match file_extension.as_str() {
+            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" => {
+                Self::display_image(&decoded, &file_path)?;
+            }
+            "mp4" | "avi" | "mov" | "mkv" | "webm" => {
+                Self::display_video(&decoded, &file_path)?;
+            }
+            "mp3" | "wav" | "flac" | "ogg" => {
+                Self::display_audio(&decoded, &file_path)?;
+            }
+            _ => {
+                // For unknown formats, just save and try to open
+                fs::write(&file_path, &decoded)?;
+                Self::open_with_system(&file_path)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn display_image(decoded_data: &[u8], file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         // Read image from memory
-        let cursor = Cursor::new(decoded.clone());
+        let cursor = Cursor::new(decoded_data);
         let img = match ImageReader::new(cursor).with_guessed_format()?.decode() {
             Ok(i) => i,
             Err(e) => {
-                info!("Image decode error: {}", e);
+                warn!("Image decode error: {}", e);
                 return Err(Box::new(e));
             }
         };
 
         // Save image to file
-        let image_path = format!("{}.png", media_name);
-        if let Err(e) = img.save(&image_path) {
-            info!("Failed to save image: {}", e);
+        if let Err(e) = img.save(file_path) {
+            warn!("Failed to save image: {}", e);
             return Err(Box::new(e));
         }
 
-        // Display the image in a window (non-blocking, auto closes when user exits)
-
-        match open(image_path){
-            Ok(display)=>{display}
-            Err(e) => {
-                info!("Failed to display: {}", e);
-                return Err(Box::new(e));
-            }
-        };
+        // Display the image using system default application
+        Self::open_with_system(file_path)?;
 
         Ok(())
+    }
+
+    fn display_video(decoded_data: &[u8], file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        // Save video file
+        fs::write(file_path, decoded_data)?;
+
+        // Open with system default video player
+        Self::open_with_system(file_path)?;
+
+        Ok(())
+    }
+
+    fn display_audio(decoded_data: &[u8], file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        // Save audio file
+        fs::write(file_path, decoded_data)?;
+
+        // Open with system default audio player
+        Self::open_with_system(file_path)?;
+
+        Ok(())
+    }
+
+    fn open_with_system(file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        #[cfg(target_os = "windows")]
+        {
+            std::process::Command::new("cmd")
+                .args(["/C", "start", "", file_path])
+                .spawn()?;
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            std::process::Command::new("open")
+                .arg(file_path)
+                .spawn()?;
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            std::process::Command::new("xdg-open")
+                .arg(file_path)
+                .spawn()?;
+        }
+
+        Ok(())
+    }
+
+    fn detect_media_format(data: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
+        if data.len() < 12 {
+            return Ok("bin".to_string());
+        }
+
+        // Check magic bytes for common formats
+        match &data[0..4] {
+            [0x89, 0x50, 0x4E, 0x47] => Ok("png".to_string()),
+            [0xFF, 0xD8, 0xFF, _] => Ok("jpg".to_string()),
+            [0x47, 0x49, 0x46, 0x38] => Ok("gif".to_string()),
+            [0x42, 0x4D, _, _] => Ok("bmp".to_string()),
+            _ => {
+                // Check for other formats
+                if data.len() >= 12 {
+                    match &data[4..12] {
+                        [0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6F, 0x6D] => Ok("mp4".to_string()),
+                        [0x66, 0x74, 0x79, 0x70, 0x6D, 0x70, 0x34, 0x32] => Ok("mp4".to_string()),
+                        _ => {
+                            // Check for audio formats
+                            if data.len() >= 3 && &data[0..3] == [0x49, 0x44, 0x33] {
+                                Ok("mp3".to_string())
+                            } else if data.len() >= 4 && &data[0..4] == [0x52, 0x49, 0x46, 0x46] {
+                                Ok("wav".to_string())
+                            } else if data.len() >= 4 && &data[0..4] == [0x66, 0x4C, 0x61, 0x43] {
+                                Ok("flac".to_string())
+                            } else {
+                                Ok("bin".to_string())
+                            }
+                        }
+                    }
+                } else {
+                    Ok("bin".to_string())
+                }
+            }
+        }
     }
 
     fn process_gui_command(&mut self, command_string: String)->Result<String , Box<dyn std::error::Error>> {
@@ -713,6 +872,9 @@ impl MyClient {
             ["[ChatFinish]"] => {
                 if (*CHATTING_STATUS.lock().unwrap()).0 == true {
                     info!("Requesting to end current chat");
+                    self.received_messages.clear();
+                    self.received_packets.clear();
+                    self.sent_messages.clear();
                     self.change_chat_status(false , 0 , CHATTING_STATUS.lock().unwrap().2);
                     Ok(command_string)
                 } else {

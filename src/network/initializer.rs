@@ -837,7 +837,7 @@ impl NetworkInitializer {
                     // client2
                     thread::spawn(move || {
                         println!("client2 spawned");
-                        let mut cl2 = client2::MyClient::new(client_id, client_rx, senders);
+                        let mut cl2 = client1::MyClient::new(client_id, client_rx, senders, HashMap::new(), None, HashSet::new());
                         cl2.run(gui_clone);
                     });
                 } else {
@@ -853,7 +853,7 @@ impl NetworkInitializer {
                     // client2 for even-indexed clients
                     thread::spawn(move || {
                         println!("client2 spawned");
-                        let mut cl2 = client2::MyClient::new(client_id, client_rx, senders);
+                        let mut cl2 = client1::MyClient::new(client_id, client_rx, senders, HashMap::new(), None, HashSet::new());
                         cl2.run(gui_clone);
                     });
                 } else {
