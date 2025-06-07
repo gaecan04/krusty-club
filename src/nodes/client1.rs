@@ -15,7 +15,12 @@
     //use wg_2024::drone::Drone;
     use crossbeam_channel::{select_biased, Receiver, Sender};
     use crate::simulation_controller::gui_input_queue::{SharedGuiInput};
+    use once_cell::sync::Lazy;
+    use std::sync::Mutex;
+    use std::collections::VecDeque;
 
+
+    static SESSION_IDS : Lazy<Mutex<u64>> = Lazy::new(|| Mutex::new(0));
 
     #[derive(Debug, Clone)]
     pub struct ReceivedMessageState {
@@ -84,10 +89,16 @@
             }
         }
 
+        fn get_next_session_id(&self) -> u64 {
+            let mut counter = SESSION_IDS.lock().unwrap();
+            let current_id = *counter;
+            *counter += 1;
+            current_id
+        }
 
         pub(crate) fn run(&mut self, gui_input: SharedGuiInput) {
-
             let mut seen_flood_ids = HashSet::new();
+
             println!("Client {} starting run loop", self.id);
 
             if self.network_graph.node_count() == 0 {
@@ -116,6 +127,8 @@
                         if let Ok(packet) = packet {
                             println!("Packet received by client {} : {:?}", self.id, packet);
                             self.process_packet(packet, &mut seen_flood_ids);
+                        } else {
+                            println!("No packet received or channel closed.");
                         }
                     },
                     default => {
@@ -146,6 +159,7 @@
             }
         }
 
+        ///SISTEMA FUNZIONE (vedi anche active_flood_discoveries)
         fn process_packet(&mut self, mut packet: Packet, seen_flood_ids: &mut HashSet<u64>) {
             let packet_type = packet.pack_type.clone();
             match packet_type {
@@ -198,44 +212,32 @@
                     path_trace: response_path_trace,
                 };
                 if let Some(prev_hop_id) = sender_id {
-                    if let Some(sender) = self.packet_send.get(&prev_hop_id) {
-                        let response_packet_to_send = Packet {
-                            pack_type : PacketType::FloodResponse(flood_response.clone()),
-                            routing_header: SourceRoutingHeader {
-                                hop_index: 1,
-                                hops: request.path_trace.iter().map(|(id, _)| *id).rev().collect(),
-                            },
-                            session_id : request.flood_id,
-                        };
-                        let mut response_route_hops : Vec<NodeId> = request.path_trace.iter().map(|(id, _)| *id).collect();
-                        response_route_hops.push(self.id);
-                        response_route_hops.reverse();
-                        let first_response_hop = response_route_hops.get(1).cloned();
-                        if let Some(next_hop_id) = first_response_hop {
-                            if let Some(sender_channel) =  self.packet_send.get(&next_hop_id) {
-                                let response_packet_to_send = Packet {
-                                    pack_type : PacketType::FloodResponse(flood_response.clone()),
-                                    routing_header : SourceRoutingHeader {
-                                        hop_index : 1,
-                                        hops : response_route_hops,
-                                    },
-                                    session_id : request.flood_id,
-                                };
-                                match sender_channel.send(response_packet_to_send) {
-                                    Ok(()) => println!("Client {} sent FloodResponse {} back to {} (prev hop)", self.id, request.flood_id, prev_hop_id),
-                                    Err(e) => eprintln!("Client {} failed to send FloodResponse {} back to {}: {}", self.id, request.flood_id, prev_hop_id, e),
-                                }
-                            } else {
-                                eprintln!("Client {} error: no sender found for previous hop {}", self.id, prev_hop_id);
+                    let mut response_route_hops : Vec<NodeId> = request.path_trace.iter().map(|(id, _)| *id).collect();
+                    response_route_hops.push(self.id);
+                    response_route_hops.reverse();
+                    let first_response_hop = response_route_hops.get(1).cloned();
+                    if let Some(next_hop_id) = first_response_hop {
+                        if let Some(sender_channel) =  self.packet_send.get(&next_hop_id) {
+                            let response_packet_to_send = Packet {
+                                pack_type : PacketType::FloodResponse(flood_response.clone()),
+                                routing_header : SourceRoutingHeader {
+                                    hop_index : 1,
+                                    hops : response_route_hops,
+                                },
+                                session_id : self.get_next_session_id(),
+                            };
+                            match sender_channel.send(response_packet_to_send) {
+                                Ok(()) => println!("Client {} sent FloodResponse {} back to {} (prev hop)", self.id, request.flood_id, prev_hop_id),
+                                Err(e) => eprintln!("Client {} failed to send FloodResponse {} back to {}: {}", self.id, request.flood_id, prev_hop_id, e),
                             }
                         } else {
-                            eprintln!("Client {} cannot send FloodResponse back, path trace too short after adding self", self.id);
+                            eprintln!("Client {} error: no sender found for previous hop {}", self.id, prev_hop_id);
                         }
                     } else {
-                        eprintln!("Client {} error: could not find sender channel for previous hop {}", self.id, prev_hop_id);
+                        eprintln!("Client {} cannot send FloodResponse back, path trace too short after adding self", self.id);
                     }
                 } else {
-                    eprintln!("Client {} received FloodRequest with empty path trace or no sender info.", self.id);
+                    eprintln!("Client {} error: could not find sender channel for previous hop", self.id);
                 }
             } else {
                 self.seen_flood_ids.insert(flood_identifier);
@@ -250,7 +252,7 @@
                                 hop_index : 0,
                                 hops : vec![],
                             },
-                            session_id : request.flood_id,
+                            session_id : self.get_next_session_id(),
                         };
                         match sender_channel.send(packet_to_forward) {
                             Ok(_) => println!("Client {} forwarded FloodRequest {} to neighbor {}", self.id, request.flood_id, neighbor_id),
@@ -279,7 +281,7 @@
                     hop_index: 0,
                     hops: vec![],
                 },
-                session_id: new_flood_id,
+                session_id: self.get_next_session_id(),
             };
 
             println!("Client {} sending FloodRequest {} to all neighbors", self.id, new_flood_id);
@@ -803,7 +805,7 @@
                     const FRAGMENT_SIZE: usize = 128;
                     let total_fragments = (message_data_bytes.len() + FRAGMENT_SIZE - 1) / FRAGMENT_SIZE;
                     let mut fragments = Vec::new();
-                    let session_id = random::<u64>();
+                    let session_id = self.get_next_session_id();
                     for i in 0..total_fragments {
                         let start = i * FRAGMENT_SIZE;
                         let end = (start + FRAGMENT_SIZE).min(message_data_bytes.len());
@@ -848,16 +850,13 @@
                         println!("Client {} successfully sent Logout message. Disconnecting internally.", self.id);
                         self.connected_server_id = None;
                     }
+                } else {
+                    eprintln!("Client {} cannot send high-level message, no server connected.", self.id);
                 }
             }
         }
 
         fn best_path(&self, from: NodeId, to: NodeId) -> Option<Vec<NodeId>> {
-            if self.id == 101 && to == 200 {
-                println!("yess 101 -> 200");
-                return Some(vec![101, 6,10, 200]);
-            }
-
             println!("Client {} calculating path from {} to {}", self.id, from, to);
             let start_node_idx = self.node_id_to_index.get(&from).copied();
             let end_node_idx = self.node_id_to_index.get(&to).copied();
@@ -905,6 +904,13 @@
                     println!("Client {} incremented weight for link {} -> {} to {}", self.id, from, to, current_weight.saturating_add(1));
                 } else {
                     println!("Client {} cannot increment drop: link {} -> {} not found in graph", self.id, from, to);
+                }
+                if let Some(edge_index) = self.network_graph.find_edge(to_idx, from_idx) {
+                    let current_weight = *self.network_graph.edge_weight(edge_index).unwrap();
+                    *self.network_graph.edge_weight_mut(edge_index).unwrap() = current_weight.saturating_add(1);
+                    println!("Client {} incremented weight for link {} -> {} to {}", self.id, to, from, current_weight.saturating_add(1));
+                } else {
+                    println!("Client {} cannot increment drop: link {} -> {} not found in graph", self.id, to, from);
                 }
             } else {
                 println!("Client {} cannot increment drop: one or both nodes ({}, {}) not found in node_id_to_index map", self.id, from, to);
