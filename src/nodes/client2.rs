@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::string::String;
 use std::default::Default;
-use std::io;
+use std::{fs, io};
 use std::io::Write;
 use wg_2024::controller::{DroneCommand, DroneEvent};
 use wg_2024::network::{NodeId, SourceRoutingHeader};
@@ -48,7 +48,6 @@ pub struct MyClient{
     pub received_packets: HashMap<u64 , Vec<u8>>,
     pub seen_flood_ids : HashSet<(u64 , NodeId)>,
     pub received_messages : HashMap<u64 , Vec<u8>>,
-    pub available_servers: HashSet<(NodeId, bool)>,
 }
 
 impl MyClient {
@@ -64,17 +63,14 @@ impl MyClient {
             received_packets: HashMap::new(),
             seen_flood_ids: HashSet::new(),
             received_messages: HashMap::new(),
-            available_servers: HashSet::new(),
         }
     }
 
     pub (crate) fn run(&mut self, gui_input: SharedGuiInput) {
-
         println!("Client {} starting run loop", self.id);
         self.send_flood_request();
         loop {
             if let Ok(mut map) = gui_input.lock() {
-
                 if let Some(msgs) = map.get_mut(&self.id) {
                     if !msgs.is_empty() {
                         let msg = msgs.remove(0);
@@ -86,7 +82,7 @@ impl MyClient {
                                 }
                             }
                             Err(e) => {
-                                println!("⚠️ Errore durante process_gui_command: {:?}", e);
+                                println!("⚠ Errore durante process_gui_command: {:?}", e);
                             }
                         }
                     }
@@ -97,7 +93,7 @@ impl MyClient {
                     println!("Checking for received packet by client {}...",self.id);
                     if let Ok(packet) = packet {
                         info!("Packet received by client {}: {:?}", self.id, packet);
-                        println!("♥️♥️ Packet received by client {} : {:?}", self.id, packet);
+                        println!("♥♥ Packet received by client {} : {:?}", self.id, packet);
 
                         self.process_packet(packet);
                     } else {
@@ -106,8 +102,7 @@ impl MyClient {
                 },
                 default => {
                    std::thread::sleep(std::time::Duration::from_millis(1));
-                 }
-
+                }
             }
         }
     }
@@ -144,7 +139,7 @@ impl MyClient {
                             let sender_id = &packet.routing_header.hops[packet.routing_header.hops.len()-2];
                             let sender = self.packet_send.get(sender_id).unwrap();
                             let mut new_packet = packet.clone();
-                            new_packet.routing_header.hops = self.best_path(self.id , (*CHATTING_STATUS.lock().unwrap()).1).unwrap_or_default(); // since the packet has already been dropped on the previous route we try to find out if there is a better route
+                            new_packet.routing_header.hops = self.best_path(self.id , (*CHATTING_STATUS.lock().unwrap()).2).unwrap_or_default(); // since the packet has already been dropped on the previous route we try to find out if there is a better route
                             (*sender).send(packet.clone()).unwrap_or_default();
                         }
                     }
@@ -187,13 +182,13 @@ impl MyClient {
 
 
 
-    fn send_packet(&self, input : String){
+    fn send_packet(&mut self, input : String){
         let bytes = input.trim_end();
         let chunks: Vec<Vec<u8>> = bytes.as_bytes().chunks(128).map(|chunk| chunk.to_vec()).collect();//we break down the message in smaller chunks
         for i in 0..chunks.len() {
             let mut data:[u8;128] = [0;128];
             for j in 0..chunks[i].len(){
-                data[i] = chunks[i][j];
+                data[j] = chunks[i][j];
             };
             let fragment:Fragment = Fragment { // we create the fragments based on the chunks
                 fragment_index: i as u64,
@@ -210,8 +205,8 @@ impl MyClient {
                 session_id: SESSION_IDS.lock().unwrap().clone(),
                 pack_type: MsgFragment(fragment),
             };
-            println!("♥️♥️ BEST PATH IS : {:?}",packet.routing_header.hops);
-
+            println!("♥♥ BEST PATH IS : {:?}",packet.routing_header.hops);
+            self.sent_messages.insert(packet.session_id, Vec::new());
             if let Some(next_hop) = packet.routing_header.hops.get(packet.routing_header.hop_index){ //we find the channel associated with the right drone using the RoutingHeader
                 if let Some(sender) = self.packet_send.get(&next_hop){
                     match sender.try_send(packet.clone()) {
@@ -284,47 +279,55 @@ impl MyClient {
     }
 
     fn packet_command_handling(&self, message : Vec<u8>) {
+        let chatting_status = *CHATTING_STATUS.lock().unwrap();
         let message_string = String::from_utf8_lossy(&message).to_string();
         let tokens: Vec<&str> = message_string.trim().splitn(3, "::").collect();
+        info!("Handing full message at {}: {:?}", self.id ,tokens);
         match tokens.as_slice() {
-            ["LoginAck" , _session]=>{
+            ["[LoginAck]" , _session]=>{
                 info!("You successfully logged in!");
-            }
-            ["[MessageFrom]", client_id, msg]=>{
+            },
+            ["[MessageFrom]", client_id_str, msg]=>{
+                let client_id: NodeId = client_id_str.parse().unwrap_or_default();
+
+                self.change_chat_status(true, client_id , chatting_status.2);
                 info!("Received message from client id {}. Message : {}", client_id , msg);
-            }
+            },
             ["[ChatStart]", success]=>{
-                if success.to_string() == "true"{
+                if success.trim_end_matches('\0') == "true"{
                     info!("Chat started successfully");
                 }
                 else {
-                    self.change_chat_status(false,0 , CHATTING_STATUS.lock().unwrap().2);
+                    self.change_chat_status(false,0 , chatting_status.2);
                     info!("Chat start failed");
                 }
-            }
+            },
             ["[ClientListResponse]", client_list]=>{
                 info!("Clients available for chat: {}" , client_list);
-            }
+            },
             ["[HistoryResponse]", response]=>{
                 info!("Most recent chat history with current client: {}" , response);
-            }
-            ["MediaUploadAck", media_name]=>{
+            },
+            ["[MediaUploadAck]", media_name]=>{
                 info!("The media {} has been uploaded", media_name);
-            }
-            ["MediaListResponse" , media_list]=>{
+            },
+            ["[MediaListResponse]" , media_list]=>{
                 info!("Here's a list of the media available for download: {}" , media_list);
-            }
+            },
             ["[MediaDownloadResponse]","ERROR","NotFound"]=>{
                 info!("The media could not be found.");
-            }
+            },
             ["[MediaDownloadResponse]", media_name, base64_data]=>{
-                if let Err(e) = Self::display_image(base64_data, media_name) {
+                if let Err(e) = Self::display_media(base64_data, media_name) {
                     info!("Failed to display image: {}", e);
                 }
-            }
+            },
+            ["[MediaBroadcastAck]", media_name, "Broadcasted"]=>{
+                info!("{} successful broadcast",media_name);
+            },
             _=>{
                 warn!("Wrong message format. The message: {} , doesn't respect any known format", message_string);
-            }
+            },
         }
     }
 
@@ -378,7 +381,7 @@ impl MyClient {
     }
 
     fn send_ack (&mut self, packet: &mut Packet , fragment: &Fragment) {
-        let ack= Ack {
+        let ack = Ack {
             fragment_index : fragment.fragment_index,
         };
         let ack_packet = Packet {
@@ -413,7 +416,7 @@ impl MyClient {
             if response.path_trace[i].1 == Server {
                 if !self.available_servers.contains(&(response.path_trace[i].0, true)) && !self.available_servers.contains(&(response.path_trace[i].0, false)) {
                     self.available_servers.insert((response.path_trace[i].0, false));
-                    info!("♥️♥️♥️♥️♥️♥️ Adding server {:?}" , response.path_trace[i]);
+                    info!("♥♥♥♥♥♥ Adding server {:?}" , response.path_trace[i]);
                 }
                 else{info!("Server is already present")}
             }
@@ -520,43 +523,107 @@ impl MyClient {
     }
 
     fn best_path(&self, source: NodeId, target: NodeId) -> Option<Vec<NodeId>> {
+        use std::collections::{BinaryHeap, HashMap};
+        use std::cmp::Reverse;
+
+        // Handle edge cases
         if target == 0 {
-            info!("Best path is empty due to incorrect unwrap");
             return None;
         }
-        let source_idx = *self.node_map.get(&source)?;
-        let target_idx = *self.node_map.get(&target)?;
 
-        // Dijkstra: I take note of where I come from (predecessor)
+        if source == target {
+            return Some(vec![source]);
+        }
+
+        // Get node indices for source and target
+        let source_idx = self.node_map.get(&source)?.0;
+        let target_idx = self.node_map.get(&target)?.0;
+
+        // Initialize distances and predecessors
+        let mut distances: HashMap<NodeIndex, u32> = HashMap::new();
         let mut predecessors: HashMap<NodeIndex, NodeIndex> = HashMap::new();
-        let _ = dijkstra(&self.net_graph, source_idx.0, Some(target_idx.0), |e| {
-            let from = e.source();
-            let to = e.target();
-            // I keep track of each node I can reach
-            predecessors.entry(to).or_insert(from);
-            *e.weight()
-        });
+        let mut heap = BinaryHeap::new();
 
-        // If I fail to find my target I exit
-        if !predecessors.contains_key(&target_idx.0) {
-            warn!("No path found");
-            return None;
+        // Set all distances to infinity except source
+        for node_idx in self.net_graph.node_indices() {
+            distances.insert(node_idx, u32::MAX);
         }
+        distances.insert(source_idx, 0);
+        heap.push(Reverse((0u32, source_idx)));
 
-        // I recreate the path using the predecessors
-        let mut path = vec![self.net_graph[target_idx.0]];
-        let mut current = target_idx.0;
-        while current != source_idx.0 {
-            if let Some(&prev) = predecessors.get(&current) {
-                path.push(self.net_graph[prev]);
-                current = prev;
-            } else {
-                warn!("No path found");
-                return None;
+        // Dijkstra's algorithm
+        while let Some(Reverse((current_distance, current_node))) = heap.pop() {
+            // Skip if we've already processed this node with a better distance
+            if current_distance > distances[&current_node] {
+                continue;
+            }
+
+            // Stop early if we reached the target
+            if current_node == target_idx {
+                break;
+            }
+
+            // Process all neighbors
+            for edge in self.net_graph.edges(current_node) {
+                let neighbor_idx = edge.target();
+                let edge_weight = *edge.weight() as u32;
+
+                // Find the NodeId for this neighbor to check its type
+                let neighbor_id = self.node_map.iter()
+                    .find(|(_, &(idx, _))| idx == neighbor_idx)
+                    .map(|(id, _)| *id);
+
+                if let Some(neighbor_node_id) = neighbor_id {
+                    // Check if this neighbor is a Server node
+                    let is_server = if let Some(&(_, node_type)) = self.node_map.get(&neighbor_node_id) {
+                        node_type == NodeType::Server
+                    } else {
+                        false
+                    };
+
+                    // Skip Server nodes unless they are our target
+                    if is_server && neighbor_node_id != target {
+                        continue;
+                    }
+
+                    let new_distance = current_distance.saturating_add(edge_weight);
+
+                    if new_distance < distances[&neighbor_idx] {
+                        distances.insert(neighbor_idx, new_distance);
+                        predecessors.insert(neighbor_idx, current_node);
+                        heap.push(Reverse((new_distance, neighbor_idx)));
+                    }
+                }
             }
         }
 
+        // Check if target is reachable
+        if distances.get(&target_idx) == Some(&u32::MAX) {
+            return None;
+        }
+
+        // Reconstruct path from target back to source
+        let mut path = Vec::new();
+        let mut current = target_idx;
+
+        loop {
+            // Find NodeId for current NodeIndex
+            let node_id = self.node_map.iter()
+                .find(|(_, &(idx, _))| idx == current)
+                .map(|(id, _)| *id)?;
+
+            path.push(node_id);
+
+            if current == source_idx {
+                break;
+            }
+
+            current = *predecessors.get(&current)?;
+        }
+
+        // Reverse to get path from source to target
         path.reverse();
+
         Some(path)
     }
     /*fn get_server_id(&self) -> Option<NodeId> {
@@ -591,7 +658,7 @@ impl MyClient {
             },
         }
     }
-         */
+    */
 
 
     fn increment_ids( &self , counter: &Lazy<Mutex<u64>>) {
@@ -606,68 +673,167 @@ impl MyClient {
         (*status).2 = server_id;
     }
 
-    fn display_image(base64_data: &str, media_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    fn display_media(media_name: &str, base64_data: &str) -> Result<(), Box<dyn std::error::Error>> {
         // Decode base64
-        let decoded = match STANDARD.decode( base64_data) {
+        let decoded = match STANDARD.decode(base64_data) {
             Ok(d) => d,
             Err(e) => {
-                info!("Base64 decode error: {}", e);
+                warn!("Base64 decode error: {}", e);
                 return Err(Box::new(e));
             }
         };
 
+        // Determine file extension based on media type
+        let file_extension = Self::detect_media_format(&decoded)?;
+        let file_path = format!("{}.{}", media_name, file_extension);
+
+        // Handle different media types
+        match file_extension.as_str() {
+            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" => {
+                Self::display_image(&decoded, &file_path)?;
+            }
+            "mp4" | "avi" | "mov" | "mkv" | "webm" => {
+                Self::display_video(&decoded, &file_path)?;
+            }
+            "mp3" | "wav" | "flac" | "ogg" => {
+                Self::display_audio(&decoded, &file_path)?;
+            }
+            _ => {
+                // For unknown formats, just save and try to open
+                fs::write(&file_path, &decoded)?;
+                Self::open_with_system(&file_path)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn display_image(decoded_data: &[u8], file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         // Read image from memory
-        let cursor = Cursor::new(decoded.clone());
+        let cursor = Cursor::new(decoded_data);
         let img = match ImageReader::new(cursor).with_guessed_format()?.decode() {
             Ok(i) => i,
             Err(e) => {
-                info!("Image decode error: {}", e);
+                warn!("Image decode error: {}", e);
                 return Err(Box::new(e));
             }
         };
 
         // Save image to file
-        let image_path = format!("{}.png", media_name);
-        if let Err(e) = img.save(&image_path) {
-            info!("Failed to save image: {}", e);
+        if let Err(e) = img.save(file_path) {
+            warn!("Failed to save image: {}", e);
             return Err(Box::new(e));
         }
 
-        // Display the image in a window (non-blocking, auto closes when user exits)
-
-        match open(image_path){
-            Ok(display)=>{display}
-            Err(e) => {
-                info!("Failed to display: {}", e);
-                return Err(Box::new(e));
-            }
-        };
+        // Display the image using system default application
+        Self::open_with_system(file_path)?;
 
         Ok(())
     }
 
+    fn display_video(decoded_data: &[u8], file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        // Save video file
+        fs::write(file_path, decoded_data)?;
+
+        // Open with system default video player
+        Self::open_with_system(file_path)?;
+
+        Ok(())
+    }
+
+    fn display_audio(decoded_data: &[u8], file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        // Save audio file
+        fs::write(file_path, decoded_data)?;
+
+        // Open with system default audio player
+        Self::open_with_system(file_path)?;
+
+        Ok(())
+    }
+
+    fn open_with_system(file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        #[cfg(target_os = "windows")]
+        {
+            std::process::Command::new("cmd")
+                .args(["/C", "start", "", file_path])
+                .spawn()?;
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            std::process::Command::new("open")
+                .arg(file_path)
+                .spawn()?;
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            std::process::Command::new("xdg-open")
+                .arg(file_path)
+                .spawn()?;
+        }
+
+        Ok(())
+    }
+
+    fn detect_media_format(data: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
+        if data.len() < 12 {
+            return Ok("bin".to_string());
+        }
+
+        // Check magic bytes for common formats
+        match &data[0..4] {
+            [0x89, 0x50, 0x4E, 0x47] => Ok("png".to_string()),
+            [0xFF, 0xD8, 0xFF, _] => Ok("jpg".to_string()),
+            [0x47, 0x49, 0x46, 0x38] => Ok("gif".to_string()),
+            [0x42, 0x4D, _, _] => Ok("bmp".to_string()),
+            _ => {
+                // Check for other formats
+                if data.len() >= 12 {
+                    match &data[4..12] {
+                        [0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6F, 0x6D] => Ok("mp4".to_string()),
+                        [0x66, 0x74, 0x79, 0x70, 0x6D, 0x70, 0x34, 0x32] => Ok("mp4".to_string()),
+                        _ => {
+                            // Check for audio formats
+                            if data.len() >= 3 && &data[0..3] == [0x49, 0x44, 0x33] {
+                                Ok("mp3".to_string())
+                            } else if data.len() >= 4 && &data[0..4] == [0x52, 0x49, 0x46, 0x46] {
+                                Ok("wav".to_string())
+                            } else if data.len() >= 4 && &data[0..4] == [0x66, 0x4C, 0x61, 0x43] {
+                                Ok("flac".to_string())
+                            } else {
+                                Ok("bin".to_string())
+                            }
+                        }
+                    }
+                } else {
+                    Ok("bin".to_string())
+                }
+            }
+        }
+    }
+
     fn process_gui_command(&mut self, command_string: String)->Result<String , Box<dyn std::error::Error>> {
+        let chatting_status = *CHATTING_STATUS.lock().unwrap();
         println!("Client {} processing GUI command '{}'", self.id, command_string.clone());
         let tokens: Vec<&str> = command_string.trim().split("::").collect();
-
         match tokens.as_slice() {
-            ["[Login]", server_id_str] => { // when logging in to a server we change its connection status from false to true
+            ["[Login]", server_id_str] => {
                 let server_id: NodeId = match server_id_str.parse() {
                     Ok(id) => id,
                     Err(e) => {
                         return Err(Box::new(e))
                     },
                 };
-
                 self.change_chat_status(false, 0 , server_id);
-                info!("Sending login request to server: {}", (*CHATTING_STATUS.lock().unwrap()).2);
+                info!("Sending login request to server: {}", chatting_status.2);
                 Ok(command_string)
             },
             ["[Logout]"] => {
-                if (*CHATTING_STATUS.lock().unwrap()).0 == true { //we make sure to not log out while in the middle of a chat
+                if chatting_status.0 == true { //we make sure to not log out while in the middle of a chat
                     Err(Box::new(io::Error::new(io::ErrorKind::Interrupted, "You are still in a chat with another user. End the chat before logging out")))
-                } else if (*CHATTING_STATUS.lock().unwrap()).2 != 0 {
-                    self.change_chat_status(false, 0 , 0);
+                } else if chatting_status.2 != 0 {
+                    //self.change_chat_status(false, 0 , 0);
                     Ok(command_string)
                 } else { //if we are yet to log in to any server we can log out of it
                     Err(Box::new(io::Error::new(io::ErrorKind::NotFound, "You have yet to login to any server")))
@@ -682,8 +848,8 @@ impl MyClient {
                 Ok(command_string)
             },
             ["[ChatRequest]", client_id] => {
-                let chat_tuple = ((*CHATTING_STATUS.lock().unwrap()).0 , (*CHATTING_STATUS.lock().unwrap()).1);
-                if chat_tuple.eq(&(false, 0 )) { //when requesting a chat we need to make sure that we are not in the middle of chatting with someone else
+                info!("Sending message to client {}", client_id);
+                if (chatting_status.0 , chatting_status.1).eq(&(false, 0 )) { //when requesting a chat we need to make sure that we are not in the middle of chatting with someone else
                     info!("Requesting to chat with client: {}", client_id);
                     let peer_id: NodeId = match client_id.parse() {
                         Ok(id) => id,
@@ -691,7 +857,7 @@ impl MyClient {
                             return Err(Box::new(e))
                         },
                     };
-                    self.change_chat_status(true , peer_id , (*CHATTING_STATUS.lock().unwrap()).2);
+                    self.change_chat_status(true , peer_id ,chatting_status.2);
                     Ok(command_string)
                 } else {
                     Err(Box::new(io::Error::new(io::ErrorKind::Interrupted, "You are already in a chat with another user.")))
@@ -709,21 +875,24 @@ impl MyClient {
                 info!("Requesting to download media: {}", media_name);
                 Ok(command_string)
             },
-            ["[ChatFinish]"] => {
-                if (*CHATTING_STATUS.lock().unwrap()).0 == true {
+            ["[ChatFinish]" , _client_id] => {
+                if chatting_status.0 == true {
                     info!("Requesting to end current chat");
-                    self.change_chat_status(false , 0 , CHATTING_STATUS.lock().unwrap().2);
+                    //self.received_messages.clear();
+                    //self.received_packets.clear();
+                    //self.sent_messages.clear();
+                    self.change_chat_status(false , 0 , chatting_status.2);
                     Ok(command_string)
                 } else {
                     Err(Box::new(io::Error::new(io::ErrorKind::Interrupted, "You are not chatting with any user.")))
                 }
             },
-            ["[MediaBroadcast]"] => {
-                info!("Broadcasting media to all connected clients");
+            ["[MediaBroadcast]", media_name, _encoded_media] => {
+                info!("Broadcasting {} to all connected clients" , media_name);
                 Ok(command_string)
             },
             ["[MediaListRequest]"] => {
-                info!("Requesting media list to server: {}" , (*CHATTING_STATUS.lock().unwrap()).2);
+                info!("Requesting media list to server: {}" , chatting_status.2);
                 Ok(command_string)
             },
             ["[FloodRequired]",action] => {
@@ -738,6 +907,7 @@ impl MyClient {
         }
     }
 }
+
 
 
 
@@ -1116,7 +1286,7 @@ impl MyClient{
             let node1 = Self::add_node_no_duplicate(&mut graph, &mut node_map, response.path_trace[i].clone());
             let node2 = Self::add_node_no_duplicate(&mut graph, &mut node_map, response.path_trace[i+1].clone());
             Self::add_edge_no_duplicate(graph , node1 , node2 , 1.0);
-        }
-    }
+        }
+    }
 }
- */
+ */
