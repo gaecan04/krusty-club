@@ -1,11 +1,3 @@
-/*
-COSE DA FARE :
-- le varie funzioni di interazione con i client: con i vari codici da mettere nei frammenti
-- implementare sto grafo dimmerda
-- fare simulazioni
-
-*/
-
 use petgraph::algo::dijkstra;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -94,8 +86,19 @@ impl NetworkGraph {
         let _ = dijkstra(&self.graph, source_idx, Some(target_idx), |e| {
             let from = e.source();
             let to = e.target();
+
+            let to_node_id = self.graph[to];
+            let to_is_server = self.node_types.get(&to_node_id) == Some(&NodeType::Server);
+            let cost = if to_is_server && to_node_id != target {
+                usize::MAX / 2 // discourage using servers in the path --> assign an elevated cost
+            } else {
+                *e.weight()
+            };
+
+            // Track predecessors (for path reconstruction)
             predecessors.entry(to).or_insert(from);
-            *e.weight()
+
+            cost
         });
 
         if !predecessors.contains_key(&target_idx) {
@@ -110,7 +113,7 @@ impl NetworkGraph {
                 path.push(self.graph[prev]);
                 current = prev;
             } else {
-                println!("⚠️ Incomplete path from {} to {}", source, target);
+                println!("⚠ Incomplete path from {} to {}", source, target);
                 return None;
             }
         }
@@ -190,7 +193,7 @@ impl server {
         let routing_header = SourceRoutingHeader::empty_route(); // ignored by drones for FloodRequest
 
         let packet = Packet::new_flood_request(routing_header, flood_id, flood_request);
-        info!("♥️♥️♥️♥️♥️♥️♥️ server has sender to this drones: {:?}", self.packet_sender);
+        info!("♥♥♥♥♥♥♥ server has sender to this drones: {:?}", self.packet_sender);
         //let mut sent_to = HashSet::new();
         for (&neighbor_id, sender) in &self.packet_sender {
             if let Err(e) = sender.send(packet.clone()) {
@@ -252,7 +255,7 @@ impl server {
                                         for target_id in clients {
                                             info!("Registered clients in {} are {:?}", self.id, self.registered_clients);
                                             let forward = format!("[MediaDownloadResponse]::{}::{}", media_name, base64_data);
-                                            info!("Broadcasting {}", forward);
+                                            info!("Broadcasting the MediaDownloadResponse");
                                             self.send_chat_message(0, target_id, forward.clone());
                                         }
                                         info!("Broadcasted media '{}' from GUI for server {}", media_name, self.id);
@@ -276,7 +279,7 @@ impl server {
                                             self.initiate_network_discovery();
                                         },
                                         other => {
-                                            warn!("⚠️ Unknown FloodRequired action: {}", other);
+                                            warn!("⚠ Unknown FloodRequired action: {}", other);
                                         }
                                     }
                                 }
@@ -530,6 +533,7 @@ impl server {
             },
             ["[Logout]"] => {
                 self.registered_clients.retain(|&id| id != client_id);
+                info!("👀👀👀 Client {} has been logged out, now the registered clients are: {:?} 👀👀👀", client_id, self.registered_clients);
                 info!("Client {} logged out from session {}", client_id, session_id);
             },
             _ => {
@@ -738,7 +742,7 @@ impl server {
                 }
             } else {
                 error!(
-                "⚠️ hop_index {} out of bounds in hops {:?}",
+                "⚠ hop_index {} out of bounds in hops {:?}",
                 packet.routing_header.hop_index,
                 packet.routing_header.hops
             );
@@ -843,7 +847,7 @@ impl server {
 
     }
     pub fn compute_best_path(&self, from: NodeId, to: NodeId) -> Option<Vec<NodeId>> {
-        self.network_graph.best_path(from, to)
-    }
+        self.network_graph.best_path(from,to)
+        }
 
 }

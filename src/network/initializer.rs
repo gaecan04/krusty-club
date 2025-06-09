@@ -383,23 +383,23 @@ impl wg_2024::drone::Drone for MyDrone {
     fn run(&mut self) {
         println!("Running drone {} with PDR {}", self.id, self.pdr);
 
-       /* // Real implementation would handle packets and controller commands
-        loop {
-            select! {
-                recv(self.packet_recv) -> packet => {
-                    if let Ok(packet) = packet {
-                        println!("Drone {} received packet", self.id);
-                        // Process packet logic here
-                    }
-                }
-                recv(self.controller_recv) -> command => {
-                    if let Ok(command) = command {
-                        println!("Drone {} received command", self.id);
-                        // Process command logic here
-                    }
-                }
-            }
-        }*/
+        /* // Real implementation would handle packets and controller commands
+         loop {
+             select! {
+                 recv(self.packet_recv) -> packet => {
+                     if let Ok(packet) = packet {
+                         println!("Drone {} received packet", self.id);
+                         // Process packet logic here
+                     }
+                 }
+                 recv(self.controller_recv) -> command => {
+                     if let Ok(command) = command {
+                         println!("Drone {} received command", self.id);
+                         // Process command logic here
+                     }
+                 }
+             }
+         }*/
     }
 }
 
@@ -837,7 +837,7 @@ impl NetworkInitializer {
                     // client2
                     thread::spawn(move || {
                         println!("client2 spawned");
-                        let mut cl2 = client1::MyClient::new(client_id, client_rx, senders, HashMap::new(), None, HashSet::new());
+                        let mut cl2 = client2::MyClient::new(client_id, client_rx, senders);
                         cl2.run(gui_clone);
                     });
                 } else {
@@ -853,7 +853,7 @@ impl NetworkInitializer {
                     // client2 for even-indexed clients
                     thread::spawn(move || {
                         println!("client2 spawned");
-                        let mut cl2 = client1::MyClient::new(client_id, client_rx, senders, HashMap::new(), None, HashSet::new());
+                        let mut cl2 = client2::MyClient::new(client_id, client_rx, senders);
                         cl2.run(gui_clone);
                     });
                 } else {
@@ -1837,8 +1837,8 @@ mod channel_tests {
             controller.process_event(received);
         } else {
             panic!("No DroneEvent received in SimulationController");
-        }
-    }
+        }
+    }
 
 }
 */
