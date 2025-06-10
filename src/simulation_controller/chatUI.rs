@@ -3,9 +3,11 @@ use wg_2024::network::NodeId;
 use std::collections::HashMap;
 use crate::simulation_controller::gui_input_queue::{push_gui_message, new_gui_input_queue, SharedGuiInput};
 use std::fs;
+use std::io::{stdout, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
+use log::info;
 
 #[derive(Clone)]
 pub struct ChatMessage {
@@ -373,7 +375,15 @@ impl ChatUIState {
                                                 if let Some(client_id) = self.selected_client {
                                                     match std::fs::read(path) {
                                                         Ok(bytes) => {
+                                                            info!("🐛 GUI encoding started for: {}", media_name);
+
                                                             let base64_data = base64::encode(bytes);
+                                                            info!( "🐻🐻🐻🐻🐻🐻🐻
+                                                                → server: {} bytes, prefix = {:?}",
+                                                                base64_data.len(),
+                                                                &base64_data.as_bytes()[0..20]
+                                                            );
+
                                                             let msg = format!("[MediaBroadcast]::{}::{}", media_name, base64_data);
                                                             push_gui_message(&self.gui_input, client_id, msg);
                                                         }
@@ -510,6 +520,10 @@ impl ChatUIState {
                             match std::fs::read(path) {
                                 Ok(bytes) => {
                                     let base64_data = base64::encode(bytes);
+                                    println!( "🐻🐻🐻🐻🐻🐻🐻
+                                            → server: {} bytes, prefix = {:?}",
+                                            base64_data.len(),
+                                            &base64_data.as_bytes()[0..20]);
                                     let msg = format!("[MediaBroadcast]::{}::{}", media_name, base64_data);
 
                                     // ✅ Push it into the SERVER’s GUI input buffer, not client’s

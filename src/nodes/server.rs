@@ -231,7 +231,7 @@ impl server {
                                 println!("🧹 Server {} popped one msg from GUI", self.id);
 
                                 if let Some(stripped) = message.strip_prefix("[MediaBroadcast]::") {
-                                    info!("Server {} received message from GUI: {:?}", self.id, stripped);
+                                    info!("Server {} received message from GUI: {:.20}", self.id, stripped);
                                     let parts: Vec<&str> = stripped.splitn(2, "::").collect();
                                     if parts.len() == 2 {
                                         let media_name = parts[0].to_string();

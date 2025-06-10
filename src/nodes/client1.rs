@@ -403,6 +403,12 @@ impl MyClient {
                 if tokens.len() >= 3 {
                     let media_name = media;
                     let base64_data = base64;
+                    println!("🚀🚀🚀🚀🚀
+                        client: {} bytes, prefix = {:?}",
+                        base64.len(),
+                        &base64[0..20]
+                    );
+
                     if media_name.to_string() == "ERROR" && base64_data.to_string() == "NotFound" {
                         println!("Client {} received MediaDownloadResponse: Media not found.", self.id)                    } else {
                         println!("Client {} received MediaDownloadResponse for media '{}', data: ...", self.id, media_name);
