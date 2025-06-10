@@ -521,9 +521,9 @@ impl ChatUIState {
                                 Ok(bytes) => {
                                     let base64_data = base64::encode(bytes);
                                     println!( "🐻🐻🐻🐻🐻🐻🐻
-                                            → server: {} bytes, prefix = {:?}",
-                                            base64_data.len(),
-                                            &base64_data.as_bytes()[0..20]);
+                                                        → server: {} bytes, prefix = {:?}",
+                                                        base64_data.len(),
+                                                        &base64_data.as_bytes()[0..20]);
                                     let msg = format!("[MediaBroadcast]::{}::{}", media_name, base64_data);
 
                                     // ✅ Push it into the SERVER’s GUI input buffer, not client’s
