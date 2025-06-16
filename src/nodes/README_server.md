@@ -17,6 +17,22 @@ Includes:
 ---
 
 ## 🌐 `struct NetworkGraph`
+NetworkGraph
+├── Fields
+│   ├── graph
+│   ├── node_indices
+│   └── node_types
+│
+└── Methods
+├── new()
+├── add_node()
+├── add_link()
+├── remove_node()
+├── increment_drop()
+├── best_path()
+├── set_node_type()
+├── get_node_type()
+└── print_graph()
 The NetworkGraph struct plays a central role in maintaining a live view of the network topology and ensuring reliable routing between nodes.
 
 ### Purpose:
@@ -41,6 +57,30 @@ Represents the network as a bidirectional graph where nodes are clients, drones,
 ---
 
 ## 🖥 `struct server`
+Server
+├── Fields
+│   ├── id
+│   ├── received_fragments
+│   ├── fragment_lengths
+│   ├── packet_sender
+│   ├── packet_receiver
+│   ├── network_graph
+│   ├── registered_clients
+│   ├── chat_history
+│   ├── media_storage
+│   ├── seen_floods
+│   └── sent_fragments
+│
+└── Methods
+├── run()
+├── initiate_network_discovery()
+├── handle_fragment()
+├── handle_complete_message()
+├── send_chat_message()
+├── send_ack()
+├── handle_nack()
+├── handle_flood_request()
+└── handle_flood_response()
 
 ### Purpose:
 Handles incoming and outgoing packets, client interaction, flooding for discovery, and media/chat history.
