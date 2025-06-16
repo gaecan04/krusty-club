@@ -96,8 +96,12 @@ This method is responsible for:
 
 Parses command-based messages:
 - `[Login]::server_id` : registers client_id into server.registered_clients and sends a  format!("[LoginAck]::session_id") as a response to client
-
+  Example login from console: 
+  ![img_1.png](imgs_terminal_server/img_1.png)
 - `[ClientListRequest]`: sends a  format!("[ClientListResponse]::{}",clients)
+    Example from console:
+    ![img_2.png](imgs_terminal_server/img_2.png)
+    ![img_5.png](imgs_terminal_server/img_5.png)
 
 - `[ChatRequest]::target_id`: triggers a  format!("[ChatStart]::{}",success) message to client
 
@@ -108,8 +112,10 @@ Parses command-based messages:
 - `[ChatHistoryUpdate]::src_server::serialized_entry`: used to take updates of chat histories from other servers 🚨🚨🚨🚨
 
 - `[MediaUpload]::media_name::base64`: insert in media_storage a media --> sends format!("[MediaUploadAck]::{}", media_name)
-
+    Examples from log:
+    ![img_4.png](imgs_terminal_server/img_4.png)
 - `[MediaListRequest]`: sends format("[MediaListResponse]::{}", list)  where list contains all medias available on server.
+  ![img.png](imgs_terminal_server/img.png)
 
 - `[MediaDownloadRequest]::media_name`:  sends format!("[MediaDownloadResponse]::{}::{}", media_name, base64_data)
 
@@ -144,6 +150,8 @@ Messages that are too large to fit in a single packet are fragmented into 128-by
 
 ### `handle_nack(session_id, nack, packet, header)`
 - For `NackType::Dropped`: increase graph weight calling self.network_graph.increment_drop( from, to) and resend the packet using new best path ⌚⌚⌚⌚.
+  Example from console log:
+  ![img_3.png](imgs_terminal_server/img_3.png)
 - For `NackType::ErrorInRouting`: remove crashed drone by calling self.network_graph.remove_node(crashed_node_id).
 - For other types: send new `FloodRequest`.
 
