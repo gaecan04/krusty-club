@@ -69,7 +69,6 @@ This module is responsible for managing the core logic, GUI communication, and n
       ![image](https://github.com/user-attachments/assets/d3927f08-4338-4d90-ac5a-1aa8c941c183)
 
 * `Command Handling`: crash_drone(..), set_packet_drop_rate(..), add_link(..) while doing the necessary checks not to violate network connectivity; is_crash_allowed(...), is_removal_allowed(...), validate_new_drone(...)
-     
     ![image](https://github.com/user-attachments/assets/46380d2b-c7a4-41c6-8d13-7f4c293bfdbc)
 
 * `Node State & Type Access`: get_node_state(...), get_all_drone_ids(...), get_all_server_ids(...), registered_nodes(...) ...
