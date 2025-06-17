@@ -261,29 +261,64 @@ impl MyClient {
     }
 
 
-    fn reassemble_packet (&mut self, fragment: &Fragment, packet : &mut Packet){
-        let session_id = packet.session_id; // since each message sent has its own, that is the same for each of its fragments, session_id we use them to store
-        if let Some(content)= self.received_packets.get_mut(&session_id){
-            for i in 0..fragment.data.len() {
-                content.insert( (fragment.fragment_index*128+(i as u64) ) as usize , fragment.data[i]);
+    fn reassemble_packet(&mut self, fragment: &Fragment, packet: &mut Packet) {
+        let session_id  = packet.session_id;
+        let total_frags = fragment.total_n_fragments as usize;
+        let frag_len    = fragment.length as usize;
+        let slot_bytes  = 128;
+
+        // Phase 1: borrow self to update buffer & detect completion
+        // ---------------------------------------------------------
+        let (need_ack, is_complete) = {
+            // 1a) get-or-create the slot-capacity buffer
+            let buf = self.received_packets
+                .entry(session_id)
+                .or_insert_with(|| vec![0u8; total_frags * slot_bytes]);
+            if buf.len() != total_frags * slot_bytes {
+                buf.resize(total_frags * slot_bytes, 0);
             }
-            if content.len() > ((fragment.total_n_fragments - 1) as usize)*128{
-                self.send_ack(packet, fragment);
+
+            // 1b) write this fragment into its slot
+            let offset = (fragment.fragment_index as usize) * slot_bytes;
+            buf[offset .. offset + frag_len]
+                .copy_from_slice(&fragment.data[..frag_len]);
+
+            // 1c) we always want to ACK whatever fragment arrives
+            let need_ack = true;
+
+            // 1d) check completion by ensuring each slot has some non-zero
+            let mut all_slots = true;
+            for idx in 0..total_frags {
+                let start = idx * slot_bytes;
+                let len = if idx + 1 == total_frags { frag_len } else { slot_bytes };
+                if buf[start .. start + len].iter().all(|&b| b == 0) {
+                    all_slots = false;
+                    break;
+                }
             }
-        }
-        else {
-            let mut content = vec![];
-            for i in 0..fragment.data.len() {
-                content.insert( (fragment.fragment_index*128+(i as u64) ) as usize , fragment.data[i]);
-            }
-            if content.len() > ((fragment.total_n_fragments - 1) as usize)*128{
-                self.send_ack(packet, fragment);
-                self.packet_command_handling(content.clone());
-            }
-            self.received_packets.insert(session_id ,content.clone());
-            info!("Packet with session_id {} fully received", session_id);
+
+            (need_ack, all_slots)
+        }; // <-- all borrows of self.received_packets are gone here
+
+        // Phase 2: ACK that fragment
+        // --------------------------
+        if need_ack {
+            self.send_ack(packet, fragment);
         }
 
+        // Phase 3: if complete, remove & dispatch
+        // ----------------------------------------
+        if is_complete {
+            // pluck out the fully‐assembled buffer
+            let buf = self.received_packets.remove(&session_id).unwrap();
+
+            // compute the true length from last fragment
+            let full_len   = (total_frags - 1) * slot_bytes + frag_len;
+            let message    = buf[..full_len].to_vec();
+
+            self.packet_command_handling(message);
+            info!("👻👻👻👻👻👻  Packet with session_id {} fully reassembled 👻👻👻👻👻👻", session_id);
+        }
     }
 
     fn packet_command_handling(&self, message : Vec<u8>) {
@@ -326,12 +361,13 @@ impl MyClient {
                 info!("The media could not be found.");
             },
             ["[MediaDownloadResponse]", media_name, base64_data]=>{
+                let base64_data_clean = base64_data.trim_end_matches('\0');
                 println!("🚀🚀🚀🚀🚀
                         ← client: {} bytes, prefix = {:?}",
-                        base64_data.len(),
-                        &base64_data[0..20]
-                    );
-                if let Err(e) = Self::display_media(base64_data, media_name) {
+                         base64_data.len(),
+                         &base64_data[0..20]
+                );
+                if let Err(e) = Self::display_media( media_name , base64_data_clean) {
                     info!("Failed to display image: {}", e);
                 }
             },
@@ -900,8 +936,11 @@ impl MyClient {
                     Err(Box::new(io::Error::new(io::ErrorKind::Interrupted, "You are not chatting with any user.")))
                 }
             },
-            ["[MediaBroadcast]", media_name, _encoded_media] => {
+            ["[MediaBroadcast]", media_name, encoded_media] => {
                 info!("Broadcasting {} to all connected clients" , media_name);
+                if let Err(e) = Self::display_media( media_name , encoded_media) {
+                    info!("Failed to display image: {}", e);
+                }
                 Ok(command_string)
             },
             ["[MediaListRequest]"] => {

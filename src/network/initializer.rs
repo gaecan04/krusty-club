@@ -360,6 +360,7 @@ impl_drone_adapter!(RustasticDrone);
 impl_drone_adapter!(CppEnjoyersDrone);
 
 
+
 //So MyDrone is your fallback implementation, used only when a group’s implementation is missing or fails to register.
 impl wg_2024::drone::Drone for MyDrone {
     fn new(

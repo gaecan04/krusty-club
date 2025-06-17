@@ -1,3 +1,4 @@
+//SERVER
 use petgraph::algo::dijkstra;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -10,8 +11,13 @@ use log::{info, error, warn, debug};
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
 use std::collections::VecDeque;
+use std::fs;
+use std::io::Cursor;
+//use base64::Engine;
+//use base64::engine::general_purpose::STANDARD;
 use crate::simulation_controller::gui_input_queue::SharedGuiInput;
 use crossbeam_channel::select;
+//use image::ImageReader;
 use rand::random;
 
 #[derive(Clone, Debug)]
@@ -113,7 +119,7 @@ impl NetworkGraph {
                 path.push(self.graph[prev]);
                 current = prev;
             } else {
-                println!("⚠ Incomplete path from {} to {}", source, target);
+                println!("⚠️ Incomplete path from {} to {}", source, target);
                 return None;
             }
         }
@@ -193,7 +199,7 @@ impl server {
         let routing_header = SourceRoutingHeader::empty_route(); // ignored by drones for FloodRequest
 
         let packet = Packet::new_flood_request(routing_header, flood_id, flood_request);
-        info!("♥♥♥♥♥♥♥ server has sender to this drones: {:?}", self.packet_sender);
+        info!("♥️♥️♥️♥️♥️♥️♥️ server has sender to this drones: {:?}", self.packet_sender);
         //let mut sent_to = HashSet::new();
         for (&neighbor_id, sender) in &self.packet_sender {
             if let Err(e) = sender.send(packet.clone()) {
@@ -215,116 +221,123 @@ impl server {
         info!("server {} network graph is {:?}", self.id, self.network_graph);
         loop {
             select! {
-            // ⏱ Every second: pop one GUI message
-                recv(tick) -> _ => {
-                    if discovery_started==false {
-                        discovery_started=true;
-                        self.initiate_network_discovery();
-                        info!("✅ Server {} initiated network discovery", self.id);
-                    }
-                    //self.network_graph.print_graph();
-                    if let Ok(mut buffer) = gui_buffer_input.lock() {
-                        buffer.entry(self.id as NodeId).or_insert_with(Vec::new);
+                // ⏱ Every second: pop one GUI message
+                    recv(tick) -> _ => {
+                        if discovery_started==false {
+                            discovery_started=true;
+                            self.initiate_network_discovery();
+                            info!("✅ Server {} initiated network discovery", self.id);
+                        }
+                        //self.network_graph.print_graph();
+                        if let Ok(mut buffer) = gui_buffer_input.lock() {
+                            buffer.entry(self.id as NodeId).or_insert_with(Vec::new);
 
-                        if let Some(messages) = buffer.get_mut(&(self.id as NodeId)) {
-                            if let Some(message) = messages.pop() {
-                                println!("🧹 Server {} popped one msg from GUI", self.id);
+                            if let Some(messages) = buffer.get_mut(&(self.id as NodeId)) {
+                                if let Some(message) = messages.pop() {
+                                    println!("🧹 Server {} popped one msg from GUI", self.id);
 
-                                if let Some(stripped) = message.strip_prefix("[MediaBroadcast]::") {
-                                    info!("Server {} received message from GUI: {:.20}", self.id, stripped);
-                                    let parts: Vec<&str> = stripped.splitn(2, "::").collect();
-                                    if parts.len() == 2 {
-                                        let media_name = parts[0].to_string();
-                                        let base64_data = parts[1].to_string();
-                                        self.media_storage.insert(media_name.clone(), (self.id, base64_data.clone()));
-                                        if let Some((owner, full_data)) = self.media_storage.get(&media_name) {
-                                            let preview = full_data
-                                                .chars()
-                                                .take(10)
-                                                .collect::<String>();
-                                            info!(
-                                                "Media stored in server '{}' is: ({}, \"{}…\")",
-                                                media_name,
-                                                owner,
-                                                preview
-                                            );
+                                    if let Some(stripped) = message.strip_prefix("[MediaBroadcast]::") {
+                                        info!("Server {} received message from GUI: {:?}", self.id, stripped);
+                                        let parts: Vec<&str> = stripped.splitn(2, "::").collect();
+                                        if parts.len() == 2 {
+                                            let media_name = parts[0].to_string();
+                                            let base64_data = parts[1].to_string();
+                                            self.media_storage.insert(media_name.clone(), (self.id, base64_data.clone()));
+                                            if let Some((owner, full_data)) = self.media_storage.get(&media_name) {
+                                                let preview = full_data
+                                                    .chars()
+                                                    .take(10)
+                                                    .collect::<String>();
+                                                info!(
+                                                    "Media stored in server '{}' is: ({}, \"{}…\")",
+                                                    media_name,
+                                                    owner,
+                                                    preview
+                                                );
+                                            }
+                                            /*
+                                             if let Err(e) = Self::display_media(media_name.as_str(), base64_data.as_str() ) {
+                                                info!("Failed to display image: {}", e);
+                                            }*/
+                                            info!("Registered clients to server: {:?}", self.registered_clients);
+                                            let clients= self.registered_clients.clone();
+
+                                            for target_id in clients {
+                                                info!("Registered clients in {} are {:?}", self.id, self.registered_clients);
+                                                let forward = format!("[MediaDownloadResponse]::{}::{}", media_name, base64_data);
+                                                info!("Broadcasting the MediaDownloadResponse");
+                                                self.send_chat_message(0, target_id, forward.clone());
+                                            }
+                                            //info!("Broadcasted media '{}' from GUI for server {}", media_name, self.id);
+
+
+
                                         }
-                                        info!("Registered clients to server: {:?}", self.registered_clients);
-                                        let clients= self.registered_clients.clone();
-
-                                        for target_id in clients {
-                                            info!("Registered clients in {} are {:?}", self.id, self.registered_clients);
-                                            let forward = format!("[MediaDownloadResponse]::{}::{}", media_name, base64_data);
-                                            info!("Broadcasting the MediaDownloadResponse");
-                                            self.send_chat_message(0, target_id, forward.clone());
-                                        }
-                                        info!("Broadcasted media '{}' from GUI for server {}", media_name, self.id);
                                     }
-                                }
 
-                                ///IN TEORIA THIS IS WHAT SERVER SHOULD DO:
-                                if let Some(stripped) = message.strip_prefix("[FloodRequired]::") {
-                                    info!("Server {} received message from GUI: FloodRequired::{:?}", self.id, stripped);
-                                    match stripped {
-                                        "AddSender" => {
-                                            info!("--> FloodRequired: AddSender detected. Triggering rediscovery.");
-                                            self.initiate_network_discovery();
-                                        },
-                                        "SpawnDrone" => {
-                                            info!("--> FloodRequired: SpawnDrone detected. Triggering rediscovery.");
-                                            self.initiate_network_discovery();
-                                        },
-                                        "RemoveSender" => {
-                                            info!("--> FloodRequired: RemoveSender detected. Triggering rediscovery.");
-                                            self.initiate_network_discovery();
-                                        },
-                                        other => {
-                                            warn!("⚠ Unknown FloodRequired action: {}", other);
+                                    ///IN TEORIA THIS IS WHAT SERVER SHOULD DO:
+                                    if let Some(stripped) = message.strip_prefix("[FloodRequired]::") {
+                                        info!("Server {} received message from GUI: FloodRequired::{:?}", self.id, stripped);
+                                        match stripped {
+                                            "AddSender" => {
+                                                info!("--> FloodRequired: AddSender detected. Triggering rediscovery.");
+                                                self.initiate_network_discovery();
+                                            },
+                                            "SpawnDrone" => {
+                                                info!("--> FloodRequired: SpawnDrone detected. Triggering rediscovery.");
+                                                self.initiate_network_discovery();
+                                            },
+                                            "RemoveSender" => {
+                                                info!("--> FloodRequired: RemoveSender detected. Triggering rediscovery.");
+                                                self.initiate_network_discovery();
+                                            },
+                                            other => {
+                                                warn!("⚠️ Unknown FloodRequired action: {}", other);
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                    }
-                },
+                    },
 
-            // 📡 Incoming network packet
-                 recv(self.packet_receiver) -> packet_result => {
-                    match packet_result {
-                        Ok(mut packet) => {
-                            info!("Server {} received packet :{:?}", self.id, packet);
-                            match &packet.pack_type {
-                                PacketType::MsgFragment(fragment) => {
-                                    info!("SERVER RECEIVED MESSAGE FRAGMENT");
-                                    self.send_ack(&packet, &fragment);
-                                    self.handle_fragment(packet.session_id, fragment, packet.routing_header);
-                                }
-                                PacketType::Nack(nack) => {
-                                    self.handle_nack(packet.session_id, nack, &packet.clone(), packet.routing_header);
-                                    //RECUPERO SESSION ID E FRAGMENT INDEX;
-                                }
-                                PacketType::Ack(_) => { /* no-op */
-                                    info!("Server {} received ACK packet", self.id);
-                                }
-                                PacketType::FloodRequest(flood_request) => {
-                                    info!("server {} recevied FloodRequest {:?}", self.id, flood_request);
-                                    self.handle_flood_request(packet.session_id, flood_request, packet.routing_header);
-                                }
-                                PacketType::FloodResponse(flood_response) => {
-                                    info!("server {} received FloodResponse {:?}", self.id, flood_response.path_trace);
-                                    self.handle_flood_response(packet.session_id, flood_response, packet.routing_header);
-                                }
-                                _ => {
-                                    warn!("Server {} received unexpected packet type.", self.id);
+                // 📡 Incoming network packet
+                     recv(self.packet_receiver) -> packet_result => {
+                        match packet_result {
+                            Ok(mut packet) => {
+                                info!("Server {} received packet :{:?}", self.id, packet);
+                                match &packet.pack_type {
+                                    PacketType::MsgFragment(fragment) => {
+                                        info!("SERVER RECEIVED MESSAGE FRAGMENT");
+                                        self.send_ack(&packet, &fragment);
+                                        self.handle_fragment(packet.session_id, fragment, packet.routing_header);
+                                    }
+                                    PacketType::Nack(nack) => {
+                                        self.handle_nack(packet.session_id, nack, &packet.clone(), packet.routing_header);
+                                        //RECUPERO SESSION ID E FRAGMENT INDEX;
+                                    }
+                                    PacketType::Ack(_) => { /* no-op */
+                                        info!("Server {} received ACK packet", self.id);
+                                    }
+                                    PacketType::FloodRequest(flood_request) => {
+                                        info!("server {} recevied FloodRequest {:?}", self.id, flood_request);
+                                        self.handle_flood_request(packet.session_id, flood_request, packet.routing_header);
+                                    }
+                                    PacketType::FloodResponse(flood_response) => {
+                                        info!("server {} received FloodResponse {:?}", self.id, flood_response.path_trace);
+                                        self.handle_flood_response(packet.session_id, flood_response, packet.routing_header);
+                                    }
+                                    _ => {
+                                        warn!("Server {} received unexpected packet type.", self.id);
+                                    }
                                 }
                             }
-                        }
-                        Err(e) => {
-                            warn!("❌ Server {} failed to receive packet: {}", self.id, e);
+                            Err(e) => {
+                                warn!("❌ Server {} failed to receive packet: {}", self.id, e);
+                            }
                         }
                     }
                 }
-            }
         }
     }
 
@@ -373,7 +386,6 @@ impl server {
         let tokens: Vec<&str> = message_string.trim().splitn(3, "::").collect();
         info!("Handling complete message");
         match tokens.as_slice() {
-
             ["[Login]", server_id_str] => {
                 info!(" --------------------------- Received login -----------------------------");
                 if server_id_str.parse::<NodeId>() == Ok(self.id) {
@@ -381,14 +393,13 @@ impl server {
                         self.registered_clients.push(client_id);
                         info!("Client {} registered to this server", client_id);
 
-                        let login_acknowledgement= format!("[LoginAck]::{}", session_id);
-                        self.send_chat_message(session_id, client_id,login_acknowledgement);
+                        let login_acknowledgement = format!("[LoginAck]::{}", session_id);
+                        self.send_chat_message(session_id, client_id, login_acknowledgement);
                         info!("🚗🚗🚗🚗 LoginAck sent");
                     }
                 } else {
                     error!("server_id in Login request is not the id of the server receiving the fragment!")
                 }
-
             },
             ["[ClientListRequest]"] => {
                 info!(" --------------------------- Received ClientListRequest -----------------------------");
@@ -396,7 +407,6 @@ impl server {
                 info!("server has the following connected clients: {:?}", clients);
                 let response = format!("[ClientListResponse]::{:?}", clients);
                 self.send_chat_message(session_id, client_id, response);
-
             },
             ["[ChatRequest]", target_id_str] => {
                 info!(" --------------------------- Received ChatRequest ----------------------------");
@@ -427,16 +437,17 @@ impl server {
                     }
                 }
             },
-            ["[HistoryRequest]", source_id, target_id_str,] => { //when client wants to see chronology
+            ["[HistoryRequest]", source_id, target_id_str, ] => { //when client wants to see chronology
                 info!(" ----------------------- Received HistoryRequest ----------------------------");
                 if let Ok(target_id) = target_id_str.parse::<NodeId>() {
-                    let client_1 = source_id.parse::<NodeId>().unwrap_or(client_id);
-                    let client_2 = target_id;
-                    let key = (client_1.min(client_2), client_1.max(client_2));
-                    let history = self.chat_history.get(&key);
-                    let response = match history {
-                        Some(messages) => messages.iter().cloned().collect::<Vec<String>>().join("\n"),
-                        None => "No history available".to_string(),
+                    // chiave canonica ordina i due ID
+                    let c1 = source_id.parse::<NodeId>().unwrap_or(client_id);
+                    let c2 = target_id;
+                    let key = (c1.min(c2), c1.max(c2));
+                    let response = if let Some(messages) = self.chat_history.get(&key) {
+                        messages.iter().cloned().collect::<Vec<_>>().join("\n")
+                    } else {
+                        "No history available".into()
                     };
                     self.send_chat_message(session_id, client_id, format!("[HistoryResponse]::{}", response));
                 }
@@ -445,7 +456,7 @@ impl server {
             ["[ChatHistoryUpdate]", source_server, serialized_entry] => {
                 if let Ok(((id1, id2), history)) = serde_json::from_str::<((NodeId, NodeId), VecDeque<String>)>(serialized_entry) {
                     self.chat_history.insert((id1, id2), history);
-                    info!("Received and saved full chat history entry from server {}", source_server);
+                    info!(" 🚨🚨🚨🚨 Received and saved full chat history entry from server {} 🚨🚨🚨🚨", source_server);
                 } else {
                     error!("Failed to parse full chat history entry from {}", source_server);
                 }
@@ -457,7 +468,6 @@ impl server {
                 self.media_storage.insert(media_name.clone().parse().unwrap(), (client_id, base64_data.parse().unwrap()));
                 let confirm = format!("[MediaUploadAck]::{}", media_name);
                 self.send_chat_message(session_id, client_id, confirm);
-
             },
             //Providing Media list if asked by client --> so they can get to know before what to download
             ["[MediaListRequest]"] => {
@@ -471,7 +481,7 @@ impl server {
             },
             ["[MediaDownloadRequest]", media_name] => {
                 info!(" ------------------------ Received MediaDownload Request -----------------------");
-                let response = if let Some((_owner,base64_data)) = self.media_storage.get(*media_name) {
+                let response = if let Some((_owner, base64_data)) = self.media_storage.get(*media_name) {
                     format!("[MediaDownloadResponse]::{}::{}", media_name, base64_data)
                 } else {
                     "[MediaDownloadResponse]::ERROR::NotFound".to_string()
@@ -484,7 +494,7 @@ impl server {
                 info!(" ------------------------ Received MediaBroadcast message by client: {} --------------------", client_id);
                 self.media_storage.insert(media_name.to_string(), (client_id, base64_data.to_string()));
 
-                let clients= self.registered_clients.clone();
+                let clients = self.registered_clients.clone();
                 for target_id in clients {
                     // Avoid sending to the sender
                     if target_id != client_id {
@@ -500,37 +510,87 @@ impl server {
                 info!("Client {} finished chat in session {}", client_id, session_id);
                 //get the chat history for the session --> only one for each client.
                 // Find the exact chat history (could be based on two clients)
-                let target_client_id= target_client_str.parse::<NodeId>().unwrap();
+                let target_client_id = target_client_str.parse::<NodeId>().unwrap();
                 let entry = self.chat_history.iter()
                     .find(|((a, b), _)| *a == client_id || *b == target_client_id); // optionally refine match
 
                 if let Some(((id1, id2), history)) = entry {
                     let full_entry = ((*id1, *id2), history.clone());
-                    if let Ok(serialized) = serde_json::to_string(&full_entry) {
-                        let server_node_ids: Vec<NodeId> = self.network_graph
-                            .node_types
-                            .iter()
-                            .filter_map(|(&node_id, node_type)| {
-                                if node_id != self.id && *node_type == NodeType::Server {
-                                    Some(node_id)
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect();
-                        for node_id in server_node_ids {
-                            if self.network_graph.get_node_type(node_id) == Some(&NodeType::Server) && node_id != self.id {
-                                if let Some(route) = self.compute_best_path(self.id, node_id) {
-                                    let routing_header = SourceRoutingHeader::with_first_hop(route);
-                                    let msg = format!("[ChatHistoryUpdate]::{}::{}", self.id, serialized);
-                                    self.send_chat_message(session_id, node_id, msg);
+                    // ricostruisci la stessa chiave canonica
+                    let key = {
+                        let a = client_id.min(target_client_id);
+                        let b = client_id.max(target_client_id);
+                        (a, b)
+                    };
+                    if let Some(history) = self.chat_history.get(&key) {
+                        let full_entry = (key, history.clone());
+                        if let Ok(serialized) = serde_json::to_string(&full_entry) {
+                            //find servers in the network graph
+                            let server_node_ids: Vec<NodeId> = self.network_graph
+                                .node_types
+                                .iter()
+                                .filter_map(|(&node_id, node_type)| {
+                                    if node_id != self.id && *node_type == NodeType::Server {
+                                        Some(node_id)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            for node_id in server_node_ids {
+                                info!(" 🚨🚨🚨 Computing path towards: {} 🚨🚨🚨", node_id);
+                                if self.network_graph.get_node_type(node_id) == Some(&NodeType::Server) && node_id != self.id {
+                                    if let Some(route) = self.compute_best_path(self.id, node_id) {
+                                        let routing_header = SourceRoutingHeader::with_first_hop(route);
+                                        let msg = format!("[ChatHistoryUpdate]::{}::{}", self.id, serialized);
+                                        info!("🚨🚨🚨🚨🚨  Sending chat history update from server {} to {}  🚨🚨🚨🚨🚨", self.id, node_id );
+                                        self.send_chat_message(session_id, node_id, msg);
+                                    }
                                 }
                             }
                         }
                     }
+                    //update the chat history on the other servers.
                 }
-                //update the chat history on the other servers.
             },
+            /*
+                ["[ChatFinish]", target_client_str] => {
+                    info!("Client {} finished chat in session {}", client_id, session_id);
+                    //get the chat history for the session --> only one for each client.
+                    // Find the exact chat history (could be based on two clients)
+                    let target_client_id= target_client_str.parse::<NodeId>().unwrap();
+                    let entry = self.chat_history.iter()
+                        .find(|((a, b), _)| *a == client_id || *b == target_client_id); // optionally refine match
+
+                    if let Some(((id1, id2), history)) = entry {
+                        let full_entry = ((*id1, *id2), history.clone());
+                        if let Ok(serialized) = serde_json::to_string(&full_entry) {
+                            //find servers in the network graph
+                            let server_node_ids: Vec<NodeId> = self.network_graph
+                                .node_types
+                                .iter()
+                                .filter_map(|(&node_id, node_type)| {
+                                    if node_id != self.id && *node_type == NodeType::Server {
+                                        Some(node_id)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            for node_id in server_node_ids {
+                                if self.network_graph.get_node_type(node_id) == Some(&NodeType::Server) && node_id != self.id {
+                                    if let Some(route) = self.compute_best_path(self.id, node_id) {
+                                        let routing_header = SourceRoutingHeader::with_first_hop(route);
+                                        let msg = format!("[ChatHistoryUpdate]::{}::{}", self.id, serialized);
+                                        info!("🚨🚨🚨🚨🚨  Sending chat history update from server {} to {}  🚨🚨🚨🚨🚨", self.id, node_id );
+                                        self.send_chat_message(session_id, node_id, msg);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    //update the chat history on the other servers.
+                },*/
             ["[Logout]"] => {
                 self.registered_clients.retain(|&id| id != client_id);
                 info!("👀👀👀 Client {} has been logged out, now the registered clients are: {:?} 👀👀👀", client_id, self.registered_clients);
@@ -544,9 +604,10 @@ impl server {
     }
 
 
+
+
     //fn process_nack(&mut self, nack: &Nack, packet: &mut Packet)
     fn handle_nack(&mut self, session_id: u64, nack: &Nack, packet: &Packet, routing_header: SourceRoutingHeader) {
-
         info!("Recieved NACK for fragment {} with type {:?} in session {}", nack.fragment_index, nack.nack_type, session_id);
 
         match nack.nack_type {
@@ -566,10 +627,9 @@ impl server {
                 warn!("Received Nack::Dropped, modifying the costs in the graph");
 
                 ///TO DO: DEVO RIMANDARE IL PACCHETTO CHE VIENE PERSO
-                let session_id= packet.session_id.clone();
-                let fragment_index= nack.fragment_index;
+                let session_id = packet.session_id.clone();
+                let fragment_index = nack.fragment_index;
                 if let Some(fragment) = self.sent_fragments.get(&(session_id, fragment_index)).cloned() {
-
                     let target_id = fragment.1;
 
                     // Recompute best path
@@ -611,10 +671,10 @@ impl server {
 
                 match node_type {
                     // ????? review protocol nack behaviour
-                    Some(NodeType:: Server) => {
+                    Some(NodeType::Server) => {
                         warn!("Attempted to remove Server node {} — action skipped.", crashed_node_id);
                     }
-                    Some(NodeType:: Client) => {
+                    Some(NodeType::Client) => {
                         warn!("Attempted to remove client node {} — action skipped.", crashed_node_id);
                     }
                     //the crashed node is a Drone
@@ -629,7 +689,6 @@ impl server {
                         warn!("Node type for {} not found — skipping removal.", crashed_node_id);
                     }
                 }
-
             },
 
             _ => {
@@ -684,14 +743,14 @@ impl server {
             },
             session_id: packet.session_id,
         };
-        if let Some(next_hop) = ack_packet.routing_header.hops.get(1){
-            if let Some(sender) = self.packet_sender.get(&next_hop){
-                match sender.try_send(ack_packet.clone()) {
+        if let Some(next_hop) = ack_packet.routing_header.hops.get(1) {
+            if let Some(sender) = self.packet_sender.get(&next_hop) {
+                match sender.send(ack_packet.clone()) {
                     Ok(()) => {
-                        sender.send(ack_packet.clone()).unwrap();
+                        //sender.send(ack_packet.clone()).unwrap();
                         info!("Server sent ack to node {} for session {}", next_hop, ack_packet.session_id);
                     }
-                    Err(e)=>{
+                    Err(e) => {
                         println!("Error sending packet: {:?}", e);
                     }
                 }
@@ -699,15 +758,13 @@ impl server {
                 println!("No sender found for {:?}", next_hop);
             }
         }
-
     }
-
 
     fn handle_flood_request(&mut self, session_id: u64, flood_request: &FloodRequest, _source_routing_header: SourceRoutingHeader) {
         info!(
-        "📨 Received FloodRequest from {} with ID {}",
-        flood_request.initiator_id, flood_request.flood_id
-    );
+            "📨 Received FloodRequest from {} with ID {}",
+            flood_request.initiator_id, flood_request.flood_id
+            );
 
         let flood_req = (flood_request.flood_id, flood_request.initiator_id);
 
@@ -723,11 +780,11 @@ impl server {
 
             // ✅ Logging correct path
             info!(
-            "📤 Sending FloodResponse from {} to {} | path: {:?}",
-            self.id,
-            flood_request.initiator_id,
-            packet.routing_header.hops
-        );
+                "📤 Sending FloodResponse from {} to {} | path: {:?}",
+                self.id,
+                flood_request.initiator_id,
+                packet.routing_header.hops
+            );
 
             // Send to the next hop in reverse path (i.e., toward initiator)
             if let Some(&next_hop) = packet.routing_header.hops.get(packet.routing_header.hop_index) {
@@ -742,10 +799,10 @@ impl server {
                 }
             } else {
                 error!(
-                "⚠ hop_index {} out of bounds in hops {:?}",
-                packet.routing_header.hop_index,
-                packet.routing_header.hops
-            );
+                    "⚠️ hop_index {} out of bounds in hops {:?}",
+                    packet.routing_header.hop_index,
+                    packet.routing_header.hops
+                );
             }
             return;
         }
@@ -778,8 +835,6 @@ impl server {
         }
     }
 
-
-
     fn handle_flood_response(&mut self, session_id: u64, flood_response: &FloodResponse, routing_header: SourceRoutingHeader) {
         info!("Received FloodResponse for flood_id {} in session {}", flood_response.flood_id, session_id);
         //obiettivo: fare tutta quella roba strana con il grafo.
@@ -791,63 +846,63 @@ impl server {
                 self.network_graph.add_link(*a_id, *a_type, *b_id, *b_type);
             }
         }
-
-
     }
-
-    fn send_chat_message(&mut self, session_id:u64, target_id: NodeId, msg: String) {
+    fn send_chat_message(&mut self, session_id: u64, target_id: NodeId, msg: String) {
         let data = msg.as_bytes();
-        let mut fragment_data = [0u8; 128];
-        let length = data.len().min(128);
-        fragment_data[..length].copy_from_slice(&data[..length]);
+        let total_fragments = ((data.len() + 127) / 128) as u64;
 
-        let fragment = Fragment {
-            fragment_index: 0,
-            total_n_fragments: 1,
-            length: length as u8,
-            data: fragment_data,
-        };
-
-        //find the best path from server to receiver client, using network_graph: NetworkGraph and best_path()
-        let source= self.id;
-        let destination= target_id;
-        let hops= match self.network_graph.best_path(source, target_id){
-            Some(path) => {path}
+        let source = self.id;
+        let destination = target_id;
+        let hops = match self.network_graph.best_path(source, target_id) {
+            Some(path) => path,
             None => {
                 error!("No path found from server {} to client {}", source, destination);
                 return;
             }
         };
-        let packet = Packet {
-            session_id,
-            routing_header: SourceRoutingHeader {
-                hop_index: 1,
-                hops,
-            },
-            pack_type: PacketType::MsgFragment(fragment.clone()),
-        };
 
-        //insert the sent packet in the hashmap sent_fragments --> in case of nack::Dropped i can retrieve the missing fragment.
-        self.sent_fragments.insert((session_id, fragment.fragment_index.clone()), (fragment.clone(), target_id));
+        for (i, chunk) in data.chunks(128).enumerate() {
+            let mut fragment_data = [0u8; 128];
+            fragment_data[..chunk.len()].copy_from_slice(chunk);
 
-        let next_hop = packet.routing_header.hops.get(1)
-            .or_else(|| packet.routing_header.hops.get(0));  // fallback to first node if only one exists
-        if let Some(&next_hop_id) = next_hop {
-            if let Some(sender) = self.packet_sender.get(&next_hop_id) {
-                info!("Sending the packet to {}", next_hop_id);
-                if let Err(e) = sender.send(packet) {
-                    error!("Failed to send chat response to {}: {:?}", target_id, e);
+            let fragment = Fragment {
+                fragment_index: i as u64,
+                total_n_fragments: total_fragments,
+                length: chunk.len() as u8,
+                data: fragment_data,
+            };
+
+            let packet = Packet {
+                session_id,
+                routing_header: SourceRoutingHeader {
+                    hop_index: 1,
+                    hops: hops.clone(), // clone needed for multiple fragments
+                },
+                pack_type: PacketType::MsgFragment(fragment.clone()),
+            };
+
+            // Save for possible NACK-based resend
+            self.sent_fragments.insert((session_id, i as u64), (fragment.clone(), target_id));
+
+            let next_hop = packet.routing_header.hops.get(1)
+                .or_else(|| packet.routing_header.hops.get(0));
+            if let Some(&next_hop_id) = next_hop {
+                if let Some(sender) = self.packet_sender.get(&next_hop_id) {
+                    info!("✈️✈️✈️✈️✈️✈️✈️✈️   Sending fragment {} of {} to {}     ✈️✈️✈️✈️✈️✈️✈️✈️", i + 1, total_fragments, next_hop_id);
+                    if let Err(e) = sender.send(packet) {
+                        error!("Failed to send fragment {} to {}: {:?}", i, target_id, e);
+                    }
+                } else {
+                    error!("No sender available for node {}", next_hop_id);
                 }
             } else {
-                error!("No sender available for node {}", next_hop_id);
+                error!("No valid next hop from {} to {} — route: {:?}", source, destination, hops);
             }
-        } else {
-            error!("Hop index 1 not found in route from {} to {} — route: {:?}", source, destination, packet.routing_header.hops);
         }
-
     }
+
     pub fn compute_best_path(&self, from: NodeId, to: NodeId) -> Option<Vec<NodeId>> {
-        self.network_graph.best_path(from,to)
-        }
+        self.network_graph.best_path(from, to)
+    }
 
 }
