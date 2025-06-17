@@ -360,6 +360,7 @@ impl_drone_adapter!(RustasticDrone);
 impl_drone_adapter!(CppEnjoyersDrone);
 
 
+
 //So MyDrone is your fallback implementation, used only when a group’s implementation is missing or fails to register.
 impl wg_2024::drone::Drone for MyDrone {
     fn new(
@@ -383,23 +384,23 @@ impl wg_2024::drone::Drone for MyDrone {
     fn run(&mut self) {
         println!("Running drone {} with PDR {}", self.id, self.pdr);
 
-       /* // Real implementation would handle packets and controller commands
-        loop {
-            select! {
-                recv(self.packet_recv) -> packet => {
-                    if let Ok(packet) = packet {
-                        println!("Drone {} received packet", self.id);
-                        // Process packet logic here
-                    }
-                }
-                recv(self.controller_recv) -> command => {
-                    if let Ok(command) = command {
-                        println!("Drone {} received command", self.id);
-                        // Process command logic here
-                    }
-                }
-            }
-        }*/
+        /* // Real implementation would handle packets and controller commands
+         loop {
+             select! {
+                 recv(self.packet_recv) -> packet => {
+                     if let Ok(packet) = packet {
+                         println!("Drone {} received packet", self.id);
+                         // Process packet logic here
+                     }
+                 }
+                 recv(self.controller_recv) -> command => {
+                     if let Ok(command) = command {
+                         println!("Drone {} received command", self.id);
+                         // Process command logic here
+                     }
+                 }
+             }
+         }*/
     }
 }
 
@@ -1837,8 +1838,8 @@ mod channel_tests {
             controller.process_event(received);
         } else {
             panic!("No DroneEvent received in SimulationController");
-        }
-    }
+        }
+    }
 
 }
 */

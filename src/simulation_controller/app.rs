@@ -39,6 +39,7 @@ pub struct NetworkApp {
     is_simulation_running: bool,
     zoom_level: f32,
     pan_offset: Vec2,
+
     available_topologies: Vec<String>,
     network_config: Option<Arc<Mutex<ParsedConfig>>>,
     controller_send: Option<Sender<DroneEvent>>,
@@ -435,30 +436,56 @@ impl NetworkApp {
 
     fn render_welcome_screen(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space(100.0);
+            let available_height = ui.available_height();
+            let available_width = ui.available_width();
 
-                // Club Name (Large, Prominent)
-                ui.label(RichText::new("Drone Network Simulation Club")
-                    .color(Color32::BLUE)
-                    .size(30.0));
+            // Center everything
+            ui.allocate_ui_at_rect(
+                egui::Rect::from_center_size(
+                    egui::Pos2::new(available_width / 2.0, available_height / 2.0),
+                    egui::Vec2::new(300.0, 300.0), // dimensione del contenitore
+                ),
+                |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(10.0);
 
-                ui.add_space(50.0);
+                        ui.label(
+                            RichText::new("Krusty Club")
+                                .color(Color32::DARK_GRAY)
+                                .size(32.0)
+                                .strong(),
+                        );
+                        ui.add_space(40.0);
 
-                // Buttons with some spacing and styling
-                ui.vertical(|ui| {
-                    if ui.button("Start Simulation").clicked() {
-                        self.state=AppState::Simulation
-                    }
+                        // Titolo grande
+                        ui.label(
+                            RichText::new("Drone Network Simulation")
+                                .color(Color32::DARK_BLUE)
+                                .size(32.0)
+                                .strong(),
+                        );
 
-                    ui.add_space(20.0);
+                        ui.add_space(40.0);
 
-                    if ui.button("Close Application").clicked() {
-                        // TODO: Implement proper application closure
-                        std::process::exit(0);
-                    }
-                });
-            });
+                        // Bottoni ingranditi e centrati
+                        if ui
+                            .add_sized([200.0, 40.0], egui::Button::new("▶ Start Simulation"))
+                            .clicked()
+                        {
+                            self.state = AppState::Simulation;
+                        }
+
+                        ui.add_space(20.0);
+
+                        if ui
+                            .add_sized([200.0, 40.0], egui::Button::new("⛔ Close Application"))
+                            .clicked()
+                        {
+                            std::process::exit(0);
+                        }
+                    });
+                },
+            );
         });
     }
 
@@ -487,9 +514,9 @@ impl NetworkApp {
             // Compute optimal zoom (scale)
             let zoom_x = canvas_size.x * padding / graph_size.x;
             let zoom_y = canvas_size.y * padding / graph_size.y;
-            let optimal_zoom = zoom_x.min(zoom_y).clamp(0.5, 3.0); // restrict zoom range
+            let optimal_zoom = zoom_x.min(zoom_y).clamp(0.6, 3.0); // restrict zoom range
 
-            self.zoom_level = optimal_zoom;
+            self.zoom_level = 1.0;
             if let Some(r) = &mut self.network_renderer {
                 r.scale = optimal_zoom;
             }
@@ -561,6 +588,9 @@ impl NetworkApp {
         config_path: &str,
         gui_input: SharedGuiInput,
     ) -> Self {
+
+        cc.egui_ctx.set_visuals(egui::Visuals::light());
+
         let mut app = Self::new(cc);
 
         app.controller_send = Some(event_sender.clone());
