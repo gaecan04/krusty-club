@@ -436,30 +436,56 @@ impl NetworkApp {
 
     fn render_welcome_screen(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space(100.0);
+            let available_height = ui.available_height();
+            let available_width = ui.available_width();
 
-                // Club Name (Large, Prominent)
-                ui.label(RichText::new("Drone Network Simulation Club")
-                    .color(Color32::BLUE)
-                    .size(30.0));
+            // Center everything
+            ui.allocate_ui_at_rect(
+                egui::Rect::from_center_size(
+                    egui::Pos2::new(available_width / 2.0, available_height / 2.0),
+                    egui::Vec2::new(300.0, 300.0), // dimensione del contenitore
+                ),
+                |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(10.0);
 
-                ui.add_space(50.0);
+                        ui.label(
+                            RichText::new("Krusty Club")
+                                .color(Color32::DARK_GRAY)
+                                .size(32.0)
+                                .strong(),
+                        );
+                        ui.add_space(40.0);
 
-                // Buttons with some spacing and styling
-                ui.vertical(|ui| {
-                    if ui.button("Start Simulation").clicked() {
-                        self.state=AppState::Simulation
-                    }
+                        // Titolo grande
+                        ui.label(
+                            RichText::new("Drone Network Simulation")
+                                .color(Color32::DARK_BLUE)
+                                .size(32.0)
+                                .strong(),
+                        );
 
-                    ui.add_space(20.0);
+                        ui.add_space(40.0);
 
-                    if ui.button("Close Application").clicked() {
-                        // TODO: Implement proper application closure
-                        std::process::exit(0);
-                    }
-                });
-            });
+                        // Bottoni ingranditi e centrati
+                        if ui
+                            .add_sized([200.0, 40.0], egui::Button::new("▶ Start Simulation"))
+                            .clicked()
+                        {
+                            self.state = AppState::Simulation;
+                        }
+
+                        ui.add_space(20.0);
+
+                        if ui
+                            .add_sized([200.0, 40.0], egui::Button::new("⛔ Close Application"))
+                            .clicked()
+                        {
+                            std::process::exit(0);
+                        }
+                    });
+                },
+            );
         });
     }
 

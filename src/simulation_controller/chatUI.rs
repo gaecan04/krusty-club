@@ -514,34 +514,38 @@ impl ChatUIState {
                 }
 
                 if self.show_broadcast_list {
-                    ui.label("Choose file:");
-                    for (media_name, path) in &self.broadcast_files {
-                        if ui.button(media_name).clicked() {
-                            match std::fs::read(path) {
-                                Ok(bytes) => {
-                                    let base64_data = base64::encode(bytes);
-                                    println!( "🐻🐻🐻🐻🐻🐻🐻
-                                                        → server: {} bytes, prefix = {:?}",
-                                                        base64_data.len(),
-                                                        &base64_data.as_bytes()[0..20]);
-                                    let msg = format!("[MediaBroadcast]::{}::{}", media_name, base64_data);
-
-                                    // ✅ Push it into the SERVER’s GUI input buffer, not client’s
-                                    push_gui_message(&self.gui_input, server_id, msg.clone());
-                                    // Right after pushing the message:
-                                    //println!("📥 Pushed msg for NodeId {}: {}", server_id, msg);
-
-
-                                    self.broadcast_result_message = Some(format!("📤 Sent '{}' to server {}", media_name, server_id));
-                                    self.broadcast_result_time = Some(Instant::now());
-                                }
-                                Err(e) => {
-                                    self.broadcast_result_message = Some(format!("❌ Failed to read : {}", e));
-                                    self.broadcast_result_time = Some(Instant::now());
+                    egui::Window::new("Broadcast Media Files")
+                        .collapsible(false)
+                        .resizable(false)
+                        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]) // appears in center
+                        .show(ui.ctx(), |ui| {
+                            ui.label("Choose a file to broadcast:");
+                            for (media_name, path) in &self.broadcast_files {
+                                if ui.button(media_name).clicked() {
+                                    if let Some(server_id) = self.selected_server {
+                                        match std::fs::read(path) {
+                                            Ok(bytes) => {
+                                                let base64_data = base64::encode(bytes);
+                                                let msg = format!("[MediaBroadcast]::{}::{}", media_name, base64_data);
+                                                push_gui_message(&self.gui_input, server_id, msg);
+                                                self.broadcast_result_message =
+                                                    Some(format!("📤 Sent '{}' to server {}", media_name, server_id));
+                                            }
+                                            Err(e) => {
+                                                self.broadcast_result_message = Some(format!("❌ Failed to read: {}", e));
+                                            }
+                                        }
+                                        self.broadcast_result_time = Some(Instant::now());
+                                        self.show_broadcast_list = false; // Close popup
+                                    }
                                 }
                             }
-                        }
-                    }
+
+                            ui.separator();
+                            if ui.button("Cancel").clicked() {
+                                self.show_broadcast_list = false;
+                            }
+                        });
                 }
             });
             if let (Some(msg), Some(time)) = (&self.broadcast_result_message, &self.broadcast_result_time) {
