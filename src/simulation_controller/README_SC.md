@@ -106,8 +106,7 @@ This module is responsible for managing the core logic, GUI communication, and n
 * `new(..)`: Initializes a new ChatUIState with default values and loaded media files.
 * `load_media_files()` & `load_broadcast_files()` Loading media files from media/ and broadcast media/ directories.
 * `render_server_info(..)`: Provides an overview on servers, connected clients, active chat status and type and a Gui input buffer inspection
-
-       ![image](https://github.com/user-attachments/assets/cf5a2d52-091a-41a0-84c4-cf355bb905da)
+   ![image](https://github.com/user-attachments/assets/cf5a2d52-091a-41a0-84c4-cf355bb905da)
 
 * `render(..)`:The core GUI function rendering all parts of the chat UI, including: hosts selection & interaction, chat history box & media sharing
 
