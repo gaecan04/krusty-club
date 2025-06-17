@@ -35,7 +35,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let gui_input_queue = new_gui_input_queue();
 
-    println!("🔗 GUI_INPUT addr (main): {:p}", &*gui_input_queue.lock().unwrap());
 
     let config = TOML_parser::parse_config(&config_path)?;
     let parsed_config = Arc::new(Mutex::new(config.clone()));
@@ -86,9 +85,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     initializer.drone_impls = drone_impls;
 
     initializer.initialize(gui_input_queue.clone())?;
-    println!("Network initialized successfully");
 
-    println!("Starting GUI application");
     SimulationController::start_background_thread(controller.clone(),event_receiver.clone());
     run_gui_application(
         event_sender.clone(),

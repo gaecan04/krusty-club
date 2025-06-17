@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::sync::{Arc, Mutex};
 use crossbeam_channel::{Receiver, Sender};
-use egui::debug_text::print;
 use wg_2024::packet::Packet;
 use wg_2024::controller::{DroneCommand,DroneEvent};
 use wg_2024::drone::Drone;
@@ -12,26 +11,12 @@ use crate::simulation_controller::network_designer::{Node, NodeType};
 use crate::simulation_controller::gui_input_queue::{broadcast_topology_change, SharedGuiInput};
 
 
-//Reminder about structs
-/*pub enum DroneCommand {
-    RemoveSender(usize), // NodeId
-    AddSender(usize, Sender<Packet>), // NodeId, Sender
-    SetPacketDropRate(f32),
-    Crash,
-}
-pub enum DroneEvent {
-    PacketSent(Packet),
-    PacketDropped(Packet),
-    ControllerShortcut(Packet),
-}*/
-
 pub struct SimulationController {
     network_config: Arc<Mutex<ParsedConfig>>,
-    //pub(crate) event_receiver: Receiver<DroneEvent>,
     pub(crate) command_sender: Sender<DroneCommand>,
     pub(crate) command_senders: HashMap<NodeId, Sender<DroneCommand>>,
     pub(crate) event_sender: Sender<DroneEvent>,
-    network_graph: HashMap<NodeId, HashSet<NodeId>>, // Adjacency list of the network
+    network_graph: HashMap<NodeId, HashSet<NodeId>>,
     packet_senders: HashMap<NodeId, Sender<Packet>>,
     drone_factory: Arc<dyn Fn(
         NodeId,
@@ -47,25 +32,18 @@ pub struct SimulationController {
 }
 
 impl SimulationController {
-    //to delete, this is just for testing purposes
-    pub fn registered_nodes(&self) -> Vec<NodeId> {
-        self.packet_senders.keys().cloned().collect()
-    }
 
     pub fn new(
         network_config: Arc<Mutex<ParsedConfig>>,
         event_sender: Sender<DroneEvent>,
-        //event_receiver: Receiver<DroneEvent>,
         command_sender: Sender<DroneCommand>,
         drone_factory: Arc<dyn Fn(NodeId, Sender<DroneEvent>, Receiver<DroneCommand>, Receiver<Packet>, HashMap<NodeId, Sender<Packet>>, f32) -> Box<dyn Drone> + Send + Sync>,
         gui_input: SharedGuiInput,
     ) -> Self {
-        println!("🔗 GUI_INPUT addr (SC_backend): {:p}", &*gui_input.lock().unwrap());
 
         let mut controller = SimulationController {
             network_config: network_config.clone(),
             config: network_config.clone(),
-            //event_receiver,
             event_sender: event_sender.clone(),
             command_sender: command_sender.clone(),            command_senders: HashMap::new(),
             network_graph: HashMap::new(),
@@ -74,59 +52,10 @@ impl SimulationController {
             gui_input,
 
         };
-
         // Initialize the network graph
         controller.initialize_network_graph();
 
         controller
-    }
-
-    pub fn get_node_state(&self, node_id: NodeId) -> Option<Node> {
-        let config = self.network_config.lock().unwrap();
-
-        // We use a dummy/default position since position is not available
-        let default_position = (0.0, 0.0);
-
-        for drone in &config.drone {
-            if drone.id == node_id {
-                return Some(Node {
-                    id: node_id as usize,
-                    node_type: NodeType::Drone,
-                    pdr: drone.pdr,
-                    active: self.network_graph.contains_key(&node_id),
-                    position: default_position, // fallback
-                    manual_position:false,
-                });
-            }
-        }
-
-        for client in &config.client {
-            if client.id == node_id {
-                return Some(Node {
-                    id: node_id as usize,
-                    node_type: NodeType::Client,
-                    pdr: 1.0,
-                    active: self.network_graph.contains_key(&node_id),
-                    position: default_position,
-                    manual_position:false,
-                });
-            }
-        }
-
-        for server in &config.server {
-            if server.id == node_id {
-                return Some(Node {
-                    id: node_id as usize,
-                    node_type: NodeType::Server,
-                    pdr: 1.0,
-                    active: self.network_graph.contains_key(&node_id),
-                    position: default_position,
-                    manual_position:false,
-                });
-            }
-        }
-
-        None
     }
 
     // Initialize network graph from config
@@ -172,13 +101,7 @@ impl SimulationController {
     }
 
     // Register a command sender for a node
-    pub fn register_command_sender(&mut self, node_id: NodeId, sender: Sender<DroneCommand>) {
-        self.command_senders.insert(node_id, sender);
-    }
 
-    pub fn register_packet_sender(&mut self, node_id: NodeId, sender: Sender<Packet>) {
-        self.packet_senders.insert(node_id, sender);
-    }
 
     pub fn start_background_thread(controller: Arc<Mutex<Self>>, event_receiver: Receiver<DroneEvent>) {
         let controller_clone = controller.clone(); // No need to double-Arc
@@ -209,11 +132,6 @@ impl SimulationController {
                         Some(r) => println!("Packet sent from {} to {}", sender, r),
                         None => println!("Packet sent from {} but no receiver (single-hop)", sender),
                     }
-                } else {
-                    println!(
-                        "Packet sent but routing header or hop_index is invalid: hop_index={}, hops={:?}",
-                        hop_index, hops
-                    );
                 }
             },
             DroneEvent::PacketDropped(packet) => {
@@ -231,11 +149,6 @@ impl SimulationController {
                         Some(r) => println!("Packet dropped from {} to {}", sender, r),
                         None => println!("Packet dropped from {} but no receiver (single-hop)", sender),
                     }
-                } else {
-                    println!(
-                        "Packet dropped but routing header or hop_index is invalid: hop_index={}, hops={:?}",
-                        hop_index, hops
-                    );
                 }
             },
             DroneEvent::ControllerShortcut(packet) => {
@@ -330,8 +243,8 @@ impl SimulationController {
 
 
             if drone_neighbors < 2 {
-                println!("server must be connected to at least 2 drones");
-                return false; // 🚨 Violates server redundancy rule
+                println!("🚨 server must be connected to at least 2 drones");
+                return false; //
             }
         }
 
@@ -378,9 +291,6 @@ impl SimulationController {
             None
         }
     }
-
-
-
 
     pub fn get_all_drone_ids(&self) -> Vec<NodeId> {
         self.config
@@ -619,8 +529,67 @@ impl SimulationController {
         self.network_graph.entry(b).or_default().insert(a);
     }
 
+
+    pub fn get_node_state(&self, node_id: NodeId) -> Option<Node> {
+        let config = self.network_config.lock().unwrap();
+
+        let default_position = (0.0, 0.0);
+
+        for drone in &config.drone {
+            if drone.id == node_id {
+                return Some(Node {
+                    id: node_id as usize,
+                    node_type: NodeType::Drone,
+                    pdr: drone.pdr,
+                    active: self.network_graph.contains_key(&node_id),
+                    position: default_position, // fallback
+                    manual_position:false,
+                });
+            }
+        }
+
+        for client in &config.client {
+            if client.id == node_id {
+                return Some(Node {
+                    id: node_id as usize,
+                    node_type: NodeType::Client,
+                    pdr: 1.0,
+                    active: self.network_graph.contains_key(&node_id),
+                    position: default_position,
+                    manual_position:false,
+                });
+            }
+        }
+
+        for server in &config.server {
+            if server.id == node_id {
+                return Some(Node {
+                    id: node_id as usize,
+                    node_type: NodeType::Server,
+                    pdr: 1.0,
+                    active: self.network_graph.contains_key(&node_id),
+                    position: default_position,
+                    manual_position:false,
+                });
+            }
+        }
+
+        None
+    }
+
     pub fn get_packet_sender(&self, node_id: &NodeId) -> Option<&Sender<Packet>> {
         self.packet_senders.get(node_id)
+    }
+
+    pub fn register_command_sender(&mut self, node_id: NodeId, sender: Sender<DroneCommand>) {
+        self.command_senders.insert(node_id, sender);
+    }
+
+    pub fn register_packet_sender(&mut self, node_id: NodeId, sender: Sender<Packet>) {
+        self.packet_senders.insert(node_id, sender);
+    }
+    pub fn registered_nodes(&self) -> Vec<NodeId> {
+        self.packet_senders.keys().cloned().collect()
     }
 
 

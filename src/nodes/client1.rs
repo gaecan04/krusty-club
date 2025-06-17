@@ -6,7 +6,6 @@ use std::env::temp_dir;
 use std::sync::Mutex;
 //use std::path::PathBuf;
 use once_cell::sync::Lazy;
-use rand::random;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use image::load_from_memory;
 use petgraph::graph::NodeIndex;
@@ -454,19 +453,26 @@ impl MyClient {
                                         temp_file_path.push(filename);
                                         match img.save(&temp_file_path) {
                                             Ok(_) => {
-                                                println!("Client {} successfully saved media '{}' to temporary file: {:?}", self.id, media_name, temp_file_path);
                                                 let open_command = if cfg!(target_os = "windows") {
-                                                    "start"
+                                                    "cmd"
                                                 } else if cfg!(target_os = "macos") {
                                                     "open"
                                                 } else {
-                                                    "xdg-open" //Linux
+                                                    "xdg-open"
                                                 };
+
                                                 let path_str = temp_file_path.to_string_lossy().into_owned();
-                                                match Command::new(open_command).arg(&path_str).spawn() {
-                                                    Ok(_) => println!("Client {} successfully opened media '{}' with command '{} {}'.", self.id, media_name, open_command, path_str),
-                                                    Err(e) => eprintln!("Client {} failed to open media '{}' using command '{} {}': {}", self.id, media_name, open_command, path_str, e),
+                                                let args = if cfg!(target_os = "windows") {
+                                                    vec!["/C", "start", "", path_str.as_str()] // "" prevents issues with filenames with spaces
+                                                } else {
+                                                    vec![path_str.as_str()]
+                                                };
+
+                                                match Command::new(open_command).args(args.clone()).spawn() {
+                                                    Ok(_) => println!("Client {} successfully opened media '{}' with command '{} {:?}'.", self.id, media_name, open_command, args),
+                                                    Err(e) => eprintln!("Client {} failed to open media '{}' using command '{} {:?}': {}", self.id, media_name, open_command, args, e),
                                                 }
+
                                             },
                                             Err(e) => eprintln!("Client {} failed to save image data for media '{}' to file: {}", self.id, media_name, e),
                                         }
@@ -627,7 +633,7 @@ impl MyClient {
     }
 
     fn create_topology(&mut self, flood_response: &FloodResponse) {
-        println!("Client {} processing FloodResponse for flood_id {}.", self.id, flood_response.flood_id);
+        //println!("Client {} processing FloodResponse for flood_id {}.", self.id, flood_response.flood_id);
         let path = &flood_response.path_trace;
         if path.is_empty() {
             println!("Received empty path_trace in FloodResponse for flood_id {}.", flood_response.flood_id);
@@ -637,14 +643,14 @@ impl MyClient {
         if let std::collections::hash_map::Entry::Vacant(e) = self.node_id_to_index.entry(initiator_id) {
             let node_index = self.network_graph.add_node(NodeInfo { id: initiator_id, node_type: initiator_type });
             e.insert(node_index);
-            println!("Client {} added initiator node {} ({:?}) to graph.", self.id, initiator_id, initiator_type);
+            //println!("Client {} added initiator node {} ({:?}) to graph.", self.id, initiator_id, initiator_type);
         }
         for i in 0..path.len() {
             let (current_node_id, current_node_type) = path[i];
             if let std::collections::hash_map::Entry::Vacant(e) = self.node_id_to_index.entry(current_node_id) {
                 let node_index = self.network_graph.add_node(NodeInfo { id: current_node_id, node_type: current_node_type });
                 e.insert(node_index);
-                println!("Client {} added node {} ({:?}) to graph.", self.id, current_node_id, current_node_type);
+                //println!("Client {} added node {} ({:?}) to graph.", self.id, current_node_id, current_node_type);
             }
             /*
             let current_node_idx = *self.node_id_to_index.entry(current_node_id).or_insert_with(|| {
@@ -658,11 +664,11 @@ impl MyClient {
                 if let (Some(&prev_node_idx), Some(&current_node_idx)) = (self.node_id_to_index.get(&prev_node_id), self.node_id_to_index.get(&current_node_id)) {
                     let edge_exists = self.network_graph.contains_edge(current_node_idx, prev_node_idx) || self.network_graph.contains_edge(prev_node_idx, current_node_idx);
                     if !edge_exists {
-                        println!("Client {} adding edge: {} -> {}.", self.id, prev_node_id, current_node_id);
+                       // println!("Client {} adding edge: {} -> {}.", self.id, prev_node_id, current_node_id);
                         self.network_graph.add_edge(prev_node_idx, current_node_idx, 0);
                         self.network_graph.add_edge(current_node_idx, prev_node_idx, 0);
                     } else {
-                        println!("Client {}: edge {} -> {} already exists.", self.id, prev_node_id, current_node_id);
+                        //println!("Client {}: edge {} -> {} already exists.", self.id, prev_node_id, current_node_id);
                     }
                 } else {
                     eprintln!("Client {} error: current node id {} not found in node_id_to_index map while processing path trace.", self.id, current_node_id);
@@ -759,7 +765,7 @@ impl MyClient {
             ["[MediaDownloadRequest]", media_name] => {
                 if let Some(mem_server_id) = self.connected_server_id {
                     println!("Client {} processing MEDIA DOWNLOAD REQUEST command for media '{}' via server {}.", self.id, media_name, mem_server_id);
-                    Some(format!("[MediaDownloadRequest::{media_name}"))
+                    Some(format!("[MediaDownloadRequest]::{media_name}"))
                 } else {
                     eprintln!("Client {} received MEDIA DOWNLOAD REQUEST command while not logged in. Ignoring.", self.id);
                     None

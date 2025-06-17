@@ -1,5 +1,5 @@
 use eframe::egui;
-use egui::{Color32, Context, Painter, Pos2, Response, TextEdit, Vec2};
+use egui::{Color32, Pos2, Vec2};
 use crossbeam_channel::Sender;
 use wg_2024::controller::{DroneEvent, DroneCommand};
 use wg_2024::network::NodeId;
@@ -9,7 +9,6 @@ use crate::simulation_controller::SC_backend::SimulationController;
 use crate::network::initializer::ParsedConfig;
 use crate::simulation_controller::gui_input_queue::{broadcast_topology_change, SharedGuiInput};
 
-use egui::epaint::PathShape;
 
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -178,7 +177,6 @@ impl NetworkRenderer {
     // Create a network renderer directly from config
     pub(crate) fn new_from_config(topology: &str, x_offset: f32, y_offset: f32, config: Arc<Mutex<ParsedConfig>>,ctx: &egui::Context, gui_input: SharedGuiInput,) -> Self {
         let mut network = Self::new(topology, x_offset, y_offset,ctx,gui_input.clone()); // Force base to be empty
-        println!("🔗 GUI_INPUT addr (network_design): {:p}", &*gui_input.lock().unwrap());
 
         // Store the config
         network.config = Some(config.clone());
@@ -398,12 +396,10 @@ impl NetworkRenderer {
 
         // Now process the rest of the nodes with normal layout
         if let Some(ref topo) = self.current_topology.clone() {
-            println!("🔄 Rebuilding using saved topology: {}", topo);
-
-
+            //println!("🔄 Rebuilding using saved topology: {}", topo);
             self.build_topology_layout(&topo, &config, &previous_states, &previous_nodes);
         } else {
-            println!("⚠️ No saved topology, falling back to grid layout");
+            //println!("⚠️ No saved topology, falling back to grid layout");
             self.build_grid(&config, &previous_states);
         }
 
@@ -681,7 +677,6 @@ impl NetworkRenderer {
 
             }
             _ => {
-                println!("⚠️ Unknown topology in fallback, using grid.");
                 self.build_grid(config, previous_states);
             }
         }
@@ -694,7 +689,6 @@ impl NetworkRenderer {
             .collect();
 
         if drone_positions.is_empty() {
-            println!("No drones found, skipping edge placement.");
             return;
         }
 
@@ -948,7 +942,6 @@ impl NetworkRenderer {
 
 
     fn setup_star(&mut self, _x_offset: f32, _y_offset: f32) {
-        println!("im in setup");
         const WINDOW_WIDTH: f32 = 800.0;
         const WINDOW_HEIGHT: f32 = 600.0;
 
@@ -1791,9 +1784,6 @@ impl NetworkRenderer {
             }
         }
     }
-
-
-
 }
 
 fn rand_offset() -> f32 {

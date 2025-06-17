@@ -3,7 +3,6 @@ use wg_2024::network::NodeId;
 use std::collections::HashMap;
 use crate::simulation_controller::gui_input_queue::{push_gui_message, new_gui_input_queue, SharedGuiInput};
 use std::fs;
-use std::io::{stdout, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -694,10 +693,7 @@ impl ChatUIState {
                                 self.chat_history.entry(key).or_default().push(msg.clone());
                             }
 
-
                             push_gui_message(&self.gui_input, from, format!("[MessageTo]::{to}::{}", msg.content));
-                            //solved : push_gui_message(&self.gui_input, self.selected_server.unwrap(), format!("[MsgTo]::{to}::{}", msg.content));
-
                             self.chat_input.clear();
                         }
                     }
