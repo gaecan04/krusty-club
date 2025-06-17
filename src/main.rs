@@ -104,22 +104,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/*fn run_headless_simulation(
-    duration: u64,
-    _config: Arc<Mutex<ParsedConfig>>,
-    controller: Arc<Mutex<SimulationController>>,
-) {
-    println!("Running simulation for {} seconds", duration);
-
-    let controller_clone = controller.clone();
-    thread::spawn(move || {
-        let mut controller = controller_clone.lock().unwrap();
-        controller.run();
-    });
-
-    std::thread::sleep(std::time::Duration::from_secs(duration));
-    println!("Simulation completed");
-}*/
 
 fn run_gui_application(
     event_sender: Sender<DroneEvent>,
@@ -131,13 +115,18 @@ fn run_gui_application(
     config_path: &str,
     gui_input_queue: SharedGuiInput,
 ) -> Result<(), Box<dyn Error>> {
-    let options = eframe::NativeOptions::default();
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1200.0, 800.0]),
+        ..Default::default()
+    };
 
 
     eframe::run_native(
         "Drone Simulation",
         options,
         Box::new(|cc| {
+
             Ok(Box::new(NetworkApp::new_with_network(
                 cc,
                 event_sender.clone(),
@@ -155,45 +144,6 @@ fn run_gui_application(
 
 }
 
-/*fn initialize_network_channels(
-    config_path: &str,
-) -> Result<
-    (
-        Sender<DroneEvent>,
-        Receiver<DroneEvent>,
-        Sender<DroneCommand>,
-        Receiver<DroneCommand>,
-        Receiver<Packet>,
-        Arc<HashMap<NodeId, Sender<Packet>>>,
-        ParsedConfig,
-    ),
-    Box<dyn Error>,
-> {
-    let config = TOML_parser::parse_config(config_path)?;
-
-    let (event_sender, event_receiver) = unbounded::<DroneEvent>();
-    let (command_sender, command_receiver) = unbounded::<DroneCommand>();
-    let (packet_send, packet_recv) = unbounded::<Packet>();
-
-    let mut packet_send_map = HashMap::new();
-    for node in config.drone.iter().map(|d| d.id)
-        .chain(config.client.iter().map(|c| c.id))
-        .chain(config.server.iter().map(|s| s.id))
-    {
-        packet_send_map.insert(node, packet_send.clone());
-    }
-
-    Ok((
-        event_sender,
-        event_receiver,
-        command_sender,
-        command_receiver,
-        packet_recv,
-        Arc::new(packet_send_map),
-        config,
-    ))
-}
-*/
 
 
 

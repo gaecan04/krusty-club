@@ -39,6 +39,7 @@ pub struct NetworkApp {
     is_simulation_running: bool,
     zoom_level: f32,
     pan_offset: Vec2,
+
     available_topologies: Vec<String>,
     network_config: Option<Arc<Mutex<ParsedConfig>>>,
     controller_send: Option<Sender<DroneEvent>>,
@@ -487,9 +488,9 @@ impl NetworkApp {
             // Compute optimal zoom (scale)
             let zoom_x = canvas_size.x * padding / graph_size.x;
             let zoom_y = canvas_size.y * padding / graph_size.y;
-            let optimal_zoom = zoom_x.min(zoom_y).clamp(0.5, 3.0); // restrict zoom range
+            let optimal_zoom = zoom_x.min(zoom_y).clamp(0.6, 3.0); // restrict zoom range
 
-            self.zoom_level = optimal_zoom;
+            self.zoom_level = 1.0;
             if let Some(r) = &mut self.network_renderer {
                 r.scale = optimal_zoom;
             }
@@ -561,6 +562,9 @@ impl NetworkApp {
         config_path: &str,
         gui_input: SharedGuiInput,
     ) -> Self {
+
+        cc.egui_ctx.set_visuals(egui::Visuals::light());
+
         let mut app = Self::new(cc);
 
         app.controller_send = Some(event_sender.clone());

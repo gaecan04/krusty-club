@@ -1282,7 +1282,7 @@ impl NetworkRenderer {
                     let color = if node_a.node_type == NodeType::Server || node_b.node_type == NodeType::Server {
                         Color32::BLUE
                     } else if node_a.node_type == NodeType::Client || node_b.node_type == NodeType::Client {
-                        Color32::YELLOW
+                        Color32::RED
                     } else {
                         Color32::GRAY
                     };
