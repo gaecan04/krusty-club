@@ -69,7 +69,8 @@ This module is responsible for managing the core logic, GUI communication, and n
       ![image](https://github.com/user-attachments/assets/d3927f08-4338-4d90-ac5a-1aa8c941c183)
 
 * `Command Handling`: crash_drone(..), set_packet_drop_rate(..), add_link(..) while doing the necessary checks not to violate network connectivity; is_crash_allowed(...), is_removal_allowed(...), validate_new_drone(...)
-      ![image](https://github.com/user-attachments/assets/46380d2b-c7a4-41c6-8d13-7f4c293bfdbc)
+     
+    ![image](https://github.com/user-attachments/assets/46380d2b-c7a4-41c6-8d13-7f4c293bfdbc)
 
 * `Node State & Type Access`: get_node_state(...), get_all_drone_ids(...), get_all_server_ids(...), registered_nodes(...) ...
 
@@ -105,7 +106,8 @@ This module is responsible for managing the core logic, GUI communication, and n
 
 * `new(..)`: Initializes a new ChatUIState with default values and loaded media files.
 * `load_media_files()` & `load_broadcast_files()` Loading media files from media/ and broadcast media/ directories.
-* `render_server_info(..)`: Provides an overview on servers, connected clients, active chat status and type and a Gui input Buffer inspection
+* `render_server_info(..)`: Provides an overview on servers, connected clients, active chat status and type and a Gui input buffer inspection
+
        ![image](https://github.com/user-attachments/assets/cf5a2d52-091a-41a0-84c4-cf355bb905da)
 
 * `render(..)`:The core GUI function rendering all parts of the chat UI, including: hosts selection & interaction, chat history box & media sharing
