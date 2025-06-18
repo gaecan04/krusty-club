@@ -517,11 +517,11 @@ impl MyClient {
     fn add_node_no_duplicate(&mut self, graph: &mut Graph<u8, u8, Undirected>, node_map: &mut HashMap<NodeId, (NodeIndex, NodeType)>, value: u8 , node_type: NodeType) -> NodeIndex {
         if let Some(&idx) = node_map.get(&value) {
             // Node with this value already exists
-            info!("Node with ID: {:?} , is already present for {:?}" , value , self.id);
+            //info!("Node with ID: {:?} , is already present for {:?}" , value , self.id);
             idx.0
         } else {
             // Create new node
-            info!("Adding node: {:?} to {:?}" , value , self.id);
+            //info!("Adding node: {:?} to {:?}" , value , self.id);
             let idx = graph.add_node(value);
             node_map.insert(value, (idx , node_type));
             self.node_map = node_map.clone();

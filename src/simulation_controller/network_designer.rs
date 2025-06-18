@@ -1538,78 +1538,23 @@ impl NetworkRenderer {
                                         }
                                     });
 
+                                // Fixed remove_sender logic in your GUI code
                                 if let Some(neighbor_id) = temp_selection {
-                                    // ✅ Use the same removal logic you had before (safe + bidirectional)
                                     if let Some(ctrl_arc) = &self.simulation_controller {
                                         let mut ctrl = ctrl_arc.lock().unwrap();
 
-                                        if ctrl.is_removal_allowed(node_id, neighbor_id) {
-                                            if let Some(sender) = ctrl.command_senders.get(&node_id) {
-                                                let _ = sender.send(DroneCommand::RemoveSender(neighbor_id));
-                                            }
-                                            if let Some(sender) = ctrl.command_senders.get(&neighbor_id) {
-                                                let _ = sender.send(DroneCommand::RemoveSender(node_id));
-                                            }
-
-                                            if let Some(cfg_arc) = &self.config {
-                                                let mut cfg = cfg_arc.lock().unwrap();
-
-                                                for drone in &mut cfg.drone {
-                                                    if drone.id == node_id {
-                                                        drone.connected_node_ids.retain(|&id| id != neighbor_id);
-                                                    }
-                                                    if drone.id == neighbor_id {
-                                                        drone.connected_node_ids.retain(|&id| id != node_id);
-                                                    }
-                                                }
-                                                // If either drone now has no connections, make sure we still render them
-                                                if let Some(drone) = cfg.drone.iter_mut().find(|d| d.id == node_id) {
-                                                    if drone.connected_node_ids.is_empty() {
-                                                        drone.connected_node_ids = vec![]; // Explicit empty, don't remove drone
-                                                    }
-                                                }
-                                                if let Some(drone) = cfg.drone.iter_mut().find(|d| d.id == neighbor_id) {
-                                                    if drone.connected_node_ids.is_empty() {
-                                                        drone.connected_node_ids = vec![]; // Same
-                                                    }
-                                                }
-
-                                                for client in &mut cfg.client {
-                                                    if client.id == node_id {
-                                                        client.connected_drone_ids.retain(|&id| id != neighbor_id);
-                                                    }
-                                                    if client.id == neighbor_id {
-                                                        client.connected_drone_ids.retain(|&id| id != node_id);
-                                                    }
-                                                }
-                                                for server in &mut cfg.server {
-                                                    if server.id == node_id {
-                                                        server.connected_drone_ids.retain(|&id| id != neighbor_id);
-                                                    }
-                                                    if server.id == neighbor_id {
-                                                        server.connected_drone_ids.retain(|&id| id != node_id);
-                                                    }
-                                                }
-
-                                                drop(cfg);
+                                        match ctrl.remove_link(node_id, neighbor_id) {
+                                            Ok(()) => {
+                                                // Success - the method handles everything internally
                                                 drop(ctrl);
-
-                                                broadcast_topology_change(&self.gui_input, &self.config.clone().unwrap(), "[FloodRequired]::RemoveSender");
                                                 self.build_from_config(self.config.clone().unwrap());
                                             }
-                                        } else {
-                                            eprintln!(
-                                                "❌ Refused to remove {} <-> {} (violates constraints)",
-                                                node_id, neighbor_id
-                                            );
+                                            Err(e) => {
+                                                eprintln!("❌ Failed to remove link: {}", e);
+                                            }
                                         }
                                     }
-                                }
-                            });
-
-
-
-
+                                }                            });
 
                         } else {
                             // 🚫 Read-only mode for inactive drone

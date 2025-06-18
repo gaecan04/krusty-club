@@ -293,6 +293,89 @@ impl SimulationController {
         self.is_crash_allowed(&test_graph)
     }
 
+
+        // Add this method to your SimulationController
+        pub fn remove_link(&mut self, a: NodeId, b: NodeId) -> Result<(), Box<dyn std::error::Error>> {
+            // 1. Check if link exists
+            if let Some(neighbors) = self.network_graph.get(&a) {
+                if !neighbors.contains(&b) {
+                    return Err(format!("No link exists between nodes {} and {}", a, b).into());
+                }
+            } else {
+                return Err(format!("Node {} not found in network graph", a).into());
+            }
+
+            // 2. Check if removal is allowed (doesn't violate constraints)
+            if !self.is_removal_allowed(a, b) {
+                return Err("Removing this link would violate network constraints".into());
+            }
+
+            // 3. Send RemoveSender commands to both nodes
+            if let Some(sender) = self.command_senders.get(&a) {
+                sender
+                    .send(DroneCommand::RemoveSender(b))
+                    .map_err(|e| format!("Failed to send RemoveSender to {}: {}", a, e))?;
+            }
+            if let Some(sender) = self.command_senders.get(&b) {
+                sender
+                    .send(DroneCommand::RemoveSender(a))
+                    .map_err(|e| format!("Failed to send RemoveSender to {}: {}", b, e))?;
+            }
+
+            // 4. Update the network graph
+            if let Some(neighbors) = self.network_graph.get_mut(&a) {
+                neighbors.remove(&b);
+            }
+            if let Some(neighbors) = self.network_graph.get_mut(&b) {
+                neighbors.remove(&a);
+            }
+
+            // 5. Update the config
+            {
+                let mut cfg = self.network_config.lock().unwrap();
+
+                // Update drone connections
+                for drone in &mut cfg.drone {
+                    if drone.id == a {
+                        drone.connected_node_ids.retain(|&id| id != b);
+                    }
+                    if drone.id == b {
+                        drone.connected_node_ids.retain(|&id| id != a);
+                    }
+                }
+
+                // Update client connections
+                for client in &mut cfg.client {
+                    if client.id == a {
+                        client.connected_drone_ids.retain(|&id| id != b);
+                    }
+                    if client.id == b {
+                        client.connected_drone_ids.retain(|&id| id != a);
+                    }
+                }
+
+                // Update server connections
+                for server in &mut cfg.server {
+                    if server.id == a {
+                        server.connected_drone_ids.retain(|&id| id != b);
+                    }
+                    if server.id == b {
+                        server.connected_drone_ids.retain(|&id| id != a);
+                    }
+                }
+            }
+
+            // 6. Broadcast topology change
+            broadcast_topology_change(
+                &self.gui_input,
+                &self.network_config,
+                &"[FloodRequired]::RemoveSender".to_string(),
+            );
+
+            println!("✅ Successfully removed link between {} and {}", a, b);
+            Ok(())
+        }
+
     fn get_node_type(&self, id: NodeId) -> Option<NodeType> {
         let cfg = self.config.lock().unwrap();
         if cfg.drone.iter().any(|d| d.id == id) {
@@ -407,6 +490,7 @@ impl SimulationController {
     }
 
     // Spawn a new drone in the network
+    // Spawn a new drone in the network
     pub fn spawn_drone(
         &mut self,
         id: NodeId,
@@ -431,7 +515,7 @@ impl SimulationController {
 
             for &peer in &connections {
                 cfg.append_drone_connection(peer, id);
-                // ⬅ Add this to ensure symmetric view in servers/clients
+                // Add bidirectional connections for clients/servers
                 if cfg.client.iter().any(|c| c.id == peer) {
                     cfg.append_client_connection(peer, id);
                 } else if cfg.server.iter().any(|s| s.id == peer) {
@@ -440,11 +524,11 @@ impl SimulationController {
             }
         }
 
-        // 3) Update network graph
-        /*for &peer in &connections {
+        // 3) ✅ CRITICAL: Update network graph - UNCOMMENT AND FIX
+        for &peer in &connections {
             self.network_graph.entry(id).or_default().insert(peer);
             self.network_graph.entry(peer).or_default().insert(id);
-        }*/
+        }
 
         // 4) Channels: controller
         let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
@@ -453,26 +537,24 @@ impl SimulationController {
         // 5) Channels: packet
         let (pkt_tx, pkt_rx) = crossbeam_channel::unbounded();
         self.packet_senders.insert(id, pkt_tx.clone());
-        self.packet_receivers.insert(id, pkt_rx.clone()); // ✅ needed for symmetry
+        self.packet_receivers.insert(id, pkt_rx.clone());
 
-        // 6) Build send map
+        // 6) Build send map for the new drone
         let mut packet_send_map = HashMap::new();
         for &peer in &connections {
-
             if let Some(tx) = self.packet_senders.get(&peer) {
                 packet_send_map.insert(peer, tx.clone());
             }
         }
 
         // 7) Spawn drone thread
-
         let controller_send = self.event_sender.clone();
-        let controller_recv = cmd_rx; // receiver for DroneCommand
-        let packet_recv = pkt_rx;     // receiver for Packet
+        let controller_recv = cmd_rx;
+        let packet_recv = pkt_rx;
 
         let sky_factory = self
             .group_implementations
-            .get("group_7") // or whichever group you want
+            .get("group_7")
             .expect("SkyLink group implementation must exist");
 
         let mut drone = sky_factory(id, controller_send, controller_recv, packet_recv, packet_send_map, pdr);
@@ -480,21 +562,24 @@ impl SimulationController {
             drone.run();
         });
 
+        // 8) ✅ CRITICAL: Send AddSender commands bidirectionally
+        let new_drone_packet_tx = self.packet_senders.get(&id).unwrap().clone();
 
-        // 8) AddSender command to sync both sides
         for &peer in &connections {
+            // Tell the new drone about its peer
+            if let Some(peer_packet_tx) = self.packet_senders.get(&peer) {
+                if let Some(new_drone_cmd_tx) = self.command_senders.get(&id) {
+                    new_drone_cmd_tx
+                        .send(DroneCommand::AddSender(peer, peer_packet_tx.clone()))
+                        .map_err(|e| format!("Failed to tell new drone {} about peer {}: {}", id, peer, e))?;
+                }
+            }
 
-            if let Some(peer_tx) = self.packet_senders.get(&peer) {
-                let command_to_drone = self.command_senders.get(&id).unwrap();
-                command_to_drone
-                    .send(DroneCommand::AddSender(peer, peer_tx.clone()))
-                    .ok();
-
-                let pkt_tx_to_new = self.packet_senders.get(&id).unwrap();
-                let command_to_peer = self.command_senders.get(&peer).unwrap();
-                command_to_peer
-                    .send(DroneCommand::AddSender(id, pkt_tx_to_new.clone()))
-                    .ok();
+            // Tell the peer about the new drone
+            if let Some(peer_cmd_tx) = self.command_senders.get(&peer) {
+                peer_cmd_tx
+                    .send(DroneCommand::AddSender(id, new_drone_packet_tx.clone()))
+                    .map_err(|e| format!("Failed to tell peer {} about new drone {}: {}", peer, id, e))?;
             }
         }
 
@@ -505,6 +590,7 @@ impl SimulationController {
             &"[FloodRequired]::SpawnDrone".to_string(),
         );
 
+        println!("✅ Successfully spawned drone {} with connections {:?}", id, connections);
         Ok(())
     }
 
