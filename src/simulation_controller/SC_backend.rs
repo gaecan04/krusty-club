@@ -594,8 +594,6 @@ impl SimulationController {
         self.network_graph.entry(a).or_default().insert(b);
         self.network_graph.entry(b).or_default().insert(a);
         broadcast_topology_change(&self.gui_input,&self.network_config,&"[FloodRequired]::AddSender".to_string());
-
-
         Ok(())
     }
     pub fn add_connection(&mut self, a: NodeId, b: NodeId) {

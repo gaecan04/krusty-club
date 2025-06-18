@@ -719,38 +719,73 @@ impl ChatUIState {
                 ui.label("Security Code:");
                 ui.add(TextEdit::singleline(&mut self.history_code_input).hint_text("123456"));
 
-                ui.horizontal(|ui| {
-                    if ui.button("Submit").clicked() {
-                        if let (Ok(client_id), Ok(target_id), Some(server_id)) = (
-                            self.history_client_id_input.parse::<NodeId>(),
-                            self.history_target_id_input.parse::<NodeId>(),
-                            self.selected_server,
-                        ) {
-                            let correct_code = self.client_server_codes.get(&(client_id, server_id));
-                            if correct_code == Some(&self.history_code_input) {
-                                push_gui_message(&self.gui_input, client_id, format!("[HistoryRequest]::{}::{}",client_id, target_id));
-                                self.history_code_success = true;
-                                self.history_code_failed = false;
-                                self.show_history_popup = false; // close popup
+                if ui.button("Submit").clicked() {
+                    // 1. Trim all inputs
+                    let raw_client = self.history_client_id_input.trim();
+                    let raw_target = self.history_target_id_input.trim();
+                    let raw_code_in = self.history_code_input.trim();
+
+                    // 2. Try to parse and get a server
+                    match (
+                        raw_client.parse::<NodeId>(),
+                        raw_target.parse::<NodeId>(),
+                        self.selected_server,
+                    ) {
+                        (Ok(client_id), Ok(target_id), Some(server_id)) => {
+                            // 3. Look up the stored code
+                            if let Some(stored_code) = self
+                                .client_server_codes
+                                .get(&(client_id, server_id))
+                            {
+                                // 4. Compare trimmed strings
+                                if stored_code == raw_code_in {
+                                    // ✅ Success!
+                                    push_gui_message(
+                                        &self.gui_input,
+                                        client_id,
+                                        format!("[HistoryRequest]::{}::{}", client_id, target_id),
+                                    );
+                                    self.history_code_success = true;
+                                    self.history_code_failed = false;
+                                    self.show_history_popup = false; // close
+                                } else {
+                                    // Code mismatch
+                                    eprintln!(
+                                        "❌ Code mismatch: stored=`{:?}`, entered=`{:?}`",
+                                        stored_code, raw_code_in
+                                    );
+                                    self.history_code_failed = true;
+                                    self.history_code_success = false;
+                                }
                             } else {
+                                // No code was ever generated for that client/server pair
+                                eprintln!(
+                                    "❌ No code found for client={} on server={}",
+                                    client_id, server_id
+                                );
                                 self.history_code_failed = true;
                                 self.history_code_success = false;
                             }
-                        } else {
+                        }
+                        _ => {
+                            // Parse failure or no server selected
+                            eprintln!(
+                                "❌ Parse failure: client=`{:?}`, target=`{:?}`, server=`{:?}`",
+                                raw_client, raw_target, self.selected_server
+                            );
                             self.history_code_failed = true;
                             self.history_code_success = false;
                         }
                     }
-
-                    if ui.button("Close").clicked() {
-                        self.show_history_popup = false;
-                        self.history_code_input.clear();
-                        self.history_client_id_input.clear();
-                        self.history_target_id_input.clear();
-                        self.history_code_failed = false;
-                        self.history_code_success = false;
-                    }
-                });
+                }
+                if ui.button("Close").clicked() {
+                    self.show_history_popup = false;
+                    self.history_code_input.clear();
+                    self.history_client_id_input.clear();
+                    self.history_target_id_input.clear();
+                    self.history_code_failed = false;
+                    self.history_code_success = false;
+                }
 
                 if self.history_code_failed {
                     ui.label(RichText::new("❌ Incorrect code or client ID").color(Color32::RED));
