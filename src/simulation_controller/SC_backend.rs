@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::sync::{Arc, Mutex};
 use crossbeam_channel::{Receiver, Sender};
+use skylink::SkyLinkDrone;
 use wg_2024::packet::Packet;
 use wg_2024::controller::{DroneCommand,DroneEvent};
 use wg_2024::drone::Drone;
@@ -9,6 +10,8 @@ use wg_2024::network::NodeId;
 use crate::network::initializer::{ParsedConfig};
 use crate::simulation_controller::network_designer::{Node, NodeType};
 use crate::simulation_controller::gui_input_queue::{broadcast_topology_change, SharedGuiInput};
+use crate::network::initializer::GroupImplFactory;
+use crate::network::initializer::DroneImplementation;
 
 
 pub struct SimulationController {
@@ -18,6 +21,8 @@ pub struct SimulationController {
     pub(crate) event_sender: Sender<DroneEvent>,
     pub(crate) network_graph: HashMap<NodeId, HashSet<NodeId>>,
     packet_senders: HashMap<NodeId, Sender<Packet>>,
+    pub(crate) packet_receivers: HashMap<NodeId, Receiver<Packet>>,
+
     drone_factory: Arc<dyn Fn(
         NodeId,
         Sender<DroneEvent>,
@@ -28,8 +33,13 @@ pub struct SimulationController {
     ) -> Box<dyn Drone> + Send + Sync>,
     config: Arc<Mutex<ParsedConfig>>,
     pub gui_input: SharedGuiInput,
+    pub group_implementations: HashMap<String, GroupImplFactory>,
+
 
 }
+
+
+
 
 impl SimulationController {
 
@@ -40,6 +50,7 @@ impl SimulationController {
         drone_factory: Arc<dyn Fn(NodeId, Sender<DroneEvent>, Receiver<DroneCommand>, Receiver<Packet>, HashMap<NodeId, Sender<Packet>>, f32) -> Box<dyn Drone> + Send + Sync>,
         gui_input: SharedGuiInput,
     ) -> Self {
+        let group_implementations = SimulationController::load_group_implementations();
 
         let mut controller = SimulationController {
             network_config: network_config.clone(),
@@ -48,8 +59,11 @@ impl SimulationController {
             command_sender: command_sender.clone(),            command_senders: HashMap::new(),
             network_graph: HashMap::new(),
             packet_senders: HashMap::new(),
+            packet_receivers:HashMap::new() ,
             drone_factory,
             gui_input,
+            group_implementations,
+
 
         };
         // Initialize the network graph
@@ -404,44 +418,38 @@ impl SimulationController {
             return Err("New drone configuration violates network constraints".into());
         }
 
-        // 2) Update the shared ParsedConfig (TOML model)
+        // 2) Update ParsedConfig (used by GUI)
         {
             let mut cfg = self.network_config.lock().unwrap();
 
-            // Only add if it's not already there
             if !cfg.drone.iter().any(|d| d.id == id) {
                 cfg.add_drone(id);
             }
 
-            // Record its PDR
             cfg.set_drone_pdr(id, pdr);
-
-            // Record its outgoing links
             cfg.set_drone_connections(id, connections.clone());
 
-            // And append the reverse on each peer
             for &peer in &connections {
                 cfg.append_drone_connection(peer, id);
             }
         }
 
-        // 3) Update the in-memory graph
-        let mut neigh = HashSet::new();
+        // 3) Update network graph
         for &peer in &connections {
-            neigh.insert(peer);
+            self.network_graph.entry(id).or_default().insert(peer);
             self.network_graph.entry(peer).or_default().insert(id);
         }
-        self.network_graph.insert(id, neigh);
 
-        // 4) Create & register the controller-to-drone channel
+        // 4) Channels: controller
         let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
         self.command_senders.insert(id, cmd_tx);
 
-        // 5) Create & register the packet channel
+        // 5) Channels: packet
         let (pkt_tx, pkt_rx) = crossbeam_channel::unbounded();
         self.packet_senders.insert(id, pkt_tx.clone());
+        self.packet_receivers.insert(id, pkt_rx.clone()); // ✅ needed for symmetry
 
-        // 6) Build this drone’s packet-send map
+        // 6) Build send map
         let mut packet_send_map = HashMap::new();
         for &peer in &connections {
             if let Some(tx) = self.packet_senders.get(&peer) {
@@ -449,18 +457,49 @@ impl SimulationController {
             }
         }
 
-        // 7) Spawn the drone thread
-        let factory = Arc::clone(&self.drone_factory);
-        let controller_send = self.event_sender.clone(); // must be Sender<DroneEvent>
+        // 7) Spawn drone thread
+
+        let controller_send = self.event_sender.clone();
+        let controller_recv = cmd_rx; // receiver for DroneCommand
+        let packet_recv = pkt_rx;     // receiver for Packet
+
+        let sky_factory = self
+            .group_implementations
+            .get("group_7") // or whichever group you want
+            .expect("SkyLink group implementation must exist");
+
+        let mut drone = sky_factory(id, controller_send, controller_recv, packet_recv, packet_send_map, pdr);
         std::thread::spawn(move || {
-            let mut drone =
-                factory(id, controller_send, cmd_rx, pkt_rx, packet_send_map, pdr);
             drone.run();
         });
-       broadcast_topology_change(&self.gui_input, &self.config,&"[FloodRequired]::SpawnDrone".to_string());
+
+
+        // 8) AddSender command to sync both sides
+        for &peer in &connections {
+            if let Some(peer_tx) = self.packet_senders.get(&peer) {
+                let command_to_drone = self.command_senders.get(&id).unwrap();
+                command_to_drone
+                    .send(DroneCommand::AddSender(peer, peer_tx.clone()))
+                    .ok();
+
+                let pkt_tx_to_new = self.packet_senders.get(&id).unwrap();
+                let command_to_peer = self.command_senders.get(&peer).unwrap();
+                command_to_peer
+                    .send(DroneCommand::AddSender(id, pkt_tx_to_new.clone()))
+                    .ok();
+            }
+        }
+
+        // 9) Broadcast to GUI
+        broadcast_topology_change(
+            &self.gui_input,
+            &self.network_config,
+            &"[FloodRequired]::SpawnDrone".to_string(),
+        );
 
         Ok(())
     }
+
 
 
 
@@ -480,6 +519,30 @@ impl SimulationController {
         // Check that the network will remain valid
         // (This is a simplified check - you might need more validation)
         Ok(true)
+    }
+
+
+    pub fn load_group_implementations() -> HashMap<String, GroupImplFactory> {
+        let mut group_implementations = HashMap::new();
+
+        group_implementations.insert(
+            "group_7".to_string(),
+            Box::new(|id, sim_contr_send, sim_contr_recv, packet_recv, packet_send, pdr| {
+                Box::new(SkyLinkDrone::new(
+                    id,
+                    sim_contr_send,
+                    sim_contr_recv,
+                    packet_recv,
+                    packet_send,
+                    pdr,
+                )) as Box<dyn DroneImplementation>
+            }) as GroupImplFactory, // ✅ this is now correct
+        );
+
+
+        // Optional: add more groups here if needed
+
+        group_implementations
     }
 
     pub fn add_link(&mut self, a: NodeId, b: NodeId) -> Result<(), Box<dyn std::error::Error>> {
@@ -594,7 +657,4 @@ impl SimulationController {
     pub fn registered_nodes(&self) -> Vec<NodeId> {
         self.packet_senders.keys().cloned().collect()
     }
-
-
-
 }

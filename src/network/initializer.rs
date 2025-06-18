@@ -26,12 +26,11 @@ use wg_2024::network::NodeId;
 use crate::simulation_controller::SC_backend::SimulationController;
 use crate::simulation_controller::gui_input_queue::SharedGuiInput;
 
-
 #[cfg(feature = "serialize")]
 // Type aliases for clarity
 pub type DroneImpl = Box<dyn DroneImplementation>;
 // This should be defined somewhere in your code
-type GroupImplFactory = Box<dyn Fn(NodeId, Sender<DroneEvent>, Receiver<DroneCommand>,
+pub(crate) type GroupImplFactory = Box<dyn Fn(NodeId, Sender<DroneEvent>, Receiver<DroneCommand>,
     Receiver<Packet>, HashMap<NodeId, Sender<Packet>>, f32)
     -> Box<dyn DroneImplementation> + Send + 'static >;
 
@@ -991,7 +990,7 @@ impl NetworkInitializer {
             "group_2".to_string(),
             Box::new(|id, sim_contr_send, sim_contr_recv, packet_recv, packet_send, pdr|
                       -> Box<dyn DroneImplementation> {
-                Box::new(SkyLinkDrone::new(
+                Box::new(RustafarianDrone::new(
                     id,
                     sim_contr_send,
                     sim_contr_recv,
