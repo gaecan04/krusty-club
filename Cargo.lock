@@ -3,6 +3,41 @@
 version = 4
 
 [[package]]
+name = "AP-unitn"
+version = "0.1.0"
+dependencies = [
+ "Krusty_Club",
+ "LeDron_James",
+ "ap2024_unitn_cppenjoyers_drone",
+ "bagel_bomber",
+ "base64",
+ "bincode",
+ "config",
+ "crossbeam",
+ "crossbeam-channel",
+ "dr_ones",
+ "eframe",
+ "egui",
+ "env_logger 0.11.8",
+ "fungi_drone",
+ "image",
+ "log",
+ "once_cell",
+ "petgraph",
+ "rand 0.9.1",
+ "rolling_drone",
+ "rustafarian-drone",
+ "rustastic-drone",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "skylink",
+ "toml",
+ "wg_2024",
+ "wg_2024-rust",
+]
+
+[[package]]
 name = "Krusty_Club"
 version = "0.1.0"
 source = "git+https://github.com/Ossyk/Krusty_Club.git#fd42ea290774d51f3c923cb05053a29cf3fbae0e"

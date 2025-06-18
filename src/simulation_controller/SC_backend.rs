@@ -431,14 +431,20 @@ impl SimulationController {
 
             for &peer in &connections {
                 cfg.append_drone_connection(peer, id);
+                // ⬅ Add this to ensure symmetric view in servers/clients
+                if cfg.client.iter().any(|c| c.id == peer) {
+                    cfg.append_client_connection(peer, id);
+                } else if cfg.server.iter().any(|s| s.id == peer) {
+                    cfg.append_server_connection(peer, id);
+                }
             }
         }
 
         // 3) Update network graph
-        for &peer in &connections {
+        /*for &peer in &connections {
             self.network_graph.entry(id).or_default().insert(peer);
             self.network_graph.entry(peer).or_default().insert(id);
-        }
+        }*/
 
         // 4) Channels: controller
         let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
@@ -452,6 +458,7 @@ impl SimulationController {
         // 6) Build send map
         let mut packet_send_map = HashMap::new();
         for &peer in &connections {
+
             if let Some(tx) = self.packet_senders.get(&peer) {
                 packet_send_map.insert(peer, tx.clone());
             }
@@ -476,6 +483,7 @@ impl SimulationController {
 
         // 8) AddSender command to sync both sides
         for &peer in &connections {
+
             if let Some(peer_tx) = self.packet_senders.get(&peer) {
                 let command_to_drone = self.command_senders.get(&id).unwrap();
                 command_to_drone
