@@ -16,7 +16,7 @@ pub struct SimulationController {
     pub(crate) command_sender: Sender<DroneCommand>,
     pub(crate) command_senders: HashMap<NodeId, Sender<DroneCommand>>,
     pub(crate) event_sender: Sender<DroneEvent>,
-    network_graph: HashMap<NodeId, HashSet<NodeId>>,
+    pub(crate) network_graph: HashMap<NodeId, HashSet<NodeId>>,
     packet_senders: HashMap<NodeId, Sender<Packet>>,
     drone_factory: Arc<dyn Fn(
         NodeId,
@@ -382,8 +382,11 @@ impl SimulationController {
     // Set the packet drop rate for a drone
     pub fn set_packet_drop_rate(&mut self, drone_id: NodeId, rate: f32) -> Result<(), Box<dyn Error>> {
         if let Some(sender) = self.command_senders.get(&drone_id) {
+            broadcast_topology_change(&self.gui_input,&self.network_config,&"[FloodRequired]::newpdr".to_string());
+
             sender.send(DroneCommand::SetPacketDropRate(rate))
                 .map_err(|_| "Failed to send SetPacketDropRate command".into())
+
         } else {
             Err("Drone not found".into())
         }

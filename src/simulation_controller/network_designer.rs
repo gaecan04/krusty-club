@@ -669,8 +669,6 @@ impl NetworkRenderer {
                         });
                     }
 
-
-
                     self.node_id_to_index.insert(drone.id, self.nodes.len() - 1);
                 }
 
@@ -680,6 +678,30 @@ impl NetworkRenderer {
                 self.build_grid(config, previous_states);
             }
         }
+        // 🛠 Patch: if a drone exists but isn't in the index map, add it manually
+        for drone in &config.drone {
+            if !self.node_id_to_index.contains_key(&drone.id) {
+                println!("⚠️ Drone {} missing from index → forcing reinsert", drone.id);
+
+                let fallback_pos = self.manual_positions.get(&drone.id).copied().unwrap_or((
+                    self.next_position_x,
+                    self.next_position_y,
+                ));
+
+                self.nodes.push(Node {
+                    id: drone.id as usize,
+                    node_type: NodeType::Drone,
+                    pdr: drone.pdr,
+                    active: true,
+                    position: fallback_pos,
+                    manual_position: true,
+                });
+
+                self.node_id_to_index.insert(drone.id, self.nodes.len() - 1);
+                self.next_position_x += 50.0;
+            }
+        }
+
 
         // Step 1: Determine bounding box of all drones
         let drone_positions: Vec<(f32, f32)> = self.nodes
@@ -732,6 +754,7 @@ impl NetworkRenderer {
             }
         }
 
+
         for client in &config.client {
             if let Some(&source_index) = self.node_id_to_index.get(&client.id) {
                 for &target_id in &client.connected_drone_ids {
@@ -752,8 +775,7 @@ impl NetworkRenderer {
             }
         }
 
-        self.next_position_x = 50.0;
-        self.next_position_y = WINDOW_HEIGHT - 50.0;
+
     }
 
 
@@ -1481,71 +1503,112 @@ impl NetworkRenderer {
 
                             });
                             ui.horizontal(|ui| {
-                                // New: Remove Sender dropdown and button
-                                let mut selected_neighbor: Option<NodeId> = None;
-
                                 ui.label("Remove sender (neighbor):");
+
+                                let mut temp_selection: Option<NodeId> = None;
+
+                                // Collect IDs of neighbors from SimulationController (no locking, no glitch)
+                                let neighbor_ids: HashSet<NodeId> = if let Some(ctrl_arc) = &self.simulation_controller {
+                                    let ctrl = ctrl_arc.lock().unwrap();
+                                    ctrl.network_graph
+                                        .get(&node_id)
+                                        .cloned()
+                                        .unwrap_or_default()
+                                } else {
+                                    HashSet::new()
+                                };
+
+                                // Use `self.nodes` for stable, glitch-free display
                                 egui::ComboBox::from_id_source("remove_sender_combo")
                                     .selected_text("select neighbor")
                                     .show_ui(ui, |ui| {
-                                        if let Some(cfg) = &self.config {
-                                            let cfg = cfg.lock().unwrap();
-                                            let neighbors = cfg.drone.iter()
-                                                .find(|d| d.id == node_id)
-                                                .map(|d| d.connected_node_ids.clone())
-                                                .unwrap_or_default();
+                                        for peer in self.nodes.iter() {
+                                            let peer_id = peer.id as NodeId;
+                                            if neighbor_ids.contains(&peer_id) && peer_id != node_id {
+                                                let label = match peer.node_type {
+                                                    NodeType::Drone => format!("Drone {}", peer.id),
+                                                    NodeType::Client => format!("Client {}", peer.id),
+                                                    NodeType::Server => format!("Server {}", peer.id),
+                                                };
 
-                                            for &neighbor in &neighbors {
-                                                if ui.selectable_label(false, format!("Node {}", neighbor)).clicked() {
-                                                    selected_neighbor = Some(neighbor);
-                                                    ui.close_menu();
+                                                if ui.selectable_label(false, label).clicked() {
+                                                    temp_selection = Some(peer_id);
                                                 }
                                             }
                                         }
                                     });
 
-                                if let Some(neighbor_id) = selected_neighbor {
+                                if let Some(neighbor_id) = temp_selection {
+                                    // ✅ Use the same removal logic you had before (safe + bidirectional)
                                     if let Some(ctrl_arc) = &self.simulation_controller {
                                         let mut ctrl = ctrl_arc.lock().unwrap();
 
-                                        // ✅ Run removal constraint check
                                         if ctrl.is_removal_allowed(node_id, neighbor_id) {
                                             if let Some(sender) = ctrl.command_senders.get(&node_id) {
-                                                sender
-                                                    .send(DroneCommand::RemoveSender(neighbor_id))
-                                                    .expect("Failed to send RemoveSender");
-                                                println!("RemoveSender sent from {} to {}", node_id, neighbor_id);
+                                                let _ = sender.send(DroneCommand::RemoveSender(neighbor_id));
+                                            }
+                                            if let Some(sender) = ctrl.command_senders.get(&neighbor_id) {
+                                                let _ = sender.send(DroneCommand::RemoveSender(node_id));
                                             }
 
-                                            // 🧠 Update config connections
                                             if let Some(cfg_arc) = &self.config {
                                                 let mut cfg = cfg_arc.lock().unwrap();
+
+                                                for drone in &mut cfg.drone {
+                                                    if drone.id == node_id {
+                                                        drone.connected_node_ids.retain(|&id| id != neighbor_id);
+                                                    }
+                                                    if drone.id == neighbor_id {
+                                                        drone.connected_node_ids.retain(|&id| id != node_id);
+                                                    }
+                                                }
+                                                // If either drone now has no connections, make sure we still render them
                                                 if let Some(drone) = cfg.drone.iter_mut().find(|d| d.id == node_id) {
-                                                    drone.connected_node_ids.retain(|&id| id != neighbor_id);
+                                                    if drone.connected_node_ids.is_empty() {
+                                                        drone.connected_node_ids = vec![]; // Explicit empty, don't remove drone
+                                                    }
                                                 }
                                                 if let Some(drone) = cfg.drone.iter_mut().find(|d| d.id == neighbor_id) {
-                                                    drone.connected_node_ids.retain(|&id| id != node_id);
+                                                    if drone.connected_node_ids.is_empty() {
+                                                        drone.connected_node_ids = vec![]; // Same
+                                                    }
                                                 }
 
-                                                drop(ctrl); // Drop before self mutation
-                                                drop(cfg);
-                                                broadcast_topology_change(&self.gui_input, &(self.config.clone().unwrap()), "[FloodRequired]::RemoveSender");
+                                                for client in &mut cfg.client {
+                                                    if client.id == node_id {
+                                                        client.connected_drone_ids.retain(|&id| id != neighbor_id);
+                                                    }
+                                                    if client.id == neighbor_id {
+                                                        client.connected_drone_ids.retain(|&id| id != node_id);
+                                                    }
+                                                }
+                                                for server in &mut cfg.server {
+                                                    if server.id == node_id {
+                                                        server.connected_drone_ids.retain(|&id| id != neighbor_id);
+                                                    }
+                                                    if server.id == neighbor_id {
+                                                        server.connected_drone_ids.retain(|&id| id != node_id);
+                                                    }
+                                                }
 
-                                                self.build_from_config(cfg_arc.clone());
+                                                drop(cfg);
+                                                drop(ctrl);
+
+                                                broadcast_topology_change(&self.gui_input, &self.config.clone().unwrap(), "[FloodRequired]::RemoveSender");
+                                                self.build_from_config(self.config.clone().unwrap());
                                             }
                                         } else {
                                             eprintln!(
-                                                "Refused to remove link {} <-> {}: violates constraints",
+                                                "❌ Refused to remove {} <-> {} (violates constraints)",
                                                 node_id, neighbor_id
                                             );
                                         }
                                     }
                                 }
-
-
-
-
                             });
+
+
+
 
 
                         } else {
@@ -1645,8 +1708,21 @@ impl NetworkRenderer {
                 cfg.set_drone_pdr(id, pdr);
                 cfg.set_drone_connections(id, connections.clone());
                 for &peer in &connections {
-                    cfg.append_drone_connection(peer, id);
+                    if let Some(drone) = cfg.drone.iter_mut().find(|d| d.id == peer) {
+                        if !drone.connected_node_ids.contains(&id) {
+                            drone.connected_node_ids.push(id);
+                        }
+                    } else if let Some(client) = cfg.client.iter_mut().find(|c| c.id == peer) {
+                        if !client.connected_drone_ids.contains(&id) {
+                            client.connected_drone_ids.push(id);
+                        }
+                    } else if let Some(server) = cfg.server.iter_mut().find(|s| s.id == peer) {
+                        if !server.connected_drone_ids.contains(&id) {
+                            server.connected_drone_ids.push(id);
+                        }
+                    }
                 }
+
             }
             return;
         }
@@ -1701,8 +1777,21 @@ impl NetworkRenderer {
             cfg.set_drone_connections(id, connections.clone()); // record its outgoing links
             // make the links bidirectional
             for &peer in &connections {
-                cfg.append_drone_connection(peer, id);
+                if let Some(drone) = cfg.drone.iter_mut().find(|d| d.id == peer) {
+                    if !drone.connected_node_ids.contains(&id) {
+                        drone.connected_node_ids.push(id);
+                    }
+                } else if let Some(client) = cfg.client.iter_mut().find(|c| c.id == peer) {
+                    if !client.connected_drone_ids.contains(&id) {
+                        client.connected_drone_ids.push(id);
+                    }
+                } else if let Some(server) = cfg.server.iter_mut().find(|s| s.id == peer) {
+                    if !server.connected_drone_ids.contains(&id) {
+                        server.connected_drone_ids.push(id);
+                    }
+                }
             }
+
         }
 
         // ── 4) Finally, build the UI edges ─────────────────────────────────────────────
