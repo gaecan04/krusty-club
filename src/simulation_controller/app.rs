@@ -1,24 +1,24 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use eframe::{egui, App, CreationContext};
+use eframe::{egui, CreationContext};
 use eframe::egui::{Stroke, StrokeKind};
 use egui::{Color32, RichText, Vec2, Rect, Sense, Shape, Pos2};
-use crate::network::initializer::{MyDrone, ParsedConfig};
+use crate::network::initializer::{ ParsedConfig};
 use crate::simulation_controller::network_designer::NetworkRenderer;
 use std::thread;
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{ Receiver, Sender};
 use egui::debug_text::print;
+use petgraph::visit::Walker;
 use crate::simulation_controller::SC_backend::SimulationController;
 use wg_2024::controller::{DroneCommand, DroneEvent};
 use wg_2024::drone::Drone;
 use wg_2024::network::NodeId;
 use wg_2024::packet::Packet;
-use crate::simulation_controller::chatUI::{ChatMessage, ChatUIState, ClientStatus};
-use crate::simulation_controller::gui_input_queue::{push_gui_message, SharedGuiInput,broadcast_topology_change};
+use crate::simulation_controller::chatUI::{ ChatUIState, ClientStatus};
+use crate::simulation_controller::gui_input_queue::{ SharedGuiInput};
 
 enum AppState {
     Welcome,
-    Topology,
     Simulation,
 }
 
@@ -33,7 +33,7 @@ pub struct NetworkApp {
     network_renderer: Option<NetworkRenderer>,
     topology_selected: bool,
     selected_topology: Option<String>,
-    simulation_log: Vec<String>,
+    simulation_log: Arc<Mutex<Vec<String>>>,
     chat_messages: Vec<String>,
     chat_input: String,
     is_simulation_running: bool,
@@ -45,7 +45,7 @@ pub struct NetworkApp {
     controller_send: Option<Sender<DroneEvent>>,
     simulation_controller: Option<Arc<Mutex<SimulationController>>>,
     controller_thread: Option<thread::JoinHandle<()>>,
-    // Fields for drone operations (mainly for separate UI elements)
+
     selected_drone_id: NodeId,
     pdr_drone_id: NodeId,
     pdr_value: f32,
@@ -60,7 +60,7 @@ pub struct NetworkApp {
 
 impl NetworkApp {
     // Constructor to accept creation context
-    pub fn new(_cc: &CreationContext) -> Self {
+    pub fn new( _cc: &CreationContext) -> Self {
         // You can access persistent state or other context info here if needed
         let mut app = Self::default();
 
@@ -75,51 +75,47 @@ impl NetworkApp {
                 }
             }
         }
+        println!("👋👋👋👋NetworkApp log addr: {:p}", Arc::as_ptr(&app.simulation_log));
 
         // Log available topologies
-        app.simulation_log.push("Application started".to_string());
-        app.simulation_log.push(format!("Found {} topology configurations", app.available_topologies.len()));
+        app.log("Application started".to_string());
+        app.log(format!("Found {} topology configurations", app.available_topologies.len()));
 
         app
+    }
+
+    fn log(&self, message: impl ToString) {
+        if let Ok(mut log) = self.simulation_log.lock() {
+            log.push(message.to_string());
+        }
     }
 
 
     // This function is kept for the UI but delegates to NetworkRenderer if possible
     fn crash_drone(&mut self, drone_id: NodeId) {
-        println!("config before :{:?}", self.network_config );
 
         if let Some(ctrl_arc) = &self.simulation_controller {
             let mut ctrl = ctrl_arc.lock().unwrap();
 
             match ctrl.crash_drone(drone_id) {
                 Ok(_) => {
-                    self.simulation_log.push(format!("✅ Drone {} crashed successfully", drone_id));
+                    self.log(format!("✅ Drone {} crashed successfully", drone_id));
 
                     /*
-                    // ✅ Only now update the visual state
-                    if let Some(renderer) = &mut self.network_renderer {
-                        if let Some(&idx) = renderer.node_id_to_index.get(&drone_id) {
-                            renderer.nodes[idx].active = false;
-                            renderer.remove_edges_of_crashed_node(idx);
-                        }
-                        renderer.sync_connections_with_config(); // Optional
-                    }
-                    The Simulation Controller (SC) already updates the active flags internally.
-                    sync_with_simulation_controller() reads fresh states and updates the GUI.
-                    build_from_config() re-applies the correct star, chain, etc. layout after crash.
-                     */
+                     The Simulation Controller (SC) already updates the active flags internally.
+                     sync_with_simulation_controller() reads fresh states and updates the GUI.
+                     build_from_config() re-applies the correct star, chain, etc. layout after crash.
+                      */
                     if let Some(renderer) = &mut self.network_renderer {
                         renderer.sync_with_simulation_controller();
                         if let Some(cfg_arc) = &self.network_config {
                             renderer.build_from_config(cfg_arc.clone());
                         }
                     }
-                    println!("config after :{:?}", self.network_config )
                 }
                 Err(e) => {
-                    self.simulation_log.push(format!("SC refused to crash {}: {}", drone_id, e));
+                    self.log(format!("SC refused to crash {}: {}", drone_id, e));
 
-                    // 🚫 Do NOT update the renderer here!
                 }
             }
         }
@@ -131,10 +127,10 @@ impl NetworkApp {
         if let Some(ctrl_arc) = &self.simulation_controller {
             let mut ctrl = ctrl_arc.lock().unwrap();
             if let Err(e) = ctrl.set_packet_drop_rate(drone_id, rate) {
-                self.simulation_log.push(format!("Failed to set PDR {}→{}: {}", drone_id, rate, e));
+               self.log(format!("Failed to set PDR {}→{}: {}", drone_id, rate, e));
                 return;
             }
-            self.simulation_log.push(format!("Set PDR for drone {} to {}", drone_id, rate));
+           self.log(format!("Set PDR for drone {} to {}", drone_id, rate));
         }
 
         // 2) persist in config
@@ -155,7 +151,7 @@ impl NetworkApp {
             let mut ctrl = ctrl_arc.lock().unwrap();
             // You’ll need to expose a method on SC like `connect(a, b)`
             if let Err(e) = ctrl.add_link(a, b) {
-                self.simulation_log.push(format!("SC refused link {}↔{}: {}", a, b, e));
+               self.log(format!("SC refused link {}↔{}: {}", a, b, e));
                 return;
             }
         }
@@ -182,16 +178,15 @@ impl NetworkApp {
             r.build_from_config(cfg_arc.clone());
         }
 
-        self.simulation_log.push(format!("🔗 Connected {} ↔ {}", a, b));
+       self.log(format!("🔗 Connected {} ↔ {}", a, b));
     }
-    // Add function to spawn a new drone
-    // in your GUI-side spawn_drone
+
     fn spawn_drone(&mut self, id: NodeId, pdr: f32, connections: Vec<NodeId>) {
         // 1. Ask the Simulation Controller to spawn (MUST happen first)
         if let Some(ctrl_arc) = &self.simulation_controller {
             let mut ctrl = ctrl_arc.lock().unwrap();
             if let Err(e) = ctrl.spawn_drone(id, pdr, connections.clone()) {
-                self.simulation_log.push(format!("SC refused spawn: {}", e));
+               self.log(format!("SC refused spawn: {}", e));
                 return;
             }
         }
@@ -202,7 +197,7 @@ impl NetworkApp {
 
             // 🛠️ Check AFTER asking SC to spawn
             if cfg.drone.iter().any(|d| d.id == id) {
-                self.simulation_log.push(format!("⚠️ Warning: Drone {} already present in config, updating.", id));
+               self.log(format!("⚠️ Warning: Drone {} already present in config, updating.", id));
             } else {
                 cfg.add_drone(id);
             }
@@ -221,14 +216,10 @@ impl NetworkApp {
 
         // 3. Rebuild the renderer
         if let (Some(renderer), Some(cfg_arc)) = (&mut self.network_renderer, &self.network_config) {
-
-
             renderer.rebuild_preserving_topology(cfg_arc.clone());
-
-            //renderer.build_from_config(cfg_arc.clone());
         }
 
-        self.simulation_log.push(format!("🎉 Spawned drone {}", id));
+       self.log(format!("🎉 Spawned drone {}", id));
     }
     fn render_simulation_tabs(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("tabs_panel").show(ctx, |ui| {
@@ -248,21 +239,83 @@ impl NetworkApp {
         }
     }
 
+    fn render_welcome_screen(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let available_height = ui.available_height();
+            let available_width = ui.available_width();
+
+            // Center everything
+            ui.allocate_ui_at_rect(
+                egui::Rect::from_center_size(
+                    egui::Pos2::new(available_width / 2.0, available_height / 2.0),
+                    egui::Vec2::new(300.0, 300.0), // dimensione del contenitore
+                ),
+                |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(10.0);
+
+                        ui.label(
+                            RichText::new("Krusty Club")
+                                .color(Color32::DARK_GRAY)
+                                .size(32.0)
+                                .strong(),
+                        );
+                        ui.add_space(40.0);
+
+                        // Titolo grande
+                        ui.label(
+                            RichText::new("Drone Network Simulation")
+                                .color(Color32::DARK_BLUE)
+                                .size(32.0)
+                                .strong(),
+                        );
+
+                        ui.add_space(40.0);
+
+                        // Bottoni ingranditi e centrati
+                        if ui
+                            .add_sized([200.0, 40.0], egui::Button::new("▶ Start Simulation"))
+                            .clicked()
+                        {
+                            self.state = AppState::Simulation;
+                        }
+
+                        ui.add_space(20.0);
+
+                        if ui
+                            .add_sized([200.0, 40.0], egui::Button::new("⛔ Close Application"))
+                            .clicked()
+                        {
+                            std::process::exit(0);
+                        }
+                    });
+                },
+            );
+        });
+    }
+
+
     fn render_network_view(&mut self, ctx: &egui::Context) {
         // Bottom panel for simulation log with increased height
         egui::TopBottomPanel::bottom("simulation_log")
             .resizable(true)
             .default_height(120.0)
             .min_height(60.0)
-            .max_height(150.0)
+            .max_height(250.0)
             .show(ctx, |ui| {
-                ui.heading("Simulation Log");
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    for (idx, log) in self.simulation_log.iter().enumerate() {
-                        let color = if idx % 2 == 0 { Color32::LIGHT_GRAY } else { Color32::GRAY };
-                        ui.colored_label(color, log);
-                    }
-                });
+                egui::Frame::default()
+                    .fill(Color32::from_gray(240))
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width()); // 🔧 This ensures full width
+                        ui.heading("Simulation Log");
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            let logs = self.simulation_log.lock().unwrap();
+                            for (idx, log) in logs.iter().enumerate() {
+                                let color = if idx % 2 == 0 { Color32::DARK_GRAY } else { Color32::DARK_BLUE };
+                                ui.colored_label(color, log);
+                            }
+                        });
+                    });
             });
 
         // Central panel for network rendering
@@ -392,34 +445,31 @@ impl NetworkApp {
                             });
 
                             if already_exists {
-                                self.simulation_log
-                                    .push(format!("Cannot spawn: ID {} already in use", self.new_drone_id));
+                                self.log(format!("Cannot spawn: ID {} already in use", self.new_drone_id));
                             } else if connections.is_empty() {
-                                self.simulation_log
-                                    .push("Cannot spawn: need at least one connection".into());
+                                self.log("Cannot spawn: need at least one connection");
                             } else if bad_conn {
-                                self.simulation_log
-                                    .push("Cannot spawn: invalid connection IDs".into());
+                                self.log("Cannot spawn: invalid connection IDs");
                             } else {
                                 // 3) spawn + rebuild
                                 //self.spawn_drone(self.new_drone_id, self.new_drone_pdr, connections.clone());
                                 self.show_spawn_drone_popup = false;
 
                                 // 3a) spawn in the simulation controller
-                                        if let Some(ctrl) = &self.simulation_controller {
-                                            let mut lock = ctrl.lock().unwrap();
-                                        if let Err(e) = lock.spawn_drone(self.new_drone_id, self.new_drone_pdr, connections.clone()) {
-                                            self.simulation_log.push(format!("Failed to spawn drone: {}", e));
+                                if let Some(ctrl) = &self.simulation_controller {
+                                    let mut lock = ctrl.lock().unwrap();
+                                    if let Err(e) = lock.spawn_drone(self.new_drone_id, self.new_drone_pdr, connections.clone()) {
+                                       self.log(format!("Failed to spawn drone: {}", e));
 
-                                            return;
-                            }
-                        }
+                                        return;
+                                    }
+                                }
 
-                        // 3b) immediately update the UI renderer
-                        if let Some(renderer) = self.network_renderer.as_mut() {
-                            renderer.add_drone(self.new_drone_id, self.new_drone_pdr, connections.clone());
+                                // 3b) immediately update the UI renderer
+                                if let Some(renderer) = self.network_renderer.as_mut() {
+                                    renderer.add_drone(self.new_drone_id, self.new_drone_pdr, connections.clone());
 
-                        }
+                                }
 
                                 self.new_drone_connections_str.clear();
                                 ctx.request_repaint();
@@ -431,63 +481,6 @@ impl NetworkApp {
 
     }
 
-
-
-
-    fn render_welcome_screen(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            let available_height = ui.available_height();
-            let available_width = ui.available_width();
-
-            // Center everything
-            ui.allocate_ui_at_rect(
-                egui::Rect::from_center_size(
-                    egui::Pos2::new(available_width / 2.0, available_height / 2.0),
-                    egui::Vec2::new(300.0, 300.0), // dimensione del contenitore
-                ),
-                |ui| {
-                    ui.vertical_centered(|ui| {
-                        ui.add_space(10.0);
-
-                        ui.label(
-                            RichText::new("Krusty Club")
-                                .color(Color32::DARK_GRAY)
-                                .size(32.0)
-                                .strong(),
-                        );
-                        ui.add_space(40.0);
-
-                        // Titolo grande
-                        ui.label(
-                            RichText::new("Drone Network Simulation")
-                                .color(Color32::DARK_BLUE)
-                                .size(32.0)
-                                .strong(),
-                        );
-
-                        ui.add_space(40.0);
-
-                        // Bottoni ingranditi e centrati
-                        if ui
-                            .add_sized([200.0, 40.0], egui::Button::new("▶ Start Simulation"))
-                            .clicked()
-                        {
-                            self.state = AppState::Simulation;
-                        }
-
-                        ui.add_space(20.0);
-
-                        if ui
-                            .add_sized([200.0, 40.0], egui::Button::new("⛔ Close Application"))
-                            .clicked()
-                        {
-                            std::process::exit(0);
-                        }
-                    });
-                },
-            );
-        });
-    }
 
     fn auto_fit_and_center_graph(&mut self, canvas_rect: Rect) {
         if let Some(renderer) = &self.network_renderer {
@@ -534,11 +527,9 @@ impl NetworkApp {
             // ✅ TEMPORARY BOOTSTRAP
             if self.chat_ui.client_status.is_empty() || self.chat_ui.servers.is_empty() {
                 if let Some(ctrl) = &self.simulation_controller {
-                    println!("🌱🌱🌱🌱🌱🌱BEFORE LOCK");
                     let ctrl = ctrl.lock().unwrap();
                     let client_ids = ctrl.get_all_client_ids();
                     let server_ids = ctrl.get_all_server_ids();
-                    println!("🟢🟢🟢🟢🟢after LOCK");
                     drop(ctrl); // Explicitly release the lock
 
                     for client_id in client_ids {
@@ -587,6 +578,7 @@ impl NetworkApp {
         drone_factory: Arc<dyn Fn(NodeId, Sender<DroneEvent>, Receiver<DroneCommand>, Receiver<Packet>, HashMap<NodeId, Sender<Packet>>, f32) -> Box<dyn wg_2024::drone::Drone> + Send + Sync>,
         config_path: &str,
         gui_input: SharedGuiInput,
+        simulation_log:Arc<Mutex<Vec<String>>>,
     ) -> Self {
 
         cc.egui_ctx.set_visuals(egui::Visuals::light());
@@ -615,13 +607,13 @@ impl NetworkApp {
         });
 
         app.controller_thread = Some(controller_thread);
-
+        app.simulation_log=simulation_log.clone();
         app.network_renderer = Some(NetworkRenderer::new_from_config("custom", 50.0, 50.0, config.clone(), &cc.egui_ctx, gui_input.clone()));
 
         if let Some(renderer) = &mut app.network_renderer {
             renderer.set_controller_sender(event_sender);
             renderer.set_simulation_controller(controller.clone());
-            app.simulation_log.push("Controller connected to network renderer".to_string());
+            app.log("Controller connected to network renderer".to_string());
         }
 
         app.chat_ui = ChatUIState::new(gui_input.clone());
@@ -634,11 +626,11 @@ impl NetworkApp {
 
     pub fn detect_and_log_topology(&mut self, path: &str, config: Arc<Mutex<ParsedConfig>>) {
         if let Some(topology_name) = config.lock().unwrap().detect_topology() {
-            self.simulation_log.push(format!("Loaded topology from '{}'", path));
-            self.simulation_log.push(format!("Detected topology: {}", topology_name));
+           self.log(format!("Loaded topology from '{}'", path));
+           self.log(format!("Detected topology: {}", topology_name));
             self.selected_topology = Some(topology_name);
         } else {
-            self.simulation_log.push(format!("Could not detect known topology from '{}'", path));
+           self.log(format!("Could not detect known topology from '{}'", path));
         }
 
         self.topology_selected = true;
@@ -658,7 +650,7 @@ impl Default for NetworkApp {
             network_renderer: None,
             topology_selected: false,
             selected_topology: None,
-            simulation_log: Vec::new(),
+            simulation_log: Arc::new(Mutex::new(Vec::new())),
             chat_messages: Vec::new(),
             chat_input: String::new(),
             is_simulation_running: false,
@@ -686,7 +678,6 @@ impl eframe::App for NetworkApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         match self.state {
             AppState::Welcome => self.render_welcome_screen(ctx),
-            //AppState::Topology => self.render_topology_selection(ctx),
             AppState::Simulation => self.render_simulation_tabs(ctx),
             _ => {}
         }

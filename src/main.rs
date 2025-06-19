@@ -34,8 +34,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (command_sender, command_receiver) = unbounded::<DroneCommand>();
 
     let gui_input_queue = new_gui_input_queue();
+    let simulation_log = Arc::new(Mutex::new(Vec::new()));
 
-    println!("🔗 GUI_INPUT addr (main): {:p}", &*gui_input_queue.lock().unwrap());
 
     let config = TOML_parser::parse_config(&config_path)?;
     let parsed_config = Arc::new(Mutex::new(config.clone()));
@@ -68,6 +68,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         &config_path,
         vec![], // temporary, you'll assign drone_impls after setup_channels()
         controller.clone(),
+        simulation_log.clone(),
     )?;
 
    initializer.setup_channels();
@@ -86,9 +87,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     initializer.drone_impls = drone_impls;
 
     initializer.initialize(gui_input_queue.clone())?;
-    println!("Network initialized successfully");
 
-    println!("Starting GUI application");
     SimulationController::start_background_thread(controller.clone(),event_receiver.clone());
     run_gui_application(
         event_sender.clone(),
@@ -99,6 +98,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         drone_factory,
         &config_path,
         gui_input_queue.clone(),
+        simulation_log.clone(),
     )?;
 
     Ok(())
@@ -114,6 +114,7 @@ fn run_gui_application(
     drone_factory: Arc<dyn Fn(NodeId, Sender<DroneEvent>, Receiver<DroneCommand>, Receiver<Packet>, HashMap<NodeId, Sender<Packet>>, f32) -> Box<dyn Drone> + Send + Sync>,
     config_path: &str,
     gui_input_queue: SharedGuiInput,
+    simulation_log: Arc<Mutex<Vec<String>>>,
 ) -> Result<(), Box<dyn Error>> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -137,6 +138,7 @@ fn run_gui_application(
                 drone_factory.clone(),
                 config_path,
                 gui_input_queue.clone(),
+                simulation_log.clone(),
                 )))
         }),
     )?;
