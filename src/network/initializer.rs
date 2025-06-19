@@ -397,6 +397,7 @@ pub struct NetworkInitializer {
     controller_tx: Sender<DroneEvent>,
     controller_rx: Receiver<DroneCommand>,
     simulation_controller: Arc<Mutex<SimulationController>>,
+    simulation_log: Arc<Mutex<Vec<String>>>,
 }
 
 /*
@@ -428,7 +429,7 @@ use rolling_drone::RollingDrone;
 //ok
 
 impl NetworkInitializer {
-    pub fn new(config_path: &str, drone_impls: Vec<DroneWithId>,    simulation_controller: Arc<Mutex<SimulationController>> ) -> Result<Self, Box<dyn Error>> {
+    pub fn new(config_path: &str, drone_impls: Vec<DroneWithId>, simulation_controller: Arc<Mutex<SimulationController>>, simulation_log: Arc<Mutex<Vec<String>>>) -> Result<Self, Box<dyn Error>> {
         // Read config file
         let config_str = fs::read_to_string(config_path)?;
 
@@ -452,6 +453,7 @@ impl NetworkInitializer {
             controller_tx,
             controller_rx,
             simulation_controller,
+            simulation_log
 
         })
     }
@@ -467,10 +469,10 @@ impl NetworkInitializer {
         self.initialize_drones();
 
         // Spawn client threads
-        self.initialize_clients(gui_input_queue.clone());
+        self.initialize_clients(gui_input_queue.clone(),self.simulation_log.clone());
 
         // Spawn server threads
-        self.initialize_servers(gui_input_queue.clone());
+        self.initialize_servers(gui_input_queue.clone(),self.simulation_log.clone());
 
         // Spawn simulation controller thread
         self.spawn_controller();
@@ -767,8 +769,10 @@ impl NetworkInitializer {
     }
 
 
-    fn initialize_clients(&mut self, gui_input: SharedGuiInput) {
+    fn initialize_clients(&mut self, gui_input: SharedGuiInput,log: Arc<Mutex<Vec<String>>>) {
         for (i, client) in self.config.client.iter().enumerate() {
+            let log_clone=log.clone();
+
             let client_id = client.id;
 
             // Get the full sender map for this client (set up in setup_channels)
@@ -785,6 +789,7 @@ impl NetworkInitializer {
                 .clone();
 
             let gui_clone = gui_input.clone();
+            let log_clone = self.simulation_log.clone();
 
             if self.config.client.len() == 2 {
                 if client_id % 2 == 0 {
@@ -792,6 +797,7 @@ impl NetworkInitializer {
                     thread::spawn(move || {
                         //println!("client2 spawned");
                         let mut cl2 = client2::MyClient::new(client_id, client_rx, senders);
+                        cl2.attach_log(log_clone);
                         cl2.run(gui_clone);
                     });
                 } else {
@@ -799,6 +805,7 @@ impl NetworkInitializer {
                     thread::spawn(move || {
                         //println!("client1 spawned");
                         let mut cl1 = client1::MyClient::new(client_id, client_rx, senders, HashMap::new(), None, HashSet::new());
+                        cl1.attach_log(log_clone);
                         cl1.run(gui_clone);
                     });
                 }
@@ -808,6 +815,7 @@ impl NetworkInitializer {
                     thread::spawn(move || {
                         //println!("client2 spawned");
                         let mut cl2 = client2::MyClient::new(client_id, client_rx, senders);
+                        cl2.attach_log(log_clone);
                         cl2.run(gui_clone);
                     });
                 } else {
@@ -815,6 +823,7 @@ impl NetworkInitializer {
                     thread::spawn(move || {
                         //println!("client1 spawned");
                         let mut cl1 = client1::MyClient::new(client_id, client_rx, senders, HashMap::new(), None, HashSet::new());
+                        cl1.attach_log(log_clone);
                         cl1.run(gui_clone);
                     });
                 }
@@ -822,8 +831,9 @@ impl NetworkInitializer {
         }
     }
 
-    fn initialize_servers(&mut self, gui_input: SharedGuiInput) {
+    fn initialize_servers(&mut self, gui_input: SharedGuiInput,log: Arc<Mutex<Vec<String>>>) {
         for server in &self.config.server {
+            let log_clone=log.clone();
             let server_id = server.id;
 
             // Get the full sender map for this server (set up in setup_channels)
@@ -838,10 +848,12 @@ impl NetworkInitializer {
                 .get(&server_id)
                 .expect("setup_channels must have created this")
                 .clone();
+            println!("👋👋NetworkApp log addr: {:p}", Arc::as_ptr(&log_clone));
 
             let gui_clone = gui_input.clone();
             thread::spawn(move || {
                 let mut srv = server::server::new(server_id as u8, senders, server_rx);
+                srv.attach_log(log_clone);
                 srv.run(gui_clone);
             });
         }

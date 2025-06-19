@@ -288,7 +288,6 @@ impl ChatUIState {
                             })
                         {
                             self.pending_chat_request = Some((client_id, peer_id));
-                            push_gui_message(&self.gui_input, client_id, format!("[ChatRequest]::{peer_id}"));
                             self.selected_client = Some(peer_id);
                             // and if you were using selected_server elsewhere:
                             self.selected_server = Some(server_id);
@@ -605,6 +604,8 @@ impl ChatUIState {
                         } else {
                             self.chat_messages = self.chat_history.get(&key).cloned().unwrap_or_default();
                         }
+                        push_gui_message(&self.gui_input, requester, format!("[ChatRequest]::{target}"));
+
                     } else if decline_clicked {
                         self.pending_chat_request = None;
                     }

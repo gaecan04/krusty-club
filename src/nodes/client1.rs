@@ -3,7 +3,7 @@ use std::time::Instant;
 //use std::io::Write;
 use std::process::Command;
 use std::env::temp_dir;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 //use std::path::PathBuf;
 use once_cell::sync::Lazy;
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -54,6 +54,7 @@ pub struct MyClient{
     pub connected_server_id : Option<NodeId>,
     pub seen_flood_ids : HashSet<(u64, NodeId)>,
     pub route_cache : HashMap<NodeId, Vec<NodeId>>,
+    pub simulation_log: Arc<Mutex<Vec<String>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +86,8 @@ impl MyClient {
             connected_server_id,
             seen_flood_ids,
             route_cache : HashMap::new(),
+            simulation_log: Arc::new(Mutex::new(Vec::new())),
+
         }
     }
 
@@ -124,6 +127,16 @@ impl MyClient {
                         std::thread::sleep(std::time::Duration::from_millis(1));
                 },
             }
+        }
+    }
+
+    pub fn attach_log(&mut self, log: Arc<Mutex<Vec<String>>>) {
+        self.simulation_log = log;
+    }
+
+    fn log(&self, message: impl ToString) {
+        if let Ok(mut log) = self.simulation_log.lock() {
+            log.push(message.to_string());
         }
     }
 
@@ -687,6 +700,9 @@ impl MyClient {
                     println!("Client {} processing LOGIN command for server {}.", self.id, parsed_server_id);
                     self.connected_server_id = Some(parsed_server_id);
                     // For real message: return Some("[Login]".to_string())
+
+                    self.log(format!("Login from client {}",self.id));
+
                     Some(format!("[Login]::{}",parsed_server_id))
                 } else {
                     eprintln!("Client {} received LOGIN command with invalid server {}.", self.id, server_id);

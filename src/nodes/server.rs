@@ -13,6 +13,7 @@ use petgraph::visit::EdgeRef;
 use std::collections::VecDeque;
 use std::fs;
 use std::io::Cursor;
+use std::sync::{Arc, Mutex};
 //use base64::Engine;
 //use base64::engine::general_purpose::STANDARD;
 use crate::simulation_controller::gui_input_queue::SharedGuiInput;
@@ -166,9 +167,20 @@ pub struct server {
 
     //recovery_in_progress:  HashMap<(u64, NodeId), bool>, // Tracks if recovery is already in progress for a session
     //drop_counts: HashMap<(u64, NodeId), usize>, // Track number of drops per session
+    simulation_log: Arc<Mutex<Vec<String>>>,
 }
 
 impl server {
+
+    pub fn attach_log(&mut self, log: Arc<Mutex<Vec<String>>>) {
+        self.simulation_log = log;
+    }
+
+    fn log(&self, message: impl ToString) {
+        if let Ok(mut log) = self.simulation_log.lock() {
+            log.push(message.to_string());
+        }
+    }
     pub(crate) fn new(id: u8, packet_sender: HashMap<NodeId,Sender<Packet>>, packet_receiver: Receiver<Packet>) -> Self {
         // Log server creation
         info!("Server {} created.", id);
@@ -185,6 +197,7 @@ impl server {
             sent_fragments: Default::default(),
             chat_history:HashMap::new(),
             media_storage: HashMap::new(),
+            simulation_log: Arc::new(Mutex::new(Vec::new())),
         }
     }
     fn initiate_network_discovery(&self) {
@@ -214,6 +227,9 @@ impl server {
 
         let tick = crossbeam_channel::tick(std::time::Duration::from_secs(1));
         info!("Server {} started running.", self.id);
+        self.log("SERVER STARTED");
+        println!("👋👋👋👋👋👋Server log addr i: {:p}", Arc::as_ptr(&self.simulation_log));
+
         let mut discovery_started=false;
         //self.initiate_network_discovery();
 
@@ -396,6 +412,8 @@ impl server {
                         let login_acknowledgement = format!("[LoginAck]::{}", session_id);
                         self.send_chat_message(session_id, client_id, login_acknowledgement);
                         info!("🚗🚗🚗🚗 LoginAck sent");
+                        self.log("Received Login");
+
                     }
                 } else {
                     error!("server_id in Login request is not the id of the server receiving the fragment!")
