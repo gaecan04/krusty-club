@@ -301,7 +301,7 @@ impl NetworkApp {
             .resizable(true)
             .default_height(120.0)
             .min_height(60.0)
-            .max_height(200.0)
+            .max_height(250.0)
             .show(ctx, |ui| {
                 egui::Frame::default()
                     .fill(Color32::from_gray(240))

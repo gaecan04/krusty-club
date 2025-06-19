@@ -197,7 +197,7 @@ impl ChatUIState {
                     }
                 }
             } else {
-                ui.label("⚠️ Failed to lock GUI input buffer");
+                ui.label("⚠ Failed to lock GUI input buffer");
             }
         });
     }
@@ -216,7 +216,9 @@ impl ChatUIState {
                 };
                 if ui.add(egui::Button::new(format!("Client #{client_id}")).fill(color)).clicked() {
                     self.selected_client = Some(client_id);
-                    self.selected_server = None; // hide server-specific rows
+                    if self.active_chat_pair.is_none() {
+                        self.selected_server = None;
+                    } // hide server-specific rows
                 }
             }
         });
@@ -476,7 +478,26 @@ impl ChatUIState {
                     ui.horizontal(|ui| {
                         if let Some((a, b)) = self.active_chat_pair {
                             if ui.button("End Chat").clicked() {
-                                self.pending_chat_termination = Some((a, b));
+                                let initiator = a;
+                                let peer = b;
+                                println!("👉👉👉👉👉HERRE");
+                                if let Some(server_id) = self.selected_server {
+                                    println!("👉👉👉👉👉INIT {} PEER {}",initiator,peer);
+                                    push_gui_message(&self.gui_input, initiator, format!("[ChatFinish]::{peer}"));
+                                    push_gui_message(&self.gui_input, peer, format!("[ChatFinish]::{initiator}"));
+                                }
+
+                                let key = (initiator.min(peer), initiator.max(peer));
+                                if self.chat_type_map.get(&key) == Some(&ChatType::Temporary) {
+                                    self.chat_messages.clear();
+                                }
+                                self.chat_type_map.remove(&key);
+
+                                self.client_status.insert(initiator, ClientStatus::Connected);
+                                self.client_status.insert(peer, ClientStatus::Connected);
+                                self.active_chat_pair = None;
+                                self.pending_chat_request = None;
+
                             }
                         }
                     });
@@ -585,7 +606,7 @@ impl ChatUIState {
 
                     // Only allow responding if the target client is selected
                     if Some(target) != self.selected_client {
-                        ui.label(RichText::new(format!("⚠️ Click on Client #{} to respond to this request", target)).color(Color32::YELLOW));
+                        ui.label(RichText::new(format!("⚠ Click on Client #{} to respond to this request", target)).color(Color32::YELLOW));
                     } else if accept_clicked {
                         let chat_type = self.pending_chat_type.unwrap_or(ChatType::Normal);
                         let key = (requester.min(target), requester.max(target));
@@ -605,57 +626,61 @@ impl ChatUIState {
                             self.chat_messages = self.chat_history.get(&key).cloned().unwrap_or_default();
                         }
                         push_gui_message(&self.gui_input, requester, format!("[ChatRequest]::{target}"));
+                        // push_gui_message(&self.gui_input, target, format!("[ChatRequest]::{requester}"));
+
 
                     } else if decline_clicked {
                         self.pending_chat_request = None;
                     }
                 });
         }
+        /*
+                if let Some((initiator, peer)) = self.pending_chat_termination {
+                    // Show the chat termination popup regardless of the selected client
+                    egui::Window::new(format!("Confirm End Chat for Client #{}", peer))
+                        .collapsible(false)
+                        .show(ui.ctx(), |ui| {
+                            ui.label(format!("Client #{} wants to end the chat with Client #{}.", initiator, peer));
 
-        if let Some((initiator, peer)) = self.pending_chat_termination {
-            // Show the chat termination popup regardless of the selected client
-            egui::Window::new(format!("Confirm End Chat for Client #{}", peer))
-                .collapsible(false)
-                .show(ui.ctx(), |ui| {
-                    ui.label(format!("Client #{} wants to end the chat with Client #{}.", initiator, peer));
+                            let mut confirm_clicked = false;
+                            let mut cancel_clicked = false;
 
-                    let mut confirm_clicked = false;
-                    let mut cancel_clicked = false;
+                            ui.horizontal(|ui| {
+                                if ui.button("Confirm End").clicked() {
+                                    confirm_clicked = true;
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    cancel_clicked = true;
+                                }
+                            });
 
-                    ui.horizontal(|ui| {
-                        if ui.button("Confirm End").clicked() {
-                            confirm_clicked = true;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            cancel_clicked = true;
-                        }
-                    });
+                            // Only allow responding if the peer client is selected
+                            if Some(peer) != self.selected_client {
+                                ui.label(RichText::new(format!("⚠ Click on Client #{} to respond to this request", peer)).color(Color32::YELLOW));
+                            } else if confirm_clicked {
+                                if let Some(server_id) = self.selected_server {
+                                    push_gui_message(&self.gui_input, initiator, format!("[ChatFinish]::{peer}"));
+                                    push_gui_message(&self.gui_input, peer, format!("[ChatFinish]::{initiator}"));
 
-                    // Only allow responding if the peer client is selected
-                    if Some(peer) != self.selected_client {
-                        ui.label(RichText::new(format!("⚠️ Click on Client #{} to respond to this request", peer)).color(Color32::YELLOW));
-                    } else if confirm_clicked {
-                        if let Some(server_id) = self.selected_server {
-                            push_gui_message(&self.gui_input, initiator, format!("[ChatFinish]::{peer}"));
-                        }
+                                }
 
-                        let key = (initiator.min(peer), initiator.max(peer));
-                        if self.chat_type_map.get(&key) == Some(&ChatType::Temporary) {
-                            self.chat_messages.clear();
-                        }
-                        self.chat_type_map.remove(&key);
+                                let key = (initiator.min(peer), initiator.max(peer));
+                                if self.chat_type_map.get(&key) == Some(&ChatType::Temporary) {
+                                    self.chat_messages.clear();
+                                }
+                                self.chat_type_map.remove(&key);
 
-                        self.client_status.insert(initiator, ClientStatus::Connected);
-                        self.client_status.insert(peer, ClientStatus::Connected);
-                        self.active_chat_pair = None;
-                        self.pending_chat_termination = None;
-                        self.pending_chat_request = None;
-                    } else if cancel_clicked {
-                        self.pending_chat_termination = None;
-                    }
-                });
-        }
-
+                                self.client_status.insert(initiator, ClientStatus::Connected);
+                                self.client_status.insert(peer, ClientStatus::Connected);
+                                self.active_chat_pair = None;
+                                self.pending_chat_termination = None;
+                                self.pending_chat_request = None;
+                            } else if cancel_clicked {
+                                self.pending_chat_termination = None;
+                            }
+                        });
+                }
+        */
         ui.separator();
         if let Some((a, b)) = self.active_chat_pair {
             let options = [a, b];
@@ -763,7 +788,6 @@ fn load_broadcast_files() -> Vec<(String, String)> {
                 }
             }
         }
-    }
-    files
+       }
+   files
 }
-

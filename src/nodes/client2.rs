@@ -524,7 +524,6 @@ impl MyClient {
                 }
             },
             ["[ClientListRequest]"] => {
-
                 info!("Requesting the list of clients available for chat");
                 Ok(command_string)
             },
