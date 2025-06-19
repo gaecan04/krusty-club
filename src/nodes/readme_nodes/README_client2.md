@@ -249,9 +249,11 @@ let tokens: Vec<&str> = message_string.trim().splitn(3, "::").collect();
 Any other message format will be discarded.
 ---
 
-## 🌐 Krusty_club-related Method: `process_gui_command(command_string)`
+## 🌐 Krusty_club-related Method: `process_gui_command(command_string)` and auxiliary log
 ### Purpose:
-After operating on the command_string as we do for `message` in `self.packet_command_handling(...)` we match its content and send the realtive information to the simulation log through the `simulation_log`.
+After operating on the command_string as we do for `message` in `self.packet_command_handling(...)` we match its content and send the relative information to the simulation log through the `simulation_log` using:
+- `log(message)`->creates a copy of the log and adds the message we want to display on the log;
+- `attach_log(log)`-> takes the `Arc<Mutex<Vec<String>>>` we created inside `log(...)` and updates the `simulation_log`.
 All match cases will generate a different response from the server.
 - `"[Login]", server_id_str` -> we set the server_id as the id of the server we are connected to, and then we send the message to that same server to login. 
 - `"[Logout]"` -> if we are not chatting with anyone, we send the server a logout request to be removed from its client list.
@@ -266,6 +268,7 @@ All match cases will generate a different response from the server.
 - `"[MediaListRequest]"` -> before downloading a media or after uploading one we can check for the MediaList.
 - `"[FloodRequired]",action` -> some GUI actions may require the client to flood the network (e.g. a drone crash), since we don't need to send anything to the server we just start the flood using `self.send_flood_request()` and generate the "NO_CHAT_COMMAND" response.
 Any other format is discarded.
+
 ---
 ## 🌐 client2-related methods for graph management
 ### Purpose:

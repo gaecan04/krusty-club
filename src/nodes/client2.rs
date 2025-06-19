@@ -33,7 +33,7 @@ use std::time::Duration;
 use bincode::error::IntegerType::Usize;
 use rand::random;
 use crate::simulation_controller::gui_input_queue::{push_gui_message, new_gui_input_queue, SharedGuiInput};
-use std::process::{Command, exit};
+
 
 //the first two global variable are kept to ensure consistency throughout the various chats
 static FLOOD_IDS: Lazy<Mutex<u64>> = Lazy::new(|| Mutex::new(0));
@@ -72,42 +72,30 @@ impl MyClient {
 
         }
     }
-
-
-
     pub (crate)fn run(&mut self, gui_input: SharedGuiInput) {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.inner_run(gui_input.clone());
-        }));
+        loop {
+            let gui_input = gui_input.clone();
 
-        match result {
-            Ok(_) => {
-                info!("run() exited normally.");
-            }
-            Err(e) => {
-                if let Some(s) = e.downcast_ref::<&str>() {
-                    warn!("⚠ run() panicked: {}", s);
-                } else if let Some(s) = e.downcast_ref::<String>() {
-                    warn!("⚠ run() panicked: {}", s);
-                } else {
-                    warn!("⚠ run() panicked with unknown error.");
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.inner_run(gui_input);
+            }));
+
+            match result {
+                Ok(_) => {
+                    info!("run() exited normally.");
+                    break;
                 }
-
-                // Relaunch the application binary
-                info!("Restarting the entire application...");
-
-                let current_exe = std::env::current_exe().expect("Failed to get current executable path");
-
-                let _ = Command::new(current_exe)
-                    .args(std::env::args().skip(1)) // preserve original args
-                    .spawn()
-                    .expect("Failed to restart application");
-
-                // Optional: give the new process a second to initialize
-                std::thread::sleep(std::time::Duration::from_secs(1));
-
-                // Terminate the current process
-                exit(0);
+                Err(e) => {
+                    if let Some(s) = e.downcast_ref::<&str>() {
+                        warn!("⚠ run() panicked: {}", s);
+                    } else if let Some(s) = e.downcast_ref::<String>() {
+                        warn!("⚠ run() panicked: {}", s);
+                    } else {
+                        warn!("⚠ run() panicked with unknown error.");
+                    }
+                    info!("Restarting run() after short delay...");
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
             }
         }
     }
@@ -155,16 +143,6 @@ impl MyClient {
         }
     }
 
-    pub fn attach_log(&mut self, log: Arc<Mutex<Vec<String>>>) {
-        self.simulation_log = log;
-    }
-
-    fn log(&self, message: impl ToString) {
-        if let Ok(mut log) = self.simulation_log.lock() {
-            log.push(message.to_string());
-        }
-    }
-
     fn process_packet (&mut self, packet: Packet) {
         match &mut packet.clone().pack_type {
             PacketType::FloodRequest(request) => {
@@ -174,7 +152,6 @@ impl MyClient {
                 self.process_flood_response(response);
             },
             PacketType::MsgFragment(fragment) => {
-                self.send_ack(&mut (packet.clone()) , fragment);
                 self.reassemble_packet(fragment , &mut (packet.clone()));
             },
             PacketType::Ack(_ack) => {
@@ -357,7 +334,7 @@ impl MyClient {
                 data,
             };
 
-            let packet = Packet{ // we encapsulate the fragment in the packet to be sent through the threads
+            let packet = Packet{
                 routing_header: SourceRoutingHeader{
                     hop_index : 1, // the hop index is initialized to 1 to stay consistent with the logic of the drones
                     hops : self.best_path(self.id , (*CHATTING_STATUS.lock().unwrap()).2).unwrap(),
@@ -386,7 +363,7 @@ impl MyClient {
     }
 
     fn send_flood_request(&self) {
-        println!(" 🦋🦋🦋Incrementing FLOOD_IDS...");
+        println!("🦋🦋🦋Incrementing FLOOD_IDS...");
         self.increment_ids(&FLOOD_IDS);
 
         println!("🦋🦋🦋Building FloodRequest...");
@@ -444,7 +421,6 @@ impl MyClient {
         match tokens.as_slice() {
             ["[LoginAck]" , _session]=>{
                 info!("You successfully logged in!");
-
             },
             ["[MessageFrom]", client_id_str, msg]=>{
                 let client_id: NodeId = client_id_str.parse().unwrap_or_default();
@@ -524,6 +500,7 @@ impl MyClient {
                 }
             },
             ["[ClientListRequest]"] => {
+
                 info!("Requesting the list of clients available for chat");
                 Ok(command_string)
             },
@@ -588,10 +565,36 @@ impl MyClient {
                 println!("Unknown format");
                 Err(Box::new(io::Error::new(io::ErrorKind::NotFound, "Unknown format")))
             },
-            }
-       }
+        }
+    }
 
+    pub fn attach_log(&mut self, log: Arc<Mutex<Vec<String>>>) {
+        self.simulation_log = log;
+    }
 
+    fn log(&self, message: impl ToString) {
+        if let Ok(mut log) = self.simulation_log.lock() {
+            log.push(message.to_string());
+        }
+    }
+
+    fn add_node_no_duplicate(&mut self, graph: &mut Graph<u8, u8, Undirected>, node_map: &mut HashMap<NodeId, (NodeIndex, NodeType)>, value: u8 , node_type: NodeType) -> NodeIndex {
+        if let Some(&idx) = node_map.get(&value) {
+            // Node with this value already exists
+            //info!("Node with ID: {:?} , is already present for {:?}" , value , self.id);
+            idx.0
+        } else {
+            // Create new node
+            //info!("Adding node: {:?} to {:?}" , value , self.id);
+            let idx = graph.add_node(value);
+            node_map.insert(value, (idx , node_type));
+            self.node_map = node_map.clone();
+            self.net_graph = graph.clone();
+            info!("NODES => {:?}" , self.node_map);
+            idx
+
+        }
+    }
     fn add_edge_no_duplicate(
         &mut self,
         graph: &mut Graph<u8, u8, Undirected>,
@@ -623,24 +626,6 @@ impl MyClient {
     }
 
 
-    fn add_node_no_duplicate(&mut self, graph: &mut Graph<u8, u8, Undirected>, node_map: &mut HashMap<NodeId, (NodeIndex, NodeType)>, value: u8 , node_type: NodeType) -> NodeIndex {
-        if let Some(&idx) = node_map.get(&value) {
-            // Node with this value already exists
-            //info!("Node with ID: {:?} , is already present for {:?}" , value , self.id);
-            idx.0
-        } else {
-            // Create new node
-            //info!("Adding node: {:?} to {:?}" , value , self.id);
-            let idx = graph.add_node(value);
-            node_map.insert(value, (idx , node_type));
-            self.node_map = node_map.clone();
-            self.net_graph = graph.clone();
-            info!("NODES => {:?}" , self.node_map);
-            idx
-
-        }
-    }
-
     fn remove_all_edges_with_node(&mut self, crash_id: NodeId) {
         let index = *(self.node_map.get(&crash_id).unwrap());
         let edges_to_remove: Vec<_> = self.net_graph.edges(index.0).filter_map(|edge_ref| {
@@ -658,31 +643,6 @@ impl MyClient {
 
         for edge_id in edges_to_remove {
             self.net_graph.remove_edge(edge_id);
-        }
-    }
-
-    fn increase_cost(&mut self , dropper_id: NodeId) {
-        let index = *(self.node_map.get(&dropper_id).unwrap());
-        let graph_copy = self.net_graph.clone();
-        let edges_to_increase: Vec<_> = graph_copy.edges(index.0).filter_map(|edge_ref| {
-            // Get the source and target of the edge
-            let source = edge_ref.source();
-            let target = edge_ref.target();
-
-            // If either endpoint matches our target node, keep this edge
-            if source == index.0 || target == index.0 {
-                Some(edge_ref)
-            } else {
-                None
-            }
-        }).collect();
-
-        for edge in edges_to_increase {
-            if !edge.weight().eq(&u8::MAX){
-                self.net_graph.update_edge(edge.source() , edge.target() , edge.weight()+1);
-                info!("{:?} new weight" , edge);
-            }
-
         }
     }
 
@@ -791,6 +751,33 @@ impl MyClient {
         Some(path)
     }
 
+    fn increase_cost(&mut self , dropper_id: NodeId) {
+        let index = *(self.node_map.get(&dropper_id).unwrap());
+        let graph_copy = self.net_graph.clone();
+        let edges_to_increase: Vec<_> = graph_copy.edges(index.0).filter_map(|edge_ref| {
+            // Get the source and target of the edge
+            let source = edge_ref.source();
+            let target = edge_ref.target();
+
+            // If either endpoint matches our target node, keep this edge
+            if source == index.0 || target == index.0 {
+                Some(edge_ref)
+            } else {
+                None
+            }
+        }).collect();
+
+        for edge in edges_to_increase {
+            if !edge.weight().eq(&u8::MAX){
+                self.net_graph.update_edge(edge.source() , edge.target() , edge.weight()+1);
+                info!("{:?} new weight" , edge);
+            }
+
+        }
+    }
+
+
+
     fn increment_ids( &self , counter: &Lazy<Mutex<u64>>) {
         let mut val = counter.lock().unwrap();
         *val += 1;
@@ -823,10 +810,10 @@ impl MyClient {
                 Self::display_image(&decoded, &file_path)?;
             }
             "mp4" | "avi" | "mov" | "mkv" | "webm" => {
-                Self::display_video(&decoded, &file_path)?;
+                Self::play_video(&decoded, &file_path)?;
             }
             "mp3" | "wav" | "flac" | "ogg" => {
-                Self::display_audio(&decoded, &file_path)?;
+                Self::play_audio(&decoded, &file_path)?;
             }
             _ => {
                 // For unknown formats, just save and try to open
@@ -837,75 +824,6 @@ impl MyClient {
 
         Ok(())
     }
-
-    fn display_image(decoded_data: &[u8], file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
-        // Read image from memory
-        let cursor = Cursor::new(decoded_data);
-        let img = match ImageReader::new(cursor).with_guessed_format()?.decode() {
-            Ok(i) => i,
-            Err(e) => {
-                warn!("Image decode error: {}", e);
-                return Err(Box::new(e));
-            }
-        };
-
-        // Save image to file
-        if let Err(e) = img.save(file_path) {
-            warn!("Failed to save image: {}", e);
-            return Err(Box::new(e));
-        }
-
-        // Display the image using system default application
-        Self::open_with_system(file_path)?;
-
-        Ok(())
-    }
-
-    fn display_video(decoded_data: &[u8], file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
-        // Save video file
-        fs::write(file_path, decoded_data)?;
-
-        // Open with system default video player
-        Self::open_with_system(file_path)?;
-
-        Ok(())
-    }
-
-    fn display_audio(decoded_data: &[u8], file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
-        // Save audio file
-        fs::write(file_path, decoded_data)?;
-
-        // Open with system default audio player
-        Self::open_with_system(file_path)?;
-
-        Ok(())
-    }
-
-    fn open_with_system(file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
-        #[cfg(target_os = "windows")]
-        {
-            std::process::Command::new("cmd")
-                .args(["/C", "start", "", file_path])
-                .spawn()?;
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            std::process::Command::new("open")
-                .arg(file_path)
-                .spawn()?;
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            std::process::Command::new("xdg-open")
-                .arg(file_path)
-                .spawn()?;
-        }
-
-        Ok(())
-    }
-
     fn detect_media_format(data: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
         if data.len() < 12 {
             return Ok("bin".to_string());
@@ -940,6 +858,74 @@ impl MyClient {
                     Ok("bin".to_string())
                 }
             }
-           }
-       }
+        }
+    }
+
+    fn display_image(decoded_data: &[u8], file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        // Read image from memory
+        let cursor = Cursor::new(decoded_data);
+        let img = match ImageReader::new(cursor).with_guessed_format()?.decode() {
+            Ok(i) => i,
+            Err(e) => {
+                warn!("Image decode error: {}", e);
+                return Err(Box::new(e));
+            }
+        };
+
+        // Save image to file
+        if let Err(e) = img.save(file_path) {
+            warn!("Failed to save image: {}", e);
+            return Err(Box::new(e));
+        }
+
+        // Display the image using system default application
+        Self::open_with_system(file_path)?;
+
+        Ok(())
+    }
+
+    fn play_video(decoded_data: &[u8], file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        // Save video file
+        fs::write(file_path, decoded_data)?;
+
+        // Open with system default video player
+        Self::open_with_system(file_path)?;
+
+        Ok(())
+    }
+
+    fn play_audio(decoded_data: &[u8], file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        // Save audio file
+        fs::write(file_path, decoded_data)?;
+
+        // Open with system default audio player
+        Self::open_with_system(file_path)?;
+
+        Ok(())
+    }
+
+    fn open_with_system(file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        #[cfg(target_os = "windows")]
+        {
+            std::process::Command::new("cmd")
+                .args(["/C", "start", "", file_path])
+                .spawn()?;
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            std::process::Command::new("open")
+                .arg(file_path)
+                .spawn()?;
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            std::process::Command::new("xdg-open")
+                .arg(file_path)
+                .spawn()?;
+        }
+
+        Ok(())
+    }
 }

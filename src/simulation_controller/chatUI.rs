@@ -45,11 +45,9 @@ pub struct ChatUIState {
     pub pending_chat_type: Option<ChatType>,
     pub client_server_codes: HashMap<(NodeId, NodeId), String>,
     pub show_history_popup: bool,
-    pub history_code_input: String,
     pub history_client_id_input: String,
     pub history_target_id_input: String,
-    pub history_code_failed: bool,
-    pub history_code_success: bool,
+
 
     pub media_files: Vec<(String, String)>, // (media_name, full_path)
     pub broadcast_files: Vec<(String, String)>, // (media_name, full_path)
@@ -87,11 +85,9 @@ impl ChatUIState {
             pending_chat_type: None,
             client_server_codes: HashMap::new(),
             show_history_popup: false,
-            history_code_input: String::new(),
             history_client_id_input: String::new(),
             history_target_id_input: String::new(),
-            history_code_failed: false,
-            history_code_success: false,
+
             media_files: load_media_files(),
             broadcast_files: load_broadcast_files(),
             show_server_popup: None,
@@ -140,7 +136,7 @@ impl ChatUIState {
                     ui.label("  Logged in clients:");
                     for cid in &clients {
                         let code = self.client_server_codes.get(&(*cid, server_id)).map_or("N/A", String::as_str);
-                        ui.label(format!("    - Client #{} [Code: {}]", cid, code));
+                        ui.label(format!("    - Client #{} ", cid));
                     }
                     if let Some((a, b)) = self.active_chat_pair {
                         if clients.contains(&a) && clients.contains(&b) {
@@ -509,11 +505,9 @@ impl ChatUIState {
             ui.horizontal(|ui| {
                 if ui.button("Show Chat History").clicked() {
                     self.show_history_popup = true;
-                    self.history_code_input.clear();
                     self.history_client_id_input.clear();
                     self.history_target_id_input.clear();
-                    self.history_code_failed = false;
-                    self.history_code_success = false;
+
                 }
             });
         }
