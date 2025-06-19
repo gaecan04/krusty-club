@@ -98,7 +98,7 @@ impl MyClient {
 
 
     pub(crate) fn run(&mut self, gui_input: SharedGuiInput) {
-        println!("Client {} starting run loop.", self.id);
+        println!("🔗🔗🔗Client {} starting run loop.", self.id);
 
         if self.network_graph.node_count() == 0 {
             println!("Client {} network graph is empty, starting flood discovery.", self.id);
@@ -123,7 +123,7 @@ impl MyClient {
                recv(self.packet_recv) -> packet => {
                    println!("Checking for received packet by client {} ...", self.id);
                    if let Ok(packet) = packet {
-                       println!("Packet received by client {} : {:?}", self.id, packet);
+                       println!("❤❤❤Packet received by client {} : {:?}", self.id, packet);
                        self.process_packet(packet);
                    }
                },
@@ -194,7 +194,7 @@ impl MyClient {
                     sent_msg_info.received_ack_indices.insert(ack.fragment_index);
                     println!("Client {} marked fragment {} of session {} as ACKed.", self.id, ack.fragment_index, packet.session_id);
                     if sent_msg_info.received_ack_indices.len() == sent_msg_info.fragments.len() {
-                        println!("Client {} received all ACKs for session {}. Message considered successfully sent.", self.id, packet.session_id);
+                        println!("✅✅✅Client {} received all ACKs for session {}. Message considered successfully sent.", self.id, packet.session_id);
                         //self.sent_messages.remove(&packet.session_id);
                     }
                 } else {
@@ -235,7 +235,7 @@ impl MyClient {
                             session_id : request.flood_id,
                         };
                         match sender_channel.send(response_packet_to_send) {
-                            Ok(()) => println!("Client {} sent FloodResponse {} back to {} (prev hop).", self.id, request.flood_id, prev_hop_id),
+                            Ok(()) => println!("↩️↩️↩️Client {} sent FloodResponse {} back to {} (prev hop).", self.id, request.flood_id, prev_hop_id),
                             Err(e) => eprintln!("Client {} failed to send FloodResponse {} back to {}: {}", self.id, request.flood_id, prev_hop_id, e),
                         }
                     } else {
@@ -263,7 +263,7 @@ impl MyClient {
                         session_id : request.flood_id,
                     };
                     match sender_channel.send(packet_to_forward) {
-                        Ok(_) => println!("Client {} forwarded FloodRequest {} to neighbor {}.", self.id, request.flood_id, neighbor_id),
+                        Ok(_) => println!("⏩⏩⏩Client {} forwarded FloodRequest {} to neighbor {}.", self.id, request.flood_id, neighbor_id),
                         Err(e) => eprintln!("Client {} failed to forward FloodRequest {} to neighbor {}: {}", self.id, request.flood_id, neighbor_id, e),
                     }
                 }
@@ -275,7 +275,7 @@ impl MyClient {
 
 
     fn start_flood_discovery(&mut self) {
-        println!("Client {} starting flood discovery.", self.id);
+        println!("🦋🦋🦋Client {} starting flood discovery.", self.id);
         //1.generating unique flood_id
         let new_flood_id = {
             let mut id_counter = SESSION_COUNTER.lock().unwrap();
@@ -298,7 +298,7 @@ impl MyClient {
             session_id: new_flood_id,
         };
 
-        println!("Client {} sending FloodRequest {} to all neighbors.", self.id, new_flood_id);
+        println!("🌊🌊🌊Client {} sending FloodRequest {} to all neighbors.", self.id, new_flood_id);
         //4.sending flood_request to all neighbors
         for (&neighbor_id, sender) in &self.packet_send {
             match sender.send(flood_packet.clone()) {
@@ -347,7 +347,7 @@ impl MyClient {
             println!("Client {} received fragment {} for session {}.", self.id, fragment.fragment_index, session_id);
 
             if state.received_indices.len() as u64 == state.total_fragments {
-                println!("Message for session {} reassembled successfully.", session_id);
+                println!("🧩🧩🧩Message for session {} reassembled successfully.", session_id);
                 let total_fragments_local = state.total_fragments;
                 let last_fragment_len_local = state.last_fragment_len;
                 let data_to_process_local = state.data.clone();
@@ -480,7 +480,7 @@ impl MyClient {
                                                 };
                                                 let path_str = temp_file_path.to_string_lossy().into_owned();
                                                 match Command::new(open_command).arg(&path_str).spawn() {
-                                                    Ok(_) => println!("Client {} successfully opened media '{}' with command '{} {}'.", self.id, media_name, open_command, path_str),
+                                                    Ok(_) => println!("🖼️🖼️🖼️Client {} successfully opened media '{}' with command '{} {}'.", self.id, media_name, open_command, path_str),
                                                     Err(e) => eprintln!("Client {} failed to open media '{}' using command '{} {}': {}", self.id, media_name, open_command, path_str, e),
                                                 }
                                             },
@@ -503,7 +503,7 @@ impl MyClient {
             ["[LoginAck]", session_id] => {
                 //format: [LoginAck]::session_id
                 if let Ok(parsed_session_id) = session_id.parse::<u64>() {
-                    println!("Client {} received LOGIN ACK for session {}. Successfully logged in!", self.id, parsed_session_id);
+                    println!("🔑🔑🔑Client {} received LOGIN ACK for session {}. Successfully logged in!", self.id, parsed_session_id);
                 } else {
                     eprintln!("Client {} received LOGIN ACK with invalid session ID: {}.", self.id, session_id);
                 }
@@ -533,7 +533,7 @@ impl MyClient {
             };
             if let Some(sender) = self.packet_send.get(&next_hop_for_ack) {
                 match sender.send(ack_packet_to_send.clone()) {
-                    Ok(()) => println!("Client {} sent ACK for session {} fragment {} to neighbor {}.", self.id, packet.session_id, fragment.fragment_index, next_hop_for_ack),
+                    Ok(()) => println!("👍👍👍Client {} sent ACK for session {} fragment {} to neighbor {}.", self.id, packet.session_id, fragment.fragment_index, next_hop_for_ack),
                     Err(e) => eprintln!("Client {} error sending ACK packet for session {} to neighbor {}: {}. Using ControllerShortcut.", self.id, packet.session_id, next_hop_for_ack, e),
                 }
             } else {
@@ -546,12 +546,12 @@ impl MyClient {
 
 
     fn process_nack(&mut self, nack: &Nack, packet: &mut Packet) {
-        println!("Client {} processing NACK type {:?} for session {}.", self.id, nack.nack_type, packet.session_id);
+        println!("🚨🚨🚨Client {} processing NACK type {:?} for session {}.", self.id, nack.nack_type, packet.session_id);
         match &nack.nack_type {
             NackType::ErrorInRouting(problem_node_id) => {
                 eprintln!("Client {} received ErrorInRouting NACK for session {} at node {}.", self.id, packet.session_id, problem_node_id);
                 self.remove_node_from_graph(*problem_node_id);
-                println!("Client {} removed node {} from graph due to ErrorInRouting.", self.id, problem_node_id);
+                println!("💥💥💥Client {} removed node {} from graph due to ErrorInRouting.", self.id, problem_node_id);
                 let sent_msg_info = self.sent_messages.get_mut(&packet.session_id);
                 if let Some(info) = sent_msg_info {
                     info.route_needs_recalculation = true;
@@ -630,7 +630,7 @@ impl MyClient {
                     if packet_to_resend.routing_header.hops.len() > packet_to_resend.routing_header.hop_index {
                         let first_hop = packet_to_resend.routing_header.hops[packet_to_resend.routing_header.hop_index];
                         match self.send_to_neighbor(first_hop, packet_to_resend) {
-                            Ok(_) => println!("Client {} resent fragment {} for session {} to {}.", self.id, fragment_to_resend.fragment_index, packet.session_id, first_hop),
+                            Ok(_) => println!("🔁🔁🔁Client {} resent fragment {} for session {} to {}.", self.id, fragment_to_resend.fragment_index, packet.session_id, first_hop),
                             Err(e) => eprintln!("Client {} failed to resend fragment {} for session {} to {}: {}", self.id, fragment_to_resend.fragment_index, packet.session_id, first_hop, e),
                         }
                     } else {
@@ -676,11 +676,8 @@ impl MyClient {
                 if let (Some(&prev_node_idx), Some(&current_node_idx)) = (self.node_id_to_index.get(&prev_node_id), self.node_id_to_index.get(&current_node_id)) {
                     let edge_exists = self.network_graph.contains_edge(current_node_idx, prev_node_idx) || self.network_graph.contains_edge(prev_node_idx, current_node_idx);
                     if !edge_exists {
-                        println!("Client {} adding edge: {} -> {}.", self.id, prev_node_id, current_node_id);
                         self.network_graph.add_edge(prev_node_idx, current_node_idx, 0);
                         self.network_graph.add_edge(current_node_idx, prev_node_idx, 0);
-                    } else {
-                        println!("Client {}: edge {} -> {} already exists.", self.id, prev_node_id, current_node_id);
                     }
                 } else {
                     eprintln!("Client {} error: current node id {} not found in node_id_to_index map while processing path trace.", self.id, current_node_id);
@@ -691,7 +688,7 @@ impl MyClient {
 
 
     fn process_gui_command(&mut self, dest_id: NodeId, command_string: String) {
-        println!("Client {} processing GUI command '{}' for {}.", self.id, command_string, dest_id);
+        println!("⌨️⌨️⌨️Client {} processing GUI command '{}' for {}.", self.id, command_string, dest_id);
         let tokens: Vec<&str> = command_string.trim().split("::").collect();
         let command_type_str = tokens.get(0).unwrap_or(&"");
         let high_level_message_info: Option<String> = match tokens.as_slice() {
@@ -730,7 +727,7 @@ impl MyClient {
                 if let Ok(target_client_id) = target_id.parse::<NodeId>() {
                     if let Some(mem_server_id) = self.connected_server_id {
                         println!("Client {} processing MESSAGE TO command for client {} via server {} with content: {}.", self.id, target_client_id, mem_server_id, message_content);
-                        self.log(format!("MessageTo::{target_client_id}::{message_content} command from client: {}", self.id));
+                        self.log(format!("MessageTo command from client: {}", self.id));
                         Some(format!("[MessageTo]::{target_client_id}::{message_content}"))
                     } else {
                         eprintln!("Client {} received MESSAGE TO command while not logged in. Ignoring.", self.id);
@@ -745,7 +742,7 @@ impl MyClient {
                 if let Ok(_peer_id) = peer_id.parse::<NodeId>() {
                     if let Some(mem_server_id) = self.connected_server_id {
                         println!("Client {} processing CHAT REQUEST command for peer {} via server {}.", self.id, _peer_id, mem_server_id);
-                        self.log(format!("ChatRequest::{_peer_id} command from client: {}", self.id));
+                        self.log(format!("ChatRequest command from client: {}", self.id));
                         Some(format!("[ChatRequest]::{_peer_id}"))
                     } else {
                         eprintln!("Client {} received CHAT REQUEST command while not logged in. Ignoring.", self.id);
@@ -760,7 +757,7 @@ impl MyClient {
                 if let Ok(_peer_id) = peer_id.parse::<NodeId>() {
                     if let Some(mem_server_id) = self.connected_server_id {
                         println!("Client {} processing CHAT FINISH command for peer {} via server {}.", self.id, _peer_id, mem_server_id);
-                        self.log(format!("ChatFinish::{_peer_id} command from client: {}", self.id));
+                        self.log(format!("ChatFinish command from client: {}", self.id));
                         Some(format!("[ChatFinish]::{_peer_id}"))
                     } else {
                         eprintln!("Client {} received CHAT FINISH command while not logged in. Ignoring.", self.id);
@@ -774,7 +771,7 @@ impl MyClient {
             ["[MediaUpload]", media_name, base64_data] => {
                 if let Some(mem_server_id) = self.connected_server_id {
                     println!("Client {} processing MEDIA UPLOAD command for media '{}' via server {}.", self.id, media_name, mem_server_id);
-                    self.log(format!("MediaUpload::{media_name}::{base64_data} command from client: {}", self.id));
+                    self.log(format!("MediaUpload command from client: {}", self.id));
                     Some(format!("[MediaUpload]::{media_name}::{base64_data}"))
                 } else {
                     eprintln!("Client {} received MEDIA UPLOAD command while not logged in. Ignoring.", self.id);
@@ -784,7 +781,7 @@ impl MyClient {
             ["[MediaDownloadRequest]", media_name] => {
                 if let Some(mem_server_id) = self.connected_server_id {
                     println!("Client {} processing MEDIA DOWNLOAD REQUEST command for media '{}' via server {}.", self.id, media_name, mem_server_id);
-                    self.log(format!("MediaDownloadRequest::{media_name} command from client: {}", self.id));
+                    self.log(format!("MediaDownloadRequest command from client: {}", self.id));
                     Some(format!("[MediaDownloadRequest]::{media_name}"))
                 } else {
                     eprintln!("Client {} received MEDIA DOWNLOAD REQUEST command while not logged in. Ignoring.", self.id);
@@ -795,7 +792,7 @@ impl MyClient {
                 if let (Some(_client_id), Some(_target_id)) = (client_id.parse::<NodeId>().ok(), target_id.parse::<NodeId>().ok()) {
                     if let Some(mem_server_id) = self.connected_server_id {
                         println!("Client {} processing HISTORY REQUEST command for history between {} and {} via server {}.", self.id, _client_id, _target_id, mem_server_id);
-                        self.log(format!("HistoryRequest::{_client_id}::{_target_id} command from client: {}", self.id));
+                        self.log(format!("HistoryRequest command from client: {}", self.id));
                         Some(format!("[HistoryRequest]::{_client_id}::{_target_id}"))
                     } else {
                         eprintln!("Client {} received HISTORY REQUEST command while not logged in. Ignoring.", self.id);
@@ -819,7 +816,7 @@ impl MyClient {
             ["[MediaBroadcast]", media_name, base64_data] => {
                 if let Some(mem_server_id) = self.connected_server_id {
                     println!("Client {} processing MEDIA BROADCAST command for media '{}' via server {}.", self.id, media_name, mem_server_id);
-                    self.log(format!("MediaBroadcast::{media_name}::{base64_data} command from client: {}", self.id));
+                    self.log(format!("MediaBroadcast command from client: {}", self.id));
                     Some(format!("[MediaBroadcast]::{media_name}::{base64_data}"))
                 } else {
                     eprintln!("Client {} received MEDIA BROADCAST command while not logged in. Ignoring.", self.id);
@@ -914,7 +911,7 @@ impl MyClient {
                     self.start_flood_discovery();
                 }
                 if command_type_str == &"[Logout]" {
-                    println!("Client {} successfully sent Logout message. Disconnecting internally.", self.id);
+                    println!("🚪🚪🚪Client {} successfully sent Logout message. Disconnecting internally.", self.id);
                     self.connected_server_id = None;
                 }
             } else {
