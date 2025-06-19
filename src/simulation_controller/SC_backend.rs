@@ -217,6 +217,8 @@ impl SimulationController {
             }
 
             if let Some(cmd_tx) = self.command_senders.get(&drone_id) {
+                broadcast_topology_change(&self.gui_input,&self.network_config,&"[FloodRequired]::Crash".to_string());
+
                 cmd_tx
                     .send(DroneCommand::Crash)
                     .map_err(|_| "Failed to send Crash command")?;
