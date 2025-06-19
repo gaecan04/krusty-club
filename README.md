@@ -44,6 +44,8 @@ krusty-club
 ### Instruction to run the project:
 From terminal: 
 ``` rust
-cargo run --features serialize -- topologies/butterfly.toml (eg)
+$env:RUST_LOG = "info"
+cargo run --features "serialize,unlimited_buffer" -- "path to toml file"
+eg: cargo run --features "serialize,unlimited_buffer" -- topologies/butterfly.toml
 ```
 You are invited to try the simulation with different topologies!
