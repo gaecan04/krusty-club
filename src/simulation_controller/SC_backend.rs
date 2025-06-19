@@ -294,87 +294,87 @@ impl SimulationController {
     }
 
 
-        // Add this method to your SimulationController
-        pub fn remove_link(&mut self, a: NodeId, b: NodeId) -> Result<(), Box<dyn std::error::Error>> {
-            // 1. Check if link exists
-            if let Some(neighbors) = self.network_graph.get(&a) {
-                if !neighbors.contains(&b) {
-                    return Err(format!("No link exists between nodes {} and {}", a, b).into());
-                }
-            } else {
-                return Err(format!("Node {} not found in network graph", a).into());
+    // Add this method to your SimulationController
+    pub fn remove_link(&mut self, a: NodeId, b: NodeId) -> Result<(), Box<dyn std::error::Error>> {
+        // 1. Check if link exists
+        if let Some(neighbors) = self.network_graph.get(&a) {
+            if !neighbors.contains(&b) {
+                return Err(format!("No link exists between nodes {} and {}", a, b).into());
             }
-
-            // 2. Check if removal is allowed (doesn't violate constraints)
-            if !self.is_removal_allowed(a, b) {
-                return Err("Removing this link would violate network constraints".into());
-            }
-
-            // 3. Send RemoveSender commands to both nodes
-            if let Some(sender) = self.command_senders.get(&a) {
-                sender
-                    .send(DroneCommand::RemoveSender(b))
-                    .map_err(|e| format!("Failed to send RemoveSender to {}: {}", a, e))?;
-            }
-            if let Some(sender) = self.command_senders.get(&b) {
-                sender
-                    .send(DroneCommand::RemoveSender(a))
-                    .map_err(|e| format!("Failed to send RemoveSender to {}: {}", b, e))?;
-            }
-
-            // 4. Update the network graph
-            if let Some(neighbors) = self.network_graph.get_mut(&a) {
-                neighbors.remove(&b);
-            }
-            if let Some(neighbors) = self.network_graph.get_mut(&b) {
-                neighbors.remove(&a);
-            }
-
-            // 5. Update the config
-            {
-                let mut cfg = self.network_config.lock().unwrap();
-
-                // Update drone connections
-                for drone in &mut cfg.drone {
-                    if drone.id == a {
-                        drone.connected_node_ids.retain(|&id| id != b);
-                    }
-                    if drone.id == b {
-                        drone.connected_node_ids.retain(|&id| id != a);
-                    }
-                }
-
-                // Update client connections
-                for client in &mut cfg.client {
-                    if client.id == a {
-                        client.connected_drone_ids.retain(|&id| id != b);
-                    }
-                    if client.id == b {
-                        client.connected_drone_ids.retain(|&id| id != a);
-                    }
-                }
-
-                // Update server connections
-                for server in &mut cfg.server {
-                    if server.id == a {
-                        server.connected_drone_ids.retain(|&id| id != b);
-                    }
-                    if server.id == b {
-                        server.connected_drone_ids.retain(|&id| id != a);
-                    }
-                }
-            }
-
-            // 6. Broadcast topology change
-            broadcast_topology_change(
-                &self.gui_input,
-                &self.network_config,
-                &"[FloodRequired]::RemoveSender".to_string(),
-            );
-
-            println!("✅ Successfully removed link between {} and {}", a, b);
-            Ok(())
+        } else {
+            return Err(format!("Node {} not found in network graph", a).into());
         }
+
+        // 2. Check if removal is allowed (doesn't violate constraints)
+        if !self.is_removal_allowed(a, b) {
+            return Err("Removing this link would violate network constraints".into());
+        }
+
+        // 3. Send RemoveSender commands to both nodes
+        if let Some(sender) = self.command_senders.get(&a) {
+            sender
+                .send(DroneCommand::RemoveSender(b))
+                .map_err(|e| format!("Failed to send RemoveSender to {}: {}", a, e))?;
+        }
+        if let Some(sender) = self.command_senders.get(&b) {
+            sender
+                .send(DroneCommand::RemoveSender(a))
+                .map_err(|e| format!("Failed to send RemoveSender to {}: {}", b, e))?;
+        }
+
+        // 4. Update the network graph
+        if let Some(neighbors) = self.network_graph.get_mut(&a) {
+            neighbors.remove(&b);
+        }
+        if let Some(neighbors) = self.network_graph.get_mut(&b) {
+            neighbors.remove(&a);
+        }
+
+        // 5. Update the config
+        {
+            let mut cfg = self.network_config.lock().unwrap();
+
+            // Update drone connections
+            for drone in &mut cfg.drone {
+                if drone.id == a {
+                    drone.connected_node_ids.retain(|&id| id != b);
+                }
+                if drone.id == b {
+                    drone.connected_node_ids.retain(|&id| id != a);
+                }
+            }
+
+            // Update client connections
+            for client in &mut cfg.client {
+                if client.id == a {
+                    client.connected_drone_ids.retain(|&id| id != b);
+                }
+                if client.id == b {
+                    client.connected_drone_ids.retain(|&id| id != a);
+                }
+            }
+
+            // Update server connections
+            for server in &mut cfg.server {
+                if server.id == a {
+                    server.connected_drone_ids.retain(|&id| id != b);
+                }
+                if server.id == b {
+                    server.connected_drone_ids.retain(|&id| id != a);
+                }
+            }
+        }
+
+        // 6. Broadcast topology change
+        broadcast_topology_change(
+            &self.gui_input,
+            &self.network_config,
+            &"[FloodRequired]::RemoveSender".to_string(),
+        );
+
+        println!("✅ Successfully removed link between {} and {}", a, b);
+        Ok(())
+    }
 
     fn get_node_type(&self, id: NodeId) -> Option<NodeType> {
         let cfg = self.config.lock().unwrap();

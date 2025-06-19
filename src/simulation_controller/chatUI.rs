@@ -93,7 +93,7 @@ impl ChatUIState {
             history_code_failed: false,
             history_code_success: false,
             media_files: load_media_files(),
-            broadcast_files:load_broadcast_files(),
+            broadcast_files: load_broadcast_files(),
             show_server_popup: None,
             show_upload_media_list: false,
             download_media_name_input: String::new(),
@@ -163,7 +163,6 @@ impl ChatUIState {
             ui.label(RichText::new("GUI Input Queue").strong());
 
             if let Ok(map) = self.gui_input.lock() {
-
                 if map.is_empty() {
                     ui.label("No pending messages.");
                 } else {
@@ -179,8 +178,7 @@ impl ChatUIState {
                                 let parts: Vec<&str> = msg.splitn(3, "::").collect();
                                 if parts.len() == 3 {
                                     format!("[MediaBroadcast]::{}::{}...", parts[1], &parts[2][..5.min(parts[1].len())])
-                                }
-                                else {
+                                } else {
                                     msg.clone()
                                 }
                             } else if msg.starts_with("[MediaUpload]:") {
@@ -197,7 +195,6 @@ impl ChatUIState {
                             ui.label(format!("    {}", short_msg));
                         }
                     }
-
                 }
             } else {
                 ui.label("⚠️ Failed to lock GUI input buffer");
@@ -206,7 +203,6 @@ impl ChatUIState {
     }
 
     pub fn render(&mut self, ui: &mut egui::Ui, on_send: &mut impl FnMut(NodeId, NodeId, String)) {
-
         egui::SidePanel::right("server_status_panel").show_inside(ui, |ui| {
             self.render_server_info(ui);
         });
@@ -222,7 +218,6 @@ impl ChatUIState {
                     self.selected_client = Some(client_id);
                     self.selected_server = None; // hide server-specific rows
                 }
-
             }
         });
 
@@ -234,7 +229,6 @@ impl ChatUIState {
                     self.selected_client = None; // hide client-specific rows
                     self.show_broadcast_list = false;
                 }
-
             }
         });
 
@@ -244,7 +238,6 @@ impl ChatUIState {
 
             match status {
                 ClientStatus::Offline => {
-
                     ui.horizontal(|ui| {
                         ui.label("Connect to Server:");
                         egui::ComboBox::from_id_source("server_select")
@@ -261,7 +254,7 @@ impl ChatUIState {
                             if let Some(server_id) = self.selected_server {
                                 self.client_status.insert(client_id, ClientStatus::Connected);
                                 self.server_client_map.entry(server_id).or_default().push(client_id);
-                                push_gui_message(&self.gui_input, client_id, format!("[Login]::{}",server_id));
+                                push_gui_message(&self.gui_input, client_id, format!("[Login]::{}", server_id));
 
                                 let code = format!("{:06}", rand::random::<u32>() % 1_000_000);
                                 self.client_server_codes.insert((client_id, server_id), code);
@@ -479,7 +472,6 @@ impl ChatUIState {
                         }
                     });
                 }
-
 
                 ClientStatus::Chatting(peer_id) => {
                     ui.horizontal(|ui| {
@@ -716,87 +708,28 @@ impl ChatUIState {
                 ui.label("See chat with Client ID:");
                 ui.add(TextEdit::singleline(&mut self.history_target_id_input).hint_text("e.g. 102"));
 
-                ui.label("Security Code:");
-                ui.add(TextEdit::singleline(&mut self.history_code_input).hint_text("123456"));
-
-                if ui.button("Submit").clicked() {
-                    // 1. Trim all inputs
-                    let raw_client = self.history_client_id_input.trim();
-                    let raw_target = self.history_target_id_input.trim();
-                    let raw_code_in = self.history_code_input.trim();
-
-                    // 2. Try to parse and get a server
-                    match (
-                        raw_client.parse::<NodeId>(),
-                        raw_target.parse::<NodeId>(),
-                        self.selected_server,
-                    ) {
-                        (Ok(client_id), Ok(target_id), Some(server_id)) => {
-                            // 3. Look up the stored code
-                            if let Some(stored_code) = self
-                                .client_server_codes
-                                .get(&(client_id, server_id))
-                            {
-                                // 4. Compare trimmed strings
-                                if stored_code == raw_code_in {
-                                    // ✅ Success!
-                                    push_gui_message(
-                                        &self.gui_input,
-                                        client_id,
-                                        format!("[HistoryRequest]::{}::{}", client_id, target_id),
-                                    );
-                                    self.history_code_success = true;
-                                    self.history_code_failed = false;
-                                    self.show_history_popup = false; // close
-                                } else {
-                                    // Code mismatch
-                                    eprintln!(
-                                        "❌ Code mismatch: stored=`{:?}`, entered=`{:?}`",
-                                        stored_code, raw_code_in
-                                    );
-                                    self.history_code_failed = true;
-                                    self.history_code_success = false;
-                                }
-                            } else {
-                                // No code was ever generated for that client/server pair
-                                eprintln!(
-                                    "❌ No code found for client={} on server={}",
-                                    client_id, server_id
-                                );
-                                self.history_code_failed = true;
-                                self.history_code_success = false;
-                            }
-                        }
-                        _ => {
-                            // Parse failure or no server selected
-                            eprintln!(
-                                "❌ Parse failure: client=`{:?}`, target=`{:?}`, server=`{:?}`",
-                                raw_client, raw_target, self.selected_server
-                            );
-                            self.history_code_failed = true;
-                            self.history_code_success = false;
+                ui.horizontal(|ui| {
+                    if ui.button("Submit").clicked() {
+                        if let (Ok(client_id), Ok(target_id), Some(server_id)) = (
+                            self.history_client_id_input.parse::<NodeId>(),
+                            self.history_target_id_input.parse::<NodeId>(),
+                            self.selected_server,
+                        ) {
+                            push_gui_message(&self.gui_input, client_id, format!("[HistoryRequest]::{}::{}", client_id, target_id));
+                            self.show_history_popup = false;
                         }
                     }
-                }
-                if ui.button("Close").clicked() {
-                    self.show_history_popup = false;
-                    self.history_code_input.clear();
-                    self.history_client_id_input.clear();
-                    self.history_target_id_input.clear();
-                    self.history_code_failed = false;
-                    self.history_code_success = false;
-                }
 
-                if self.history_code_failed {
-                    ui.label(RichText::new("❌ Incorrect code or client ID").color(Color32::RED));
-                } else if self.history_code_success {
-                    ui.label(RichText::new("✔ Code accepted. History request sent.").color(Color32::GREEN));
-                }
+                    if ui.button("Close").clicked() {
+                        self.show_history_popup = false;
+                        self.history_client_id_input.clear();
+                        self.history_target_id_input.clear();
+                    }
+                });
             });
         }
     }
 }
-
 
 fn load_media_files() -> Vec<(String, String)> {
     let media_dir = "media"; // relative path
@@ -832,5 +765,4 @@ fn load_broadcast_files() -> Vec<(String, String)> {
     }
     files
 }
-
 

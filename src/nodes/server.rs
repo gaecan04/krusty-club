@@ -119,7 +119,7 @@ impl NetworkGraph {
                 path.push(self.graph[prev]);
                 current = prev;
             } else {
-                println!("⚠️ Incomplete path from {} to {}", source, target);
+                println!("⚠ Incomplete path from {} to {}", source, target);
                 return None;
             }
         }
@@ -199,7 +199,7 @@ impl server {
         let routing_header = SourceRoutingHeader::empty_route(); // ignored by drones for FloodRequest
 
         let packet = Packet::new_flood_request(routing_header, flood_id, flood_request);
-        info!("♥️♥️♥️♥️♥️♥️♥️ server has sender to this drones: {:?}", self.packet_sender);
+        info!("♥♥♥♥♥♥♥ server has sender to this drones: {:?}", self.packet_sender);
         //let mut sent_to = HashSet::new();
         for (&neighbor_id, sender) in &self.packet_sender {
             if let Err(e) = sender.send(packet.clone()) {
@@ -292,7 +292,7 @@ impl server {
                                                 self.initiate_network_discovery();
                                             },
                                             other => {
-                                                warn!("⚠️ Unknown FloodRequired action: {}", other);
+                                                warn!("⚠ Unknown FloodRequired action: {}", other);
                                             }
                                         }
                                     }
@@ -413,6 +413,11 @@ impl server {
                 if let Ok(target_id) = target_id_str.parse::<NodeId>() {
                     let success = self.registered_clients.contains(&target_id);
                     let response = format!("[ChatStart]::{}", success);
+
+                    // Ensure chat history exists even if no messages are sent
+                    let key = (client_id.min(target_id), client_id.max(target_id));
+                    self.chat_history.entry(key).or_insert_with(VecDeque::new);
+
                     self.send_chat_message(session_id, client_id, response);
                 }
             },
@@ -422,11 +427,15 @@ impl server {
                         let response = format!("[MessageFrom]::{}::{}", client_id, msg);
                         self.send_chat_message(session_id, target_id, response);
 
-                        let entry = self
+                        let entry = self //possible problems here!
                             .chat_history
                             .entry((client_id.min(target_id), client_id.max(target_id)))
                             .or_insert_with(VecDeque::new);
-                        let chat_entry = format!("{}: {}", client_id, msg);
+                        //let chat_entry = format!("{}: {}", client_id, msg);
+                        /*if entry.back().map_or(true, |last| last != &chat_entry) {
+                            entry.push_back(chat_entry);
+                        }*/
+                        let chat_entry = format!("{}:\n {}", client_id, msg);
                         entry.push_back(chat_entry);
 
                         if entry.len() > MAX_CHAT_HISTORY {
@@ -508,11 +517,55 @@ impl server {
             },
             ["[ChatFinish]", target_client_str] => {
                 info!("Client {} finished chat in session {}", client_id, session_id);
+                if let Ok(target_client_id) = target_client_str.parse::<NodeId>() {
+                    let key = (client_id.min(target_client_id), client_id.max(target_client_id));
+                    info!("🚨 Step 1: Looking up chat history for key {:?}", key);
+
+                    if let Some(history) = self.chat_history.get(&key) {
+                        info!("🚨 Step 2: History found, preparing to serialize and broadcast...");
+
+                        let full_entry = (key, history.clone());
+                        if let Ok(serialized) = serde_json::to_string(&full_entry) {
+                            let server_node_ids: Vec<NodeId> = self.network_graph
+                                .node_types
+                                .iter()
+                                .filter_map(|(&node_id, node_type)| {
+                                    if node_id != self.id && *node_type == NodeType::Server {
+                                        Some(node_id)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+
+                            info!("🚨 Step 3: Sending chat history update to servers: {:?}", server_node_ids);
+
+                            for node_id in server_node_ids {
+                                if let Some(route) = self.compute_best_path(self.id, node_id) {
+                                    let msg = format!("[ChatHistoryUpdate]::{}::{}", self.id, serialized);
+                                    self.send_chat_message(session_id, node_id, msg);
+                                    info!("✅ Sent chat history update to server {}", node_id);
+                                } else {
+                                    warn!("⚠ No path found to server {}", node_id);
+                                }
+                            }
+                        } else {
+                            error!("❌ Failed to serialize chat history for {:?}", key);
+                        }
+                    } else {
+                        warn!("⚠ No chat history found for key {:?}", key);
+                    }
+                }
+            }
+            /*
+            ["[ChatFinish]", target_client_str] => {
+                info!("Client {} finished chat in session {}", client_id, session_id);
                 //get the chat history for the session --> only one for each client.
                 // Find the exact chat history (could be based on two clients)
                 let target_client_id = target_client_str.parse::<NodeId>().unwrap();
-                let entry = self.chat_history.iter()
-                    .find(|((a, b), _)| *a == client_id || *b == target_client_id); // optionally refine match
+                let key = (client_id.min(target_client_id), client_id.max(target_client_id));
+                let entry = self.chat_history.get(&key);
+                info!("🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨 --------------------- 1------------------------");
 
                 if let Some(((id1, id2), history)) = entry {
                     let full_entry = ((*id1, *id2), history.clone());
@@ -522,8 +575,10 @@ impl server {
                         let b = client_id.max(target_client_id);
                         (a, b)
                     };
+                    info!("🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨 --------------------- 2------------------------");
                     if let Some(history) = self.chat_history.get(&key) {
                         let full_entry = (key, history.clone());
+                        info!("🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨 --------------------- 3------------------------");
                         if let Ok(serialized) = serde_json::to_string(&full_entry) {
                             //find servers in the network graph
                             let server_node_ids: Vec<NodeId> = self.network_graph
@@ -537,6 +592,7 @@ impl server {
                                     }
                                 })
                                 .collect();
+                            info!("🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨 la lista di server disponibili é: {:?}", server_node_ids);
                             for node_id in server_node_ids {
                                 info!(" 🚨🚨🚨 Computing path towards: {} 🚨🚨🚨", node_id);
                                 if self.network_graph.get_node_type(node_id) == Some(&NodeType::Server) && node_id != self.id {
@@ -552,7 +608,7 @@ impl server {
                     }
                     //update the chat history on the other servers.
                 }
-            },
+            },*/
             /*
                 ["[ChatFinish]", target_client_str] => {
                     info!("Client {} finished chat in session {}", client_id, session_id);
@@ -799,7 +855,7 @@ impl server {
                 }
             } else {
                 error!(
-                    "⚠️ hop_index {} out of bounds in hops {:?}",
+                    "⚠ hop_index {} out of bounds in hops {:?}",
                     packet.routing_header.hop_index,
                     packet.routing_header.hops
                 );
@@ -888,7 +944,7 @@ impl server {
                 .or_else(|| packet.routing_header.hops.get(0));
             if let Some(&next_hop_id) = next_hop {
                 if let Some(sender) = self.packet_sender.get(&next_hop_id) {
-                    info!("✈️✈️✈️✈️✈️✈️✈️✈️   Sending fragment {} of {} to {}     ✈️✈️✈️✈️✈️✈️✈️✈️", i + 1, total_fragments, next_hop_id);
+                    info!("✈✈✈✈✈✈✈✈   Sending fragment {} of {} to {}     ✈✈✈✈✈✈✈✈", i + 1, total_fragments, next_hop_id);
                     if let Err(e) = sender.send(packet) {
                         error!("Failed to send fragment {} to {}: {:?}", i, target_id, e);
                     }
@@ -902,7 +958,6 @@ impl server {
     }
 
     pub fn compute_best_path(&self, from: NodeId, to: NodeId) -> Option<Vec<NodeId>> {
-        self.network_graph.best_path(from, to)
+        self.network_graph.best_path(from,to)
     }
-
 }

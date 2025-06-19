@@ -664,7 +664,7 @@ impl MyClient {
                 if let (Some(&prev_node_idx), Some(&current_node_idx)) = (self.node_id_to_index.get(&prev_node_id), self.node_id_to_index.get(&current_node_id)) {
                     let edge_exists = self.network_graph.contains_edge(current_node_idx, prev_node_idx) || self.network_graph.contains_edge(prev_node_idx, current_node_idx);
                     if !edge_exists {
-                       // println!("Client {} adding edge: {} -> {}.", self.id, prev_node_id, current_node_id);
+                        // println!("Client {} adding edge: {} -> {}.", self.id, prev_node_id, current_node_id);
                         self.network_graph.add_edge(prev_node_idx, current_node_idx, 0);
                         self.network_graph.add_edge(current_node_idx, prev_node_idx, 0);
                     } else {

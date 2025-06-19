@@ -93,11 +93,11 @@ impl NetworkApp {
                 Ok(_) => {
                     self.simulation_log.push(format!("✅ Drone {} crashed successfully", drone_id));
 
-                   /*
-                    The Simulation Controller (SC) already updates the active flags internally.
-                    sync_with_simulation_controller() reads fresh states and updates the GUI.
-                    build_from_config() re-applies the correct star, chain, etc. layout after crash.
-                     */
+                    /*
+                     The Simulation Controller (SC) already updates the active flags internally.
+                     sync_with_simulation_controller() reads fresh states and updates the GUI.
+                     build_from_config() re-applies the correct star, chain, etc. layout after crash.
+                      */
                     if let Some(renderer) = &mut self.network_renderer {
                         renderer.sync_with_simulation_controller();
                         if let Some(cfg_arc) = &self.network_config {
@@ -445,20 +445,20 @@ impl NetworkApp {
                                 self.show_spawn_drone_popup = false;
 
                                 // 3a) spawn in the simulation controller
-                                        if let Some(ctrl) = &self.simulation_controller {
-                                            let mut lock = ctrl.lock().unwrap();
-                                        if let Err(e) = lock.spawn_drone(self.new_drone_id, self.new_drone_pdr, connections.clone()) {
-                                            self.simulation_log.push(format!("Failed to spawn drone: {}", e));
+                                if let Some(ctrl) = &self.simulation_controller {
+                                    let mut lock = ctrl.lock().unwrap();
+                                    if let Err(e) = lock.spawn_drone(self.new_drone_id, self.new_drone_pdr, connections.clone()) {
+                                        self.simulation_log.push(format!("Failed to spawn drone: {}", e));
 
-                                            return;
-                            }
-                        }
+                                        return;
+                                    }
+                                }
 
-                        // 3b) immediately update the UI renderer
-                        if let Some(renderer) = self.network_renderer.as_mut() {
-                            renderer.add_drone(self.new_drone_id, self.new_drone_pdr, connections.clone());
+                                // 3b) immediately update the UI renderer
+                                if let Some(renderer) = self.network_renderer.as_mut() {
+                                    renderer.add_drone(self.new_drone_id, self.new_drone_pdr, connections.clone());
 
-                        }
+                                }
 
                                 self.new_drone_connections_str.clear();
                                 ctx.request_repaint();
