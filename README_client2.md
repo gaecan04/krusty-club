@@ -1,0 +1,315 @@
+# Client Module (`client2.rs`)
+
+In this file we are creating a possible implementation for a client in a peer-to-peer network.
+The client is able to chat with other clients as well as interact with the server to work with various medias.
+The client can log in and out of each server as well as request to start or finish a chat with another user, it can also upload and download media from the server or use them to broadcast to other clients conncetd to the same server.
+The client receives the inputs to act upon both from the GUI and from the other elements of the network.
+---
+
+## 📦 Imports and Crate Dependencies
+
+Includes:
+- `petgraph`: graph operations and Dijkstra algorithm.
+- `crossbeam_channel`: multi-producer, multi-consumer channels.
+- `wg_2024`: custom packet and network data types.
+- `log`, `rand`, `std`, and `eframe` for GUI integration and logging features.
+
+---
+## 🧍🏻 Struct client and auxiliary variables
+
+### Purpose:
+Handles incoming and outgoing packets, client interaction, flooding for discovery, and media/chat history.
+
+### Fields:
+- `id`: Client ID.
+- `packet_recv`: Communication endpoint --> Channel to receive packets from servers/drones.
+- `packet_send`:  Hashmap containing each sender channel to the neighbors (channels to send packets to servers).
+- `sim_contr_recv`: Receiver-only channel used to receive communications from the Simulation controller (e.g. ControllerShortcut from drones). 
+- `sent_messages`: An HashMap containing the MessageFragments related to each session_id that keeps track of the fragment we send for dropped fragments recovery.
+- `net_graph`: Contains a graph in which we store all the nodes and connections we find through network flooding.
+- `rnode_map`: Used to keep track of each NodeType and NodeIndex associated to the real NodeId of the elements of the network we discover.
+- `received_packets`:Hashmap to store and reassemble fragments.
+- `seen_flood_ids`: Avoids re-processing old FloodRequests.
+- `simulation_log`: Lets us communicate with the SimulationController for cleaner log history.
+
+### Auxiliary variables:
+- `FLOOD_IDS`: Used to ensure that each flood as a unique id.
+- `SESSION_IDS`: Used to ensure that each packet sent has a unique session_id for better packet recovery.
+- `CHATTING_STATUS`: Keeps track of: chat activity, user we are chatting with, server we are connected to.
+
+---
+## 🔁 Core Methods: `run(gui_input) & inner_run(gui_input)`
+The two methods ensure that the client keeps running and processing packets and restarts in case of panics happening.
+`run(...)` directly interacts with the SimulationController and keeps track of possible panics to restart the client.
+In case a panic is detected the `inner_run(...)` stops abruptly and is restarted.
+`inner_run(...)` is the loop responsible for the input handling of the client.
+First thing done: discover the network. --> self.send_flood_request()
+- Polls GUI messages and calls upon `self.process_gui_command(...)`.
+  The output String of the processed command is then sent to the server except for the "NO_CHAT_COMMAND" output (check the `process_gui_command(...)` section for clarification).
+- Listens for packets and dispatches to `self.process_packet(...)`:
+    
+
+---
+## 🌐 WG-related Method: `process_packet(packet)`
+### Purpose:
+Distinguishes among the different PacketType and assign each to its handler:
+- `FloodRequest` →  calls self.process_flood_request(...) 
+- `FloodResponse` → calls self.process_flood_response(...)
+- `MsgFragment` → sends ack and calls self.reassemble_packet(...)
+- `Ack` → no action is taken
+- `Nack` → calls self.process_nack(...)
+---
+## 🌐 WG-related Method: `process_flood_request(request, header)`
+### Purpose:
+Updates the incoming FloodRequest and checks if it has already passed through the client using `self.seen_flood_ids`.
+Each time a FloodRequest arrives and its flood_id and initiator_id tuple matches one present in our `self.seen_flood_ids`, or the sender of the FloodRequest is the only neighbor we have, we create a FloodResponse based on the request
+```rust
+if self.seen_flood_ids.contains(&(request.flood_id , request.initiator_id)) || self.packet_send.len() == 1{
+            let mut response_packet = updated_request.generate_response(SESSION_IDS.lock().unwrap().clone());
+            response_packet.routing_header.hop_index += 1;
+            let response_sender = self.packet_send.get(&updated_request.path_trace[updated_request.path_trace.len()-2].0).unwrap();
+            response_packet.clone().routing_header.hops;
+            (*response_sender).send(response_packet).unwrap_or_default();
+            info!("Successfully sent response packet to {:?} from {:?}, RResponse: {:?}" , request.initiator_id , self.id , updated_request.path_trace);
+            self.increment_ids(&SESSION_IDS);
+        }
+```
+Otherwise, we update `self.seen_flood_ids` as well as the FloodRequest itself and send it back
+```rust
+else {
+self.seen_flood_ids.insert((request.flood_id , request.initiator_id));
+updated_request.path_trace.push((self.id , Client));
+let sender_id = if updated_request.path_trace.len() > 1 {
+Some(updated_request.path_trace[updated_request.path_trace.len() - 2].0)
+} else {
+None
+};
+
+//keeping the flood going
+for (neighbor_id, sender) in self.packet_send.iter() {
+let packet = Packet{
+pack_type: PacketType::FloodRequest(FloodRequest{
+flood_id: updated_request.flood_id,
+initiator_id:updated_request.path_trace[0].0.clone(),
+path_trace: updated_request.path_trace.clone(),
+}),
+routing_header: updated_header.clone(),
+session_id:SESSION_IDS.lock().unwrap().clone(),
+};
+if Some(*neighbor_id) != sender_id{
+sender.send(packet.clone()).unwrap_or_default();
+}
+if let Err(err) = sender.send(packet) {
+println!("Error sending packet: {:?}", err);
+}
+
+}
+self.increment_ids(&SESSION_IDS);
+}
+```
+---
+## 🌐 WG-related Method: `process_flood_response(response)`
+### Purpose:
+Goes through the path_trace of each FloodResponse we receive to update our knowledge of the network.
+The update is made through to client2-related methods:
+- `self.add_node_no_duplicate(...)`;
+- `self.add_edge_no_duplicate(...)`.
+---
+## 🌐 WG-related Method: `reassemble_packet(fragment, packet)`
+### Purpose:
+All received fragment are stored inside `self.received_packets` and each time we receive a new one we check whether we already received a fragment with the same session_id.
+We add the fragment in its dedicated slot and check if the message is completed or not.
+```rust
+let (need_ack, is_complete) = {
+            // 1a) get-or-create the slot-capacity buffer
+            let buf = self.received_packets
+                .entry(session_id)
+                .or_insert_with(|| vec![0u8; total_frags * slot_bytes]);
+            if buf.len() != total_frags * slot_bytes {
+                buf.resize(total_frags * slot_bytes, 0);
+            }
+
+            // 1b) write this fragment into its slot
+            let offset = (fragment.fragment_index as usize) * slot_bytes;
+            buf[offset .. offset + frag_len]
+                .copy_from_slice(&fragment.data[..frag_len]);
+
+            // 1c) we always want to ACK whatever fragment arrives
+            let need_ack = true;
+
+            // 1d) check completion by ensuring each slot has some non-zero
+            let mut all_slots = true;
+            for idx in 0..total_frags {
+                let start = idx * slot_bytes;
+                let len = if idx + 1 == total_frags { frag_len } else { slot_bytes };
+                if buf[start .. start + len].iter().all(|&b| b == 0) {
+                    all_slots = false;
+                    break;
+                }
+            }
+
+            (need_ack, all_slots)
+        };
+```
+We send the ack for the received fragment and if the message is complete we call upon `self.packet_command_handling(...)` to process the input, and we notify the user.
+```rust
+if need_ack {
+self.send_ack(packet, fragment);
+}
+
+        // Phase 3: if complete, remove & dispatch
+        // ----------------------------------------
+        if is_complete {
+            // pluck out the fully‐assembled buffer
+            let buf = self.received_packets.remove(&session_id).unwrap();
+
+            // compute the true length from last fragment
+            let full_len   = (total_frags - 1) * slot_bytes + frag_len;
+            let message    = buf[..full_len].to_vec();
+
+            self.packet_command_handling(message);
+            info!("👻👻👻👻👻👻  Packet with session_id {} fully reassembled 👻👻👻👻👻👻", session_id);
+        }
+```
+---
+## 🌐 WG-related Method: `process_nack(nack, packet)`
+### Purpose:
+When a `Nack` is received we take action based on the `NackType`:
+- `Dropped` -> 
+- - we increase the weight of the links of the drone that dropped the packet;(check "client2-related methods for graph management" for details)
+- - we look for the original packet in `self.sent_messages`;
+- - we find the dropped fragment using the nack's `fragment_index`;
+- - we send the dropped fragment again;
+- `RoutingError` -> we remove the drone with the id contained in the `Nack` and flood the network;
+Other `NackType` presume an error in the drones implementation or route creation so we flood again to check for the latter.
+
+
+---
+## 🌐 WG-related Method: `send_packet(input)`
+### Purpose:
+We operate based on the input received by the GUI that we check in "Krusty_club-related Method: `process_gui_command(command_string)`".
+The input is a `String` goes through a series of steps:
+- the input is disassembled in arrays of `u8`, as per WG specs;
+- each array is used to create a `Fragment`:
+  ```rust
+  let fragment:Fragment = Fragment { // we create the fragments based on the chunks
+                fragment_index: i as u64,//position of the array we are using
+                total_n_fragments: chunks.len() as u64,//total number of arrays
+                length: chunks[i].len() as u8, //length of the array we are using
+                data, //array of u8
+            };
+  ```
+  - the Fragment is then wrapped in a Packet, all Packets made from the same input have the same session_id a path that is calculated each time:
+  ```rust
+  let packet = Packet{
+    routing_header: SourceRoutingHeader{
+    hop_index : 1, // the hop index is initialized to 1 to stay consistent with the logic of the drones
+    hops : self.best_path(self.id , (*CHATTING_STATUS.lock().unwrap()).2).unwrap(),
+    },
+    session_id: SESSION_IDS.lock().unwrap().clone(),
+    pack_type: MsgFragment(fragment.clone()),
+    };
+  ```
+after creating the packet we send them to the drone connected following the path we found. 
+
+---
+## 🌐 WG-related Method: `send_flood_request()`
+### Purpose:
+As per WG requirements we discover the network topology through a flooding algorithm using `FloodRequest` structs wrapped in a `Packet`:
+```rust
+let flood_request = FloodRequest::initialize(FLOOD_IDS.lock().unwrap().clone(), self.id, Client);
+```
+each request is created with a different `flood_id` by increasing `FLOOD_IDS` each time the function is called, and with our own id as the flood initiator.
+After creating the request we wrap it in a `Packet` and send it to all registered neighbors to spread it across the network.
+
+---
+## 🌐 WG-related Method: `send_ack(packet, fragment)`
+### Purpose:
+The `Ack` packets main purpose is to help checking the network proper functioning.
+Each time a `Fragment` is received the function is called, and we notify the sender that we correctly received the fragment. 
+
+---
+## 🌐 Krusty_club-related Method: `packet_command_handling(message)`
+### Purpose:
+We convert `message` (the full message we reassembled) from a `Vec<u8>` to a `String` and then to a `Vec<&str>` to match the content based on the format agreed by our group.
+```rust
+let message_string = String::from_utf8_lossy(&message).to_string();
+let tokens: Vec<&str> = message_string.trim().splitn(3, "::").collect();
+```
+- `"[LoginAck]" , _session` -> our login as been processed.
+- `"[MessageFrom]", client_id_str, msg` -> we received a message from another user, so we update our `CHATTING_STATUS`.
+- `"[ChatStart]", success` -> we know if our chat request as been accepted by the other user.
+- `"[ClientListResponse]", client_list` -> we can check for the clients available for chat on the same server as us.
+- `"[HistoryResponse]", response` -> we retrieved our most recent chat history with another user.
+- `"[MediaUploadAck]", media_name` -> the server has correctly received the media we uploaded.
+- `"[MediaListResponse]" , media_list` -> we can now check for the media available on the server.
+- `"[MediaDownloadResponse]","ERROR","NotFound"` -> the media we requested is not available (e.g. the name was misspelled).
+- `"[MediaDownloadResponse]", media_name, base64_data` -> we fully received the media we requested so we can open it (check the `client2-related methods for media handling` for details).
+- `"[MediaBroadcastAck]", media_name, "Broadcasted"` -> the broadcast was successful
+Any other message format will be discarded.
+---
+
+## 🌐 Krusty_club-related Method: `process_gui_command(command_string)`
+### Purpose:
+After operating on the command_string as we do for `message` in `self.packet_command_handling(...)` we match its content and send the realtive information to the simulation log through the `simulation_log`.
+All match cases will generate a different response from the server.
+- `"[Login]", server_id_str` -> we set the server_id as the id of the server we are connected to, and then we send the message to that same server to login. 
+- `"[Logout]"` -> if we are not chatting with anyone, we send the server a logout request to be removed from its client list.
+- `"[ClientListRequest]"` -> we ask the server for the list of clients.
+- `"[MessageTo]", client_id, message_str` -> we send a simple chat message to client_id through the server. Message_str is the string we type through the GUI.
+- `"[ChatRequest]", client_id` -> we ask the server to connect us with client_id, which we know is connected to the same server and not in the middle of a chat.
+- `"[HistoryRequest]", personal_id, peer_id` -> we ask the server to send us the chat history between us and another user.
+- `"[MediaUpload]", media_name, encoded_media` -> since the server can be used for both chat and media fruition we can also send them media to upload encoded as base_64.
+- `"[MediaDownloadRequest]", media_name` -> we can download media from the server using the media_name.
+- `"[ChatFinish]" , _client_id` -> we can terminate a chat whenever we want sending a ChatFinish command to the server.
+- `"[MediaBroadcast]", media_name, encoded_media` -> we can also send medias to all client connected to a server through a broadcast.
+- `"[MediaListRequest]"` -> before downloading a media or after uploading one we can check for the MediaList.
+- `"[FloodRequired]",action` -> some GUI actions may require the client to flood the network (e.g. a drone crash), since we don't need to send anything to the server we just start the flood using `self.send_flood_request()` and generate the "NO_CHAT_COMMAND" response.
+Any other format is discarded.
+---
+## 🌐 client2-related methods for graph management
+### Purpose:
+Proper graph management is crucial for the correct delivery of `Packets` across the network.
+The methods used to manage the `net_graph` and the `node_map`are:
+- `add_node_no_duplicate(graph, node_map, value, node_type)`
+- - Called upon when receiving a `FloodResponse`.
+- - It ensures that each node of the network is added once to the graph and to the node map.
+- - It returns a `NodeIndex` that we use to create the edges of the graph.
+- `add_edge_no_duplicate(graph, a, b, weight)`
+- - Called each time we try to add two nodes with `add_node_no_duplicate(...)`.
+- - We use the indexes we receive to try to add their link to the graph.
+- - We avoid duplicates since we use an undirected graph.
+- `remove_all_edges_with_node (crash_id)`
+- - Called upon when a drone crashes.
+- - We use the id of the crashed drone to go through both the `net_graph` and the `node_map`.
+- - Each edge containing the node is removed from the graph, and the node is removed from the map too.
+- `best_path(source, target)`
+- - Each packet travels through the network following a path.
+- - To avoid the drones with a high pdr (packet drop rate) and make the delivery smoother we use the Dijkstra algorithm to calculate the path.
+- - The path is found taking into account all the possible path to `target` and finds the one with the lowest weight (the one with the highest chance of delivering the packet).
+- `increase_cost(dropper_id)`
+- - Since the Dijkstra algorithm we use consider each edges weight to calculate path we must manage each of them accordingly.
+- - When we receive a nack of type `Dropped` we take note of the node that dropped the packet and increase the weight of all its edges.
+
+---
+## 🌐 client2-related methods for global variables updating
+### Purpose:
+To properly manage and ensure the validity of the global variables used by the client we use two main methods:
+- `increment_ids(counter)` -> used to ensure that each message and flood sent by the client has a different id to avoid conflicts;
+- `change_chat_status(chatting, peer_id, server_id)` -> used to update the chat status each time a change happens (e.g. we log in, we start a chat ...).
+
+---
+## 🌐 client2-related methods for media handling
+### Purpose:
+The client is meant to communicate with a media server to both upload and request media.
+When receiving a media by the server, either after a download request or after a broadcast, we can display the media.
+The methods used for proper display are:
+- `display_media(media_name, base64_data)`-> decode the media we received as base64 and calls upon `detect_media_format(...)` 
+- `detect_media_format(data)`-> checks the first bits of the decoded media to find its format and help `display_media(...)` call upon the right helper method.
+- `display_image(decoded_data, file_path)`-> after the path for the file is created we save and reconstruct the image, and then we open the image.
+- `play_video(decoded_data, file_path)`-> we save the video and open it.
+- `play_audio(decoded_data, file_path)`-> we save the audio file and open it.
+- `open_with_system(file_path)`-> we detect the operating system of the machine we are working on and open the media with the default application.
+
+
+---
