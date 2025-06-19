@@ -164,9 +164,6 @@ pub struct server {
     sent_fragments: HashMap<(u64,u64), (Fragment, NodeId)>,
     chat_history: HashMap<(NodeId,NodeId), VecDeque<String>>,
     media_storage: HashMap<String, (NodeId,String)>, // media name --> (uploader_id, associated base64 encoding as String)
-
-    //recovery_in_progress:  HashMap<(u64, NodeId), bool>, // Tracks if recovery is already in progress for a session
-    //drop_counts: HashMap<(u64, NodeId), usize>, // Track number of drops per session
     simulation_log: Arc<Mutex<Vec<String>>>,
 }
 
@@ -977,5 +974,5 @@ impl server {
 
     pub fn compute_best_path(&self, from: NodeId, to: NodeId) -> Option<Vec<NodeId>> {
         self.network_graph.best_path(from,to)
-    }
+       }
 }
