@@ -493,23 +493,25 @@ impl MyClient {
                 if chatting_status.0 == true { //we make sure to not log out while in the middle of a chat
                     Err(Box::new(io::Error::new(io::ErrorKind::Interrupted, "You are still in a chat with another user. End the chat before logging out")))
                 } else if chatting_status.2 != 0 {
+                    self.log(format!("Logout from client {}",self.id));
                     Ok(command_string)
                 } else { //if we are yet to log in to any server we can log out of it
                     Err(Box::new(io::Error::new(io::ErrorKind::NotFound, "You have yet to login to any server")))
                 }
             },
             ["[ClientListRequest]"] => {
+
                 info!("Requesting the list of clients available for chat");
                 Ok(command_string)
             },
             ["[MessageTo]", client_id, message_str] => {
+                self.log(format!("Client {} is sending a message to client {}",self.id , client_id));
                 info!("Sending message: {} to client {}", message_str, client_id);
                 Ok(command_string)
             },
             ["[ChatRequest]", client_id] => {
-                info!("Sending message to client {}", client_id);
                 if (chatting_status.0 , chatting_status.1).eq(&(false, 0 )) { //when requesting a chat we need to make sure that we are not in the middle of chatting with someone else
-                    info!("Requesting to chat with client: {}", client_id);
+                    self.log(format!("Client {} is requesting to chat with client: {}", self.id , client_id));
                     let peer_id: NodeId = match client_id.parse() {
                         Ok(id) => id,
                         Err(e) => {
@@ -527,16 +529,16 @@ impl MyClient {
                 Ok(command_string)
             },
             ["[MediaUpload]", media_name, encoded_media] => {
-                info!("Uploading media with name: {} , encoded as: {}", media_name, encoded_media);
+                self.log(format!("Client {} is uploading media with name: {} , encoded as: {}", self.id, media_name, encoded_media));
                 Ok(command_string)
             },
             ["[MediaDownloadRequest]", media_name] => {
-                info!("Requesting to download media: {}", media_name);
+                self.log(format!("Client {} is requesting to download media: {}", self.id, media_name));
                 Ok(command_string)
             },
             ["[ChatFinish]" , _client_id] => {
                 if chatting_status.0 == true {
-                    info!("Requesting to end current chat");
+                    self.log(format!("Client {} is trying to end current chat" , self.id));
                     self.change_chat_status(false , 0 , chatting_status.2);
                     Ok(command_string)
                 } else {
@@ -544,9 +546,9 @@ impl MyClient {
                 }
             },
             ["[MediaBroadcast]", media_name, encoded_media] => {
-                info!("Broadcasting {} to all connected clients" , media_name);
+                self.log(format!("Client {} is broadcasting {} to all connected clients", self.id, media_name));
                 if let Err(e) = Self::display_media( media_name , encoded_media) {
-                    info!("Failed to display image: {}", e);
+                    warn!("Failed to display image: {}", e);
                 }
                 Ok(command_string)
             },
@@ -566,7 +568,15 @@ impl MyClient {
         }
     }
 
+    pub fn attach_log(&mut self, log: Arc<Mutex<Vec<String>>>) {
+        self.simulation_log = log;
+    }
 
+    fn log(&self, message: impl ToString) {
+        if let Ok(mut log) = self.simulation_log.lock() {
+            log.push(message.to_string());
+        }
+    }
 
     fn add_node_no_duplicate(&mut self, graph: &mut Graph<u8, u8, Undirected>, node_map: &mut HashMap<NodeId, (NodeIndex, NodeType)>, value: u8 , node_type: NodeType) -> NodeIndex {
         if let Some(&idx) = node_map.get(&value) {
@@ -918,6 +928,4 @@ impl MyClient {
 
         Ok(())
     }
-
-
 }
