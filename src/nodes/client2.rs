@@ -33,7 +33,7 @@ use std::time::Duration;
 use bincode::error::IntegerType::Usize;
 use rand::random;
 use crate::simulation_controller::gui_input_queue::{push_gui_message, new_gui_input_queue, SharedGuiInput};
-
+use std::process::{Command, exit};
 
 //the first two global variable are kept to ensure consistency throughout the various chats
 static FLOOD_IDS: Lazy<Mutex<u64>> = Lazy::new(|| Mutex::new(0));
@@ -73,30 +73,41 @@ impl MyClient {
         }
     }
 
+
+
     pub (crate)fn run(&mut self, gui_input: SharedGuiInput) {
-        loop {
-            let gui_input = gui_input.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.inner_run(gui_input.clone());
+        }));
 
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.inner_run(gui_input);
-            }));
+        match result {
+            Ok(_) => {
+                info!("run() exited normally.");
+            }
+            Err(e) => {
+                if let Some(s) = e.downcast_ref::<&str>() {
+                    warn!("⚠ run() panicked: {}", s);
+                } else if let Some(s) = e.downcast_ref::<String>() {
+                    warn!("⚠ run() panicked: {}", s);
+                } else {
+                    warn!("⚠ run() panicked with unknown error.");
+                }
 
-            match result {
-                Ok(_) => {
-                    info!("run() exited normally.");
-                    break;
-                }
-                Err(e) => {
-                    if let Some(s) = e.downcast_ref::<&str>() {
-                        warn!("⚠ run() panicked: {}", s);
-                    } else if let Some(s) = e.downcast_ref::<String>() {
-                        warn!("⚠ run() panicked: {}", s);
-                    } else {
-                        warn!("⚠ run() panicked with unknown error.");
-                    }
-                    info!("Restarting run() after short delay...");
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                }
+                // Relaunch the application binary
+                info!("Restarting the entire application...");
+
+                let current_exe = std::env::current_exe().expect("Failed to get current executable path");
+
+                let _ = Command::new(current_exe)
+                    .args(std::env::args().skip(1)) // preserve original args
+                    .spawn()
+                    .expect("Failed to restart application");
+
+                // Optional: give the new process a second to initialize
+                std::thread::sleep(std::time::Duration::from_secs(1));
+
+                // Terminate the current process
+                exit(0);
             }
         }
     }
@@ -506,23 +517,25 @@ impl MyClient {
                 if chatting_status.0 == true { //we make sure to not log out while in the middle of a chat
                     Err(Box::new(io::Error::new(io::ErrorKind::Interrupted, "You are still in a chat with another user. End the chat before logging out")))
                 } else if chatting_status.2 != 0 {
+                    self.log(format!("Logout from client {}",self.id));
                     Ok(command_string)
                 } else { //if we are yet to log in to any server we can log out of it
                     Err(Box::new(io::Error::new(io::ErrorKind::NotFound, "You have yet to login to any server")))
                 }
             },
             ["[ClientListRequest]"] => {
+
                 info!("Requesting the list of clients available for chat");
                 Ok(command_string)
             },
             ["[MessageTo]", client_id, message_str] => {
+                self.log(format!("Client {} is sending a message to client {}",self.id , client_id));
                 info!("Sending message: {} to client {}", message_str, client_id);
                 Ok(command_string)
             },
             ["[ChatRequest]", client_id] => {
-                info!("Sending message to client {}", client_id);
                 if (chatting_status.0 , chatting_status.1).eq(&(false, 0 )) { //when requesting a chat we need to make sure that we are not in the middle of chatting with someone else
-                    info!("Requesting to chat with client: {}", client_id);
+                    self.log(format!("Client {} is requesting to chat with client: {}", self.id , client_id));
                     let peer_id: NodeId = match client_id.parse() {
                         Ok(id) => id,
                         Err(e) => {
@@ -540,16 +553,16 @@ impl MyClient {
                 Ok(command_string)
             },
             ["[MediaUpload]", media_name, encoded_media] => {
-                info!("Uploading media with name: {} , encoded as: {}", media_name, encoded_media);
+                self.log(format!("Client {} is uploading media with name: {} , encoded as: {}", self.id, media_name, encoded_media));
                 Ok(command_string)
             },
             ["[MediaDownloadRequest]", media_name] => {
-                info!("Requesting to download media: {}", media_name);
+                self.log(format!("Client {} is requesting to download media: {}", self.id, media_name));
                 Ok(command_string)
             },
             ["[ChatFinish]" , _client_id] => {
                 if chatting_status.0 == true {
-                    info!("Requesting to end current chat");
+                    self.log(format!("Client {} is trying to end current chat" , self.id));
                     self.change_chat_status(false , 0 , chatting_status.2);
                     Ok(command_string)
                 } else {
@@ -557,9 +570,9 @@ impl MyClient {
                 }
             },
             ["[MediaBroadcast]", media_name, encoded_media] => {
-                info!("Broadcasting {} to all connected clients" , media_name);
+                self.log(format!("Client {} is broadcasting {} to all connected clients", self.id, media_name));
                 if let Err(e) = Self::display_media( media_name , encoded_media) {
-                    info!("Failed to display image: {}", e);
+                    warn!("Failed to display image: {}", e);
                 }
                 Ok(command_string)
             },
@@ -576,8 +589,9 @@ impl MyClient {
                 println!("Unknown format");
                 Err(Box::new(io::Error::new(io::ErrorKind::NotFound, "Unknown format")))
             },
-        }
-    }
+            }
+       }
+
 
     fn add_edge_no_duplicate(
         &mut self,

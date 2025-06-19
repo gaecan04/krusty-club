@@ -311,7 +311,7 @@ impl NetworkApp {
                         egui::ScrollArea::vertical().show(ui, |ui| {
                             let logs = self.simulation_log.lock().unwrap();
                             for (idx, log) in logs.iter().enumerate() {
-                                let color = if idx % 2 == 0 { Color32::LIGHT_GRAY } else { Color32::GRAY };
+                                let color = if idx % 2 == 0 { Color32::DARK_GRAY } else { Color32::DARK_BLUE };
                                 ui.colored_label(color, log);
                             }
                         });
