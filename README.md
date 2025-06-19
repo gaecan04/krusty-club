@@ -1,3 +1,5 @@
+![5785225144627743089](https://github.com/user-attachments/assets/41a0e24e-04ea-4b03-bf43-e268c06e421c)
+
 # 🛰️ Distributed Drone Chat System
 
 Welcome to the official repository of the **Krusty_Club**, developed for the *Advanced Programming* (AP) course – University of Trento, Academic Year 2024-2025.
