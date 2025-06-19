@@ -209,6 +209,8 @@ impl SimulationController {
             let neighbors_clone: Vec<NodeId> = neighbors.iter().cloned().collect();
 
             for neighbor_id in &neighbors_clone {
+                broadcast_topology_change(&self.gui_input,&self.network_config,&"[FloodRequired]::Crash".to_string());
+
                 if let Some(cmd_tx) = self.command_senders.get(neighbor_id) {
                     cmd_tx
                         .send(DroneCommand::RemoveSender(drone_id))

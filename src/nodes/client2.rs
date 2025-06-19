@@ -33,6 +33,8 @@ use std::time::Duration;
 use bincode::error::IntegerType::Usize;
 use rand::random;
 use crate::simulation_controller::gui_input_queue::{push_gui_message, new_gui_input_queue, SharedGuiInput};
+use std::process::{Command, exit};
+
 
 
 //the first two global variable are kept to ensure consistency throughout the various chats
@@ -73,29 +75,38 @@ impl MyClient {
         }
     }
     pub (crate)fn run(&mut self, gui_input: SharedGuiInput) {
-        loop {
-            let gui_input = gui_input.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.inner_run(gui_input.clone());
+        }));
 
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.inner_run(gui_input);
-            }));
+        match result {
+            Ok(_) => {
+                info!("run() exited normally.");
+            }
+            Err(e) => {
+                if let Some(s) = e.downcast_ref::<&str>() {
+                    warn!("⚠ run() panicked: {}", s);
+                } else if let Some(s) = e.downcast_ref::<String>() {
+                    warn!("⚠ run() panicked: {}", s);
+                } else {
+                    warn!("⚠ run() panicked with unknown error.");
+                }
 
-            match result {
-                Ok(_) => {
-                    info!("run() exited normally.");
-                    break;
-                }
-                Err(e) => {
-                    if let Some(s) = e.downcast_ref::<&str>() {
-                        warn!("⚠ run() panicked: {}", s);
-                    } else if let Some(s) = e.downcast_ref::<String>() {
-                        warn!("⚠ run() panicked: {}", s);
-                    } else {
-                        warn!("⚠ run() panicked with unknown error.");
-                    }
-                    info!("Restarting run() after short delay...");
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                }
+                // Relaunch the application binary
+                info!("Restarting the entire application...");
+
+                let current_exe = std::env::current_exe().expect("Failed to get current executable path");
+
+                let _ = Command::new(current_exe)
+                    .args(std::env::args().skip(1)) // preserve original args
+                    .spawn()
+                    .expect("Failed to restart application");
+
+                // Optional: give the new process a second to initialize
+                std::thread::sleep(std::time::Duration::from_secs(1));
+
+                // Terminate the current process
+                exit(0);
             }
         }
     }

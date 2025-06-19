@@ -17,9 +17,7 @@ use wg_2024::packet::{Ack, FloodRequest, FloodResponse, Fragment, Nack, NackType
 use crossbeam_channel::{select_biased, Receiver, Sender};
 use crate::simulation_controller::gui_input_queue::{SharedGuiInput};
 
-
 static SESSION_COUNTER : Lazy<Mutex<u64>> = Lazy::new(|| Mutex::new(0));
-
 
 #[derive(Debug, Clone)]
 pub struct ReceivedMessageState {
@@ -29,7 +27,6 @@ pub struct ReceivedMessageState {
     pub last_fragment_len: Option<u8>,
 }
 
-
 #[derive(Debug, Clone)]
 pub struct SentMessageInfo {
     pub fragments : Vec<Fragment>,
@@ -38,13 +35,11 @@ pub struct SentMessageInfo {
     pub route_needs_recalculation : bool,
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NodeInfo {
-    pub id : NodeId,
-    pub node_type : NodeType,
+struct NodeInfo {
+    id : NodeId,
+    node_type : NodeType,
 }
-
 
 #[derive(Debug,Clone)]
 pub struct MyClient{
@@ -62,14 +57,13 @@ pub struct MyClient{
     pub simulation_log: Arc<Mutex<Vec<String>>>,
 }
 
-
 #[derive(Debug, Clone)]
-pub struct FloodDiscoveryState {
-    pub initiator_id : NodeId,
-    pub start_time : Instant,
-    pub received_responses : Vec<FloodResponse>,
+struct FloodDiscoveryState {
+    initiator_id : NodeId,
+    start_time : Instant,
+    received_responses : Vec<FloodResponse>,
+    //is_finalized : bool
 }
-
 
 impl MyClient {
     pub(crate) fn new(
@@ -92,12 +86,14 @@ impl MyClient {
             connected_server_id,
             seen_flood_ids,
             route_cache : HashMap::new(),
-            simulation_log: Arc::new(Mutex::new(Vec::new()))
+            simulation_log: Arc::new(Mutex::new(Vec::new())),
+
         }
     }
 
 
     pub(crate) fn run(&mut self, gui_input: SharedGuiInput) {
+
         println!("Client {} starting run loop.", self.id);
 
         if self.network_graph.node_count() == 0 {
@@ -120,28 +116,17 @@ impl MyClient {
             self.check_flood_discoveries_timeouts();
 
             select_biased! {
-               recv(self.packet_recv) -> packet => {
-                   println!("Checking for received packet by client {} ...", self.id);
-                   if let Ok(packet) = packet {
-                       println!("Packet received by client {} : {:?}", self.id, packet);
-                       self.process_packet(packet);
-                   }
-               },
-               default => {
-                       std::thread::sleep(std::time::Duration::from_millis(1));
-               },
-           }
-        }
-    }
-
-
-    fn check_flood_discoveries_timeouts(&mut self) {
-        let now = Instant::now();
-        let timeout_duration = std::time::Duration::from_millis(2000);
-        let floods_to_finalize: Vec<u64> = self.active_flood_discoveries.iter().filter(|(_flood_id, state)| now.duration_since(state.start_time) > timeout_duration).map(|(_flood_id, state)| *_flood_id).collect();
-        for flood_id in floods_to_finalize {
-            println!("Client {} finalizing flood discovery for ID {} due to timeout.", self.id, flood_id);
-            self.finalize_flood_discovery_topology(flood_id);
+                recv(self.packet_recv) -> packet => {
+                    println!("Checking for received packet by client {} ...", self.id);
+                    if let Ok(packet) = packet {
+                        println!("Packet received by client {} : {:?}", self.id, packet);
+                        self.process_packet(packet);
+                    }
+                },
+                default => {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                },
+            }
         }
     }
 
@@ -152,6 +137,16 @@ impl MyClient {
     fn log(&self, message: impl ToString) {
         if let Ok(mut log) = self.simulation_log.lock() {
             log.push(message.to_string());
+        }
+    }
+
+    fn check_flood_discoveries_timeouts(&mut self) {
+        let now = Instant::now();
+        let timeout_duration = std::time::Duration::from_millis(2000);
+        let floods_to_finalize: Vec<u64> = self.active_flood_discoveries.iter().filter(|(_flood_id, state)| now.duration_since(state.start_time) > timeout_duration).map(|(_flood_id, state)| *_flood_id).collect();
+        for flood_id in floods_to_finalize {
+            println!("Client {} finalizing flood discovery for ID {} due to timeout.", self.id, flood_id);
+            self.finalize_flood_discovery_topology(flood_id);
         }
     }
 
@@ -166,13 +161,12 @@ impl MyClient {
         }
     }
 
-
     fn process_packet(&mut self, mut packet: Packet) {
         let packet_type = packet.pack_type.clone();
         match packet_type {
-            PacketType::FloodRequest(request) => {
+            PacketType::FloodRequest(request) => { //CONTROLLA SE IL CLIENT PUò PROPAGARE FLOODREQUESTS
                 //println!("Client {} received FloodRequest {}, ignoring as client should not propagate.", self.id, request.flood_id);
-                self.process_flood_request(&request);
+                self.process_flood_request(&request, packet.routing_header.clone());
             },
             PacketType::FloodResponse(response) => {
                 println!("Client {} received FloodResponse for flood_id {}.", self.id, response.flood_id);
@@ -207,8 +201,7 @@ impl MyClient {
         }
     }
 
-
-    fn process_flood_request(&mut self, request: &FloodRequest) {
+    fn process_flood_request(&mut self, request: &FloodRequest, header: SourceRoutingHeader) {
         let flood_identifier = (request.flood_id, request.initiator_id);
         let sender_id = request.path_trace.last().map(|(id, _)| *id);
         if self.seen_flood_ids.contains(&flood_identifier) || (self.packet_send.len() == 1 && sender_id.is_some()){
@@ -220,29 +213,41 @@ impl MyClient {
                 path_trace: response_path_trace,
             };
             if let Some(prev_hop_id) = sender_id {
-                let mut response_route_hops : Vec<NodeId> = request.path_trace.iter().map(|(id, _)| *id).collect();
-                response_route_hops.push(self.id);
-                response_route_hops.reverse();
-                let first_response_hop = response_route_hops.get(1).cloned();
-                if let Some(next_hop_id) = first_response_hop {
-                    if let Some(sender_channel) =  self.packet_send.get(&next_hop_id) {
-                        let response_packet_to_send = Packet {
-                            pack_type : PacketType::FloodResponse(flood_response.clone()),
-                            routing_header : SourceRoutingHeader {
-                                hop_index : 1,
-                                hops : response_route_hops,
-                            },
-                            session_id : request.flood_id,
-                        };
-                        match sender_channel.send(response_packet_to_send) {
-                            Ok(()) => println!("Client {} sent FloodResponse {} back to {} (prev hop).", self.id, request.flood_id, prev_hop_id),
-                            Err(e) => eprintln!("Client {} failed to send FloodResponse {} back to {}: {}", self.id, request.flood_id, prev_hop_id, e),
+                if let Some(sender) = self.packet_send.get(&prev_hop_id) {
+                    let response_packet_to_send = Packet {
+                        pack_type : PacketType::FloodResponse(flood_response.clone()),
+                        routing_header: SourceRoutingHeader {
+                            hop_index: 1,
+                            hops: request.path_trace.iter().map(|(id, _)| *id).rev().collect(),
+                        },
+                        session_id : request.flood_id,
+                    };
+                    let mut response_route_hops : Vec<NodeId> = request.path_trace.iter().map(|(id, _)| *id).collect();
+                    response_route_hops.push(self.id);
+                    response_route_hops.reverse();
+                    let first_response_hop = response_route_hops.get(1).cloned();
+                    if let Some(next_hop_id) = first_response_hop {
+                        if let Some(sender_channel) =  self.packet_send.get(&next_hop_id) {
+                            let response_packet_to_send = Packet {
+                                pack_type : PacketType::FloodResponse(flood_response.clone()),
+                                routing_header : SourceRoutingHeader {
+                                    hop_index : 1,
+                                    hops : response_route_hops,
+                                },
+                                session_id : request.flood_id,
+                            };
+                            match sender_channel.send(response_packet_to_send) {
+                                Ok(()) => println!("Client {} sent FloodResponse {} back to {} (prev hop).", self.id, request.flood_id, prev_hop_id),
+                                Err(e) => eprintln!("Client {} failed to send FloodResponse {} back to {}: {}", self.id, request.flood_id, prev_hop_id, e),
+                            }
+                        } else {
+                            eprintln!("Client {} error: no sender found for previous hop {}", self.id, prev_hop_id);
                         }
                     } else {
-                        eprintln!("Client {} error: no sender found for previous hop {}", self.id, prev_hop_id);
+                        eprintln!("Client {} cannot send FloodResponse back, path trace too short after adding self", self.id);
                     }
                 } else {
-                    eprintln!("Client {} cannot send FloodResponse back, path trace too short after adding self", self.id);
+                    eprintln!("Client {} error: could not find sender channel for previous hop {}", self.id, prev_hop_id);
                 }
             } else {
                 eprintln!("Client {} received FloodRequest with empty path trace or no sender info.", self.id);
@@ -270,8 +275,6 @@ impl MyClient {
             }
         }
     }
-
-
 
 
     fn start_flood_discovery(&mut self) {
@@ -312,7 +315,6 @@ impl MyClient {
             received_responses: Vec::new()
         });
     }
-
 
     fn reassemble_packet(&mut self, fragment: &Fragment, packet: &mut Packet) {
         let session_id = packet.session_id;
@@ -360,16 +362,15 @@ impl MyClient {
                     full_message_data.truncate(fragment.length as usize);
                 }
                 let message_string = String::from_utf8_lossy(&full_message_data).to_string();
-                self.process_received_high_level_message(message_string, session_id);
+                self.process_received_high_level_message(message_string, src_id, session_id);
             }
         } else {
             eprintln!("Received fragment {} for session {} with offset {} and length {} which exceeds excepted message size {}. Ignoring fragment.", fragment.fragment_index, session_id, offset, fragment_len, state.data.len());
         }
     }
 
-
     //function in which the correctly reassembled high level messages are elaborated
-    fn process_received_high_level_message(&mut self, message_string: String, session_id: u64) {
+    fn process_received_high_level_message(&mut self, message_string: String, source_id: NodeId, session_id: u64) {
         //println!("Client {} processing high-level message for session {} from source {}: {}", self.id, session_id, source_id, message_string);
         let tokens: Vec<&str> = message_string.trim().splitn(3, "::").collect();
 
@@ -383,19 +384,14 @@ impl MyClient {
                 // format: [MessageFrom]::sender_id::message_content
                 if let Ok(sender_id) = sender_id_str.parse::<NodeId>() {
                     let content = *content_str;
-                    println!("Client {} received chat message from client {}. Message content: {}", self.id, sender_id, content);
+                    println!("Client {} received chat message from client {}.", self.id, sender_id);
                 } else {
                     eprintln!("Client {} received MessageFrom with invalid sender_id: {}.", self.id, sender_id_str);
                 }
             },
             ["[ClientListResponse]", list_str] => {
                 //format: [ClientListResponse]::[client1_id, client2_id, ...]
-                let cleaned = list_str.trim_matches(|c| c == '[' || c == ']').trim_end_matches(|c: char| c == '\0' || c == ' ' || c == '\n' || c == '\r' || c == '\t');
-                let client_ids: Vec<NodeId> = cleaned.split(',').filter_map(|s| {
-                    let cleaned : String = s.chars().filter(|&c| c != '\0' && c != ']').collect();
-                    let trimmed = cleaned.trim();
-                    trimmed.parse::<NodeId>().ok()
-                }).collect();
+                let client_ids: Vec<NodeId> = list_str.trim_start_matches('[').trim_end_matches(']').split(',').filter(|s| !s.trim().is_empty()).filter_map(|s| s.trim().parse::<NodeId>().ok()).collect();
                 println!("Client {} received CLIENT LIST: {:?}", self.id, client_ids);
             },
             ["[ChatStart]", status_str] => {
@@ -470,19 +466,26 @@ impl MyClient {
                                         temp_file_path.push(filename);
                                         match img.save(&temp_file_path) {
                                             Ok(_) => {
-                                                println!("Client {} successfully saved media '{}' to temporary file: {:?}", self.id, media_name, temp_file_path);
                                                 let open_command = if cfg!(target_os = "windows") {
-                                                    "start"
+                                                    "cmd"
                                                 } else if cfg!(target_os = "macos") {
                                                     "open"
                                                 } else {
-                                                    "xdg-open" //Linux
+                                                    "xdg-open"
                                                 };
+
                                                 let path_str = temp_file_path.to_string_lossy().into_owned();
-                                                match Command::new(open_command).arg(&path_str).spawn() {
-                                                    Ok(_) => println!("Client {} successfully opened media '{}' with command '{} {}'.", self.id, media_name, open_command, path_str),
-                                                    Err(e) => eprintln!("Client {} failed to open media '{}' using command '{} {}': {}", self.id, media_name, open_command, path_str, e),
+                                                let args = if cfg!(target_os = "windows") {
+                                                    vec!["/C", "start", "", path_str.as_str()] // "" prevents issues with filenames with spaces
+                                                } else {
+                                                    vec![path_str.as_str()]
+                                                };
+
+                                                match Command::new(open_command).args(args.clone()).spawn() {
+                                                    Ok(_) => println!("Client {} successfully opened media '{}' with command '{} {:?}'.", self.id, media_name, open_command, args),
+                                                    Err(e) => eprintln!("Client {} failed to open media '{}' using command '{} {:?}': {}", self.id, media_name, open_command, args, e),
                                                 }
+
                                             },
                                             Err(e) => eprintln!("Client {} failed to save image data for media '{}' to file: {}", self.id, media_name, e),
                                         }
@@ -517,7 +520,6 @@ impl MyClient {
         }
     }
 
-
     fn send_ack(&mut self, packet: &mut Packet, fragment: &Fragment) {
         let mut ack_routing_header = packet.routing_header.clone();
         ack_routing_header.hops.reverse();
@@ -543,7 +545,6 @@ impl MyClient {
             eprintln!("Client {} error: cannot send ACK, original routing header hops too short: {:?}. Cannot use ControllerShortcut.", self.id, packet.routing_header.hops);
         }
     }
-
 
     fn process_nack(&mut self, nack: &Nack, packet: &mut Packet) {
         println!("Client {} processing NACK type {:?} for session {}.", self.id, nack.nack_type, packet.session_id);
@@ -577,6 +578,7 @@ impl MyClient {
                 } else {
                     eprintln!("Client {} received DestinationIsDrone NACK for unknown session {}.", self.id, packet.session_id);
                 }
+                //self.start_flood_discovery();
             }
             NackType::UnexpectedRecipient(received_at_node_id) => {
                 eprintln!("Client {} received UnexpectedRecipient NACK for session {}: packet arrived at node {} but expected a different one.", self.id, packet.session_id, received_at_node_id);
@@ -584,7 +586,7 @@ impl MyClient {
                 let nack_hop_index = packet.routing_header.hop_index;
                 if nack_hop_index > 0 && nack_hop_index < nack_route.len() {
                     let problem_link_from = nack_route[nack_hop_index - 1];
-                    let problem_link_to = *received_at_node_id;
+                    let problem_link_to = nack_route[nack_hop_index];
                     println!("Client {} penalizing link {} -> {} due to UnexpectedRecipient.", self.id, problem_link_from, problem_link_to);
                     self.increment_drop(problem_link_from, problem_link_to);
                     self.increment_drop(problem_link_to, problem_link_from);
@@ -643,9 +645,8 @@ impl MyClient {
         }
     }
 
-
     fn create_topology(&mut self, flood_response: &FloodResponse) {
-        println!("Client {} processing FloodResponse for flood_id {}.", self.id, flood_response.flood_id);
+        //println!("Client {} processing FloodResponse for flood_id {}.", self.id, flood_response.flood_id);
         let path = &flood_response.path_trace;
         if path.is_empty() {
             println!("Received empty path_trace in FloodResponse for flood_id {}.", flood_response.flood_id);
@@ -655,14 +656,14 @@ impl MyClient {
         if let std::collections::hash_map::Entry::Vacant(e) = self.node_id_to_index.entry(initiator_id) {
             let node_index = self.network_graph.add_node(NodeInfo { id: initiator_id, node_type: initiator_type });
             e.insert(node_index);
-            println!("Client {} added initiator node {} ({:?}) to graph.", self.id, initiator_id, initiator_type);
+            //println!("Client {} added initiator node {} ({:?}) to graph.", self.id, initiator_id, initiator_type);
         }
         for i in 0..path.len() {
             let (current_node_id, current_node_type) = path[i];
             if let std::collections::hash_map::Entry::Vacant(e) = self.node_id_to_index.entry(current_node_id) {
                 let node_index = self.network_graph.add_node(NodeInfo { id: current_node_id, node_type: current_node_type });
                 e.insert(node_index);
-                println!("Client {} added node {} ({:?}) to graph.", self.id, current_node_id, current_node_type);
+                //println!("Client {} added node {} ({:?}) to graph.", self.id, current_node_id, current_node_type);
             }
             /*
             let current_node_idx = *self.node_id_to_index.entry(current_node_id).or_insert_with(|| {
@@ -672,15 +673,15 @@ impl MyClient {
             */
             if i > 0 {
                 let (prev_node_id, _) = path[i - 1];
-                let (current_node_id, _) = path[i];
+                let (current_node_id, current_node_type) = path[i];
                 if let (Some(&prev_node_idx), Some(&current_node_idx)) = (self.node_id_to_index.get(&prev_node_id), self.node_id_to_index.get(&current_node_id)) {
                     let edge_exists = self.network_graph.contains_edge(current_node_idx, prev_node_idx) || self.network_graph.contains_edge(prev_node_idx, current_node_idx);
                     if !edge_exists {
-                       // println!("Client {} adding edge: {} -> {}.", self.id, prev_node_id, current_node_id);
+                        // println!("Client {} adding edge: {} -> {}.", self.id, prev_node_id, current_node_id);
                         self.network_graph.add_edge(prev_node_idx, current_node_idx, 0);
                         self.network_graph.add_edge(current_node_idx, prev_node_idx, 0);
                     } else {
-                       // println!("Client {}: edge {} -> {} already exists.", self.id, prev_node_id, current_node_id);
+                        //println!("Client {}: edge {} -> {} already exists.", self.id, prev_node_id, current_node_id);
                     }
                 } else {
                     eprintln!("Client {} error: current node id {} not found in node_id_to_index map while processing path trace.", self.id, current_node_id);
@@ -688,7 +689,6 @@ impl MyClient {
             }
         }
     }
-
 
     fn process_gui_command(&mut self, dest_id: NodeId, command_string: String) {
         println!("Client {} processing GUI command '{}' for {}.", self.id, command_string, dest_id);
@@ -966,7 +966,6 @@ impl MyClient {
         }
     }
 
-
     fn increment_drop(&mut self, from: NodeId, to: NodeId) {
         println!("Client {} incrementing drop count for link {} -> {}.", self.id, from, to);
         let from_node_idx = self.node_id_to_index.get(&from).copied();
@@ -984,7 +983,6 @@ impl MyClient {
         }
     }
 
-
     fn remove_node_from_graph(&mut self, node_id: NodeId) {
         if let Some(node_index) = self.node_id_to_index.remove(&node_id) {
             self.network_graph.remove_node(node_index);
@@ -994,6 +992,9 @@ impl MyClient {
         }
     }
 
+    fn get_node_info(&self, node_id: NodeId) -> Option<&NodeInfo> {
+        self.node_id_to_index.get(&node_id).and_then(|&idx| self.network_graph.node_weight(idx))
+    }
 
     fn send_to_neighbor(&mut self, neighbor_id: NodeId, packet: Packet) -> Result<(), String> {
         if let Some(sender) = self.packet_send.get(&neighbor_id) {
@@ -1006,7 +1007,6 @@ impl MyClient {
         }
     }
 }
-
 
 
 #[cfg(test)]
