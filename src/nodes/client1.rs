@@ -3,7 +3,7 @@ use std::time::Instant;
 //use std::io::Write;
 use std::process::Command;
 use std::env::temp_dir;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 //use std::path::PathBuf;
 use once_cell::sync::Lazy;
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -59,6 +59,7 @@ pub struct MyClient{
     pub connected_server_id : Option<NodeId>,
     pub seen_flood_ids : HashSet<(u64, NodeId)>,
     pub route_cache : HashMap<NodeId, Vec<NodeId>>,
+    pub simulation_log: Arc<Mutex<Vec<String>>>,
 }
 
 
@@ -91,6 +92,7 @@ impl MyClient {
             connected_server_id,
             seen_flood_ids,
             route_cache : HashMap::new(),
+            simulation_log: Arc::new(Mutex::new(Vec::new()))
         }
     }
 
@@ -143,6 +145,15 @@ impl MyClient {
         }
     }
 
+    pub fn attach_log(&mut self, log: Arc<Mutex<Vec<String>>>) {
+        self.simulation_log = log;
+    }
+
+    fn log(&self, message: impl ToString) {
+        if let Ok(mut log) = self.simulation_log.lock() {
+            log.push(message.to_string());
+        }
+    }
 
     fn finalize_flood_discovery_topology(&mut self, flood_id: u64) {
         if let Some(discovery_state) = self.active_flood_discoveries.remove(&flood_id) {
@@ -688,6 +699,7 @@ impl MyClient {
                 if let Ok(parsed_server_id) = server_id.parse::<NodeId>() {
                     println!("Client {} processing LOGIN command for server {}.", self.id, parsed_server_id);
                     self.connected_server_id = Some(parsed_server_id);
+                    self.log(format!("Login command from client: {}", self.id));
                     Some(format!("[Login]::{}",parsed_server_id))
                 } else {
                     eprintln!("Client {} received LOGIN command with invalid server {}.", self.id, server_id);
@@ -697,6 +709,7 @@ impl MyClient {
             ["[Logout]"] => {
                 if let Some(mem_server_id) = self.connected_server_id {
                     println!("Client {} processing LOGOUT command via server {}.", self.id, mem_server_id);
+                    self.log(format!("Logout command from client: {}", self.id));
                     Some("[Logout]".to_string())
                 } else {
                     eprintln!("Client {} received LOGOUT command while not logged in. Ignoring.", self.id);
@@ -706,6 +719,7 @@ impl MyClient {
             ["[ClientListRequest]"] => {
                 if let Some(mem_server_id) = self.connected_server_id {
                     println!("Client {} processing CLIENT LIST REQUEST command via server {}.", self.id, mem_server_id);
+                    self.log(format!("ClientListRequest command from client: {}", self.id));
                     Some("[ClientListRequest]".to_string())
                 } else {
                     eprintln!("Client {} received CLIENT LIST REQUEST command while not logged in. Ignoring.", self.id);
@@ -716,6 +730,7 @@ impl MyClient {
                 if let Ok(target_client_id) = target_id.parse::<NodeId>() {
                     if let Some(mem_server_id) = self.connected_server_id {
                         println!("Client {} processing MESSAGE TO command for client {} via server {} with content: {}.", self.id, target_client_id, mem_server_id, message_content);
+                        self.log(format!("MessageTo::{target_client_id}::{message_content} command from client: {}", self.id));
                         Some(format!("[MessageTo]::{target_client_id}::{message_content}"))
                     } else {
                         eprintln!("Client {} received MESSAGE TO command while not logged in. Ignoring.", self.id);
@@ -730,6 +745,7 @@ impl MyClient {
                 if let Ok(_peer_id) = peer_id.parse::<NodeId>() {
                     if let Some(mem_server_id) = self.connected_server_id {
                         println!("Client {} processing CHAT REQUEST command for peer {} via server {}.", self.id, _peer_id, mem_server_id);
+                        self.log(format!("ChatRequest::{_peer_id} command from client: {}", self.id));
                         Some(format!("[ChatRequest]::{_peer_id}"))
                     } else {
                         eprintln!("Client {} received CHAT REQUEST command while not logged in. Ignoring.", self.id);
@@ -744,6 +760,7 @@ impl MyClient {
                 if let Ok(_peer_id) = peer_id.parse::<NodeId>() {
                     if let Some(mem_server_id) = self.connected_server_id {
                         println!("Client {} processing CHAT FINISH command for peer {} via server {}.", self.id, _peer_id, mem_server_id);
+                        self.log(format!("ChatFinish::{_peer_id} command from client: {}", self.id));
                         Some(format!("[ChatFinish]::{_peer_id}"))
                     } else {
                         eprintln!("Client {} received CHAT FINISH command while not logged in. Ignoring.", self.id);
@@ -757,6 +774,7 @@ impl MyClient {
             ["[MediaUpload]", media_name, base64_data] => {
                 if let Some(mem_server_id) = self.connected_server_id {
                     println!("Client {} processing MEDIA UPLOAD command for media '{}' via server {}.", self.id, media_name, mem_server_id);
+                    self.log(format!("MediaUpload::{media_name}::{base64_data} command from client: {}", self.id));
                     Some(format!("[MediaUpload]::{media_name}::{base64_data}"))
                 } else {
                     eprintln!("Client {} received MEDIA UPLOAD command while not logged in. Ignoring.", self.id);
@@ -766,6 +784,7 @@ impl MyClient {
             ["[MediaDownloadRequest]", media_name] => {
                 if let Some(mem_server_id) = self.connected_server_id {
                     println!("Client {} processing MEDIA DOWNLOAD REQUEST command for media '{}' via server {}.", self.id, media_name, mem_server_id);
+                    self.log(format!("MediaDownloadRequest::{media_name} command from client: {}", self.id));
                     Some(format!("[MediaDownloadRequest]::{media_name}"))
                 } else {
                     eprintln!("Client {} received MEDIA DOWNLOAD REQUEST command while not logged in. Ignoring.", self.id);
@@ -776,6 +795,7 @@ impl MyClient {
                 if let (Some(_client_id), Some(_target_id)) = (client_id.parse::<NodeId>().ok(), target_id.parse::<NodeId>().ok()) {
                     if let Some(mem_server_id) = self.connected_server_id {
                         println!("Client {} processing HISTORY REQUEST command for history between {} and {} via server {}.", self.id, _client_id, _target_id, mem_server_id);
+                        self.log(format!("HistoryRequest::{_client_id}::{_target_id} command from client: {}", self.id));
                         Some(format!("[HistoryRequest]::{_client_id}::{_target_id}"))
                     } else {
                         eprintln!("Client {} received HISTORY REQUEST command while not logged in. Ignoring.", self.id);
@@ -789,6 +809,7 @@ impl MyClient {
             ["[MediaListRequest]"] => {
                 if let Some(mem_server_id) = self.connected_server_id {
                     println!("Client {} processing MEDIA LIST REQUEST command via server {}.", self.id, mem_server_id);
+                    self.log(format!("MediaListRequest command from client: {}", self.id));
                     Some("[MediaListRequest]".to_string())
                 } else {
                     eprintln!("Client {} received MEDIA LIST REQUEST command while not logged in. Ignoring.", self.id);
@@ -798,6 +819,7 @@ impl MyClient {
             ["[MediaBroadcast]", media_name, base64_data] => {
                 if let Some(mem_server_id) = self.connected_server_id {
                     println!("Client {} processing MEDIA BROADCAST command for media '{}' via server {}.", self.id, media_name, mem_server_id);
+                    self.log(format!("MediaBroadcast::{media_name}::{base64_data} command from client: {}", self.id));
                     Some(format!("[MediaBroadcast]::{media_name}::{base64_data}"))
                 } else {
                     eprintln!("Client {} received MEDIA BROADCAST command while not logged in. Ignoring.", self.id);
@@ -806,6 +828,7 @@ impl MyClient {
             },
             ["[FloodRequired]",action] => {
                 println!("Client {} received FLOOD REQUIRED command due to action: {}.", self.id, action);
+                self.log(format!("FloodRequired command from client: {}", self.id));
                 self.start_flood_discovery();
                 None
             },
@@ -994,8 +1017,6 @@ mod tests {
     use wg_2024::network::{NodeId, SourceRoutingHeader};
     use wg_2024::packet::{FloodRequest, Packet, PacketType, NodeType as PktNodeType};
     use petgraph::stable_graph::{StableGraph, NodeIndex};
-    use std::sync::Mutex;
-    use once_cell::sync::Lazy;
     use std::time::{Instant, Duration};
 
     fn has_edge(graph: &StableGraph<NodeInfo, usize>, a: NodeIndex, b: NodeIndex) -> bool {
