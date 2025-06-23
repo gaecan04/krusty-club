@@ -2,17 +2,17 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::sync::{Arc, Mutex};
 use crossbeam_channel::{Receiver, Sender};
-use skylink::SkyLinkDrone;
+use LeDron_James::Drone as LeDron_JamesDrone;
+
 use wg_2024::packet::Packet;
 use wg_2024::controller::{DroneCommand,DroneEvent};
 use wg_2024::drone::Drone;
 use wg_2024::network::NodeId;
-use crate::network::initializer::{ParsedConfig};
+use crate::network::initializer::{NetworkInitializer, ParsedConfig};
 use crate::simulation_controller::network_designer::{Node, NodeType};
 use crate::simulation_controller::gui_input_queue::{broadcast_topology_change, SharedGuiInput};
 use crate::network::initializer::GroupImplFactory;
 use crate::network::initializer::DroneImplementation;
-
 
 pub struct SimulationController {
     network_config: Arc<Mutex<ParsedConfig>>,
@@ -20,8 +20,8 @@ pub struct SimulationController {
     pub(crate) command_senders: HashMap<NodeId, Sender<DroneCommand>>,
     pub(crate) event_sender: Sender<DroneEvent>,
     pub(crate) network_graph: HashMap<NodeId, HashSet<NodeId>>,
-    packet_senders: HashMap<NodeId, Sender<Packet>>,
-    pub(crate) packet_receivers: HashMap<NodeId, Receiver<Packet>>,
+    pub(crate) packet_senders: Arc<Mutex<HashMap<NodeId, HashMap<NodeId, Sender<Packet>>>>>,
+    pub(crate) packet_receivers: Arc<Mutex<HashMap<NodeId, Receiver<Packet>>>>,
 
     drone_factory: Arc<dyn Fn(
         NodeId,
@@ -35,20 +35,19 @@ pub struct SimulationController {
     pub gui_input: SharedGuiInput,
     pub group_implementations: HashMap<String, GroupImplFactory>,
 
-
+    pub initializer: Arc<Mutex<NetworkInitializer>>,
 }
 
-
-
-
 impl SimulationController {
-
     pub fn new(
         network_config: Arc<Mutex<ParsedConfig>>,
         event_sender: Sender<DroneEvent>,
         command_sender: Sender<DroneCommand>,
         drone_factory: Arc<dyn Fn(NodeId, Sender<DroneEvent>, Receiver<DroneCommand>, Receiver<Packet>, HashMap<NodeId, Sender<Packet>>, f32) -> Box<dyn Drone> + Send + Sync>,
         gui_input: SharedGuiInput,
+        initializer: Arc<Mutex<NetworkInitializer>>,
+        packet_senders: Arc<Mutex<HashMap<NodeId, HashMap<NodeId, Sender<Packet>>>>>,
+        packet_receivers: Arc<Mutex<HashMap<NodeId, Receiver<Packet>>>>,
     ) -> Self {
         let group_implementations = SimulationController::load_group_implementations();
 
@@ -56,21 +55,22 @@ impl SimulationController {
             network_config: network_config.clone(),
             config: network_config.clone(),
             event_sender: event_sender.clone(),
-            command_sender: command_sender.clone(),            command_senders: HashMap::new(),
+            command_sender: command_sender.clone(),
+            command_senders: HashMap::new(),
             network_graph: HashMap::new(),
-            packet_senders: HashMap::new(),
-            packet_receivers:HashMap::new() ,
+            packet_senders,
+            packet_receivers,
             drone_factory,
             gui_input,
             group_implementations,
-
-
+            initializer,
         };
-        // Initialize the network graph
-        controller.initialize_network_graph();
 
+        controller.initialize_network_graph();
         controller
     }
+
+
 
     // Initialize network graph from config
     fn initialize_network_graph(&mut self) {
@@ -167,14 +167,15 @@ impl SimulationController {
             },
             DroneEvent::ControllerShortcut(packet) => {
                 if let Some(dest_id) = packet.routing_header.destination() {
-                    if let Some(sender) = self.packet_senders.get(&dest_id) {
+                    let from_id = packet.routing_header.hops.first().copied().unwrap_or(0); // or whatever default you use
+                    if let Some(sender) = self.get_packet_sender(from_id, dest_id) {
                         if let Err(e) = sender.send(packet.clone()) {
                             eprintln!("Failed to forward ControllerShortcut to node {}: {}", dest_id, e);
                         } else {
                             println!("ControllerShortcut forwarded to node {}", dest_id);
                         }
                     } else {
-                        eprintln!("No packet sender found for destination node {}", dest_id);
+                        eprintln!("No packet sender found from {} to {}", from_id, dest_id);
                     }
                 } else {
                     eprintln!("ControllerShortcut has no destination");
@@ -209,18 +210,16 @@ impl SimulationController {
             let neighbors_clone: Vec<NodeId> = neighbors.iter().cloned().collect();
 
             for neighbor_id in &neighbors_clone {
-                broadcast_topology_change(&self.gui_input,&self.network_config,&"[FloodRequired]::Crash".to_string());
-
-                if let Some(cmd_tx) = self.command_senders.get(neighbor_id) {
-                    cmd_tx
-                        .send(DroneCommand::RemoveSender(drone_id))
-                        .map_err(|_| "Failed to send RemoveSender command")?;
+                if let Some(NodeType::Drone) = self.get_node_type(*neighbor_id) {
+                    if let Some(cmd_tx) = self.command_senders.get(neighbor_id) {
+                        cmd_tx
+                            .send(DroneCommand::RemoveSender(drone_id))
+                            .map_err(|_| "Failed to send RemoveSender command")?;
+                    }
                 }
             }
 
             if let Some(cmd_tx) = self.command_senders.get(&drone_id) {
-                broadcast_topology_change(&self.gui_input,&self.network_config,&"[FloodRequired]::Crash".to_string());
-
                 cmd_tx
                     .send(DroneCommand::Crash)
                     .map_err(|_| "Failed to send Crash command")?;
@@ -233,15 +232,38 @@ impl SimulationController {
             }
         }
 
+
+        //🆕🆕🆕🆕🆕NEW update the config
+        {
+            let mut cfg = self.network_config.lock().unwrap();
+
+            // Remove drone from other drones' neighbor lists
+            for drone in &mut cfg.drone {
+                drone.connected_node_ids.retain(|&id| id != drone_id);
+            }
+
+            // Remove drone from client neighbor lists
+            for client in &mut cfg.client {
+                client.connected_drone_ids.retain(|&id| id != drone_id);
+            }
+
+            // Remove drone from server neighbor lists
+            for server in &mut cfg.server {
+                server.connected_drone_ids.retain(|&id| id != drone_id);
+            }
+        }
+
         // Final cleanup
         self.network_graph.remove(&drone_id);
         self.command_senders.remove(&drone_id);
-        self.packet_senders.remove(&drone_id);
+        self.packet_senders.lock().unwrap().remove(&drone_id);
 
         // Mark inactive
         if let Some(mut state) = self.get_node_state(drone_id) {
             state.active = false;
         }
+
+        broadcast_topology_change(&self.gui_input,&self.network_config,&"[FloodRequired]::Crash".to_string());
 
         Ok(())
     }
@@ -314,17 +336,18 @@ impl SimulationController {
             return Err("Removing this link would violate network constraints".into());
         }
 
-        // 3. Send RemoveSender commands to both nodes
-        if let Some(sender) = self.command_senders.get(&a) {
-            sender
-                .send(DroneCommand::RemoveSender(b))
-                .map_err(|e| format!("Failed to send RemoveSender to {}: {}", a, e))?;
+        // 3. Send RemoveSender commands to both nodes if drones
+        if self.get_node_type(a) == Some(NodeType::Drone) {
+            if let Some(sender) = self.command_senders.get(&a) {
+                sender.send(DroneCommand::RemoveSender(b))?;
+            }
         }
-        if let Some(sender) = self.command_senders.get(&b) {
-            sender
-                .send(DroneCommand::RemoveSender(a))
-                .map_err(|e| format!("Failed to send RemoveSender to {}: {}", b, e))?;
+        if self.get_node_type(b) == Some(NodeType::Drone) {
+            if let Some(sender) = self.command_senders.get(&b) {
+                sender.send(DroneCommand::RemoveSender(a))?;
+            }
         }
+
 
         // 4. Update the network graph
         if let Some(neighbors) = self.network_graph.get_mut(&a) {
@@ -369,16 +392,19 @@ impl SimulationController {
             }
         }
 
+
         // 6. Broadcast topology change
         broadcast_topology_change(
             &self.gui_input,
             &self.network_config,
-            &"[FloodRequired]::RemoveSender".to_string(),
+            &format!("[FloodRequired]::RemoveSender::{}::{}", a, b),
         );
+
 
         println!("✅ Successfully removed link between {} and {}", a, b);
         Ok(())
     }
+
 
     fn get_node_type(&self, id: NodeId) -> Option<NodeType> {
         let cfg = self.config.lock().unwrap();
@@ -488,6 +514,8 @@ impl SimulationController {
             sender.send(DroneCommand::SetPacketDropRate(rate))
                 .map_err(|_| "Failed to send SetPacketDropRate command".into())
 
+
+
         } else {
             Err("Drone not found".into())
         }
@@ -539,15 +567,20 @@ impl SimulationController {
 
         // 5) Channels: packet
         let (pkt_tx, pkt_rx) = crossbeam_channel::unbounded();
-        self.packet_senders.insert(id, pkt_tx.clone());
-        self.packet_receivers.insert(id, pkt_rx.clone());
+        self.packet_senders.lock().unwrap().insert(id, HashMap::new());
+        self.packet_receivers.lock().unwrap().insert(id, pkt_rx.clone());
 
         // 6) Build send map for the new drone
-        let mut packet_send_map = HashMap::new();
+        let mut packet_send_map = self.packet_senders
+            .lock().unwrap().get(&id)
+            .cloned()
+            .unwrap_or_default(); // ✅ this gives the map: HashMap<NodeId, Sender<Packet>>
+
         for &peer in &connections {
-            if let Some(tx) = self.packet_senders.get(&peer) {
+            if let Some(tx) = self.packet_senders.lock().unwrap().get(&peer).and_then(|m| m.get(&id)) {
                 packet_send_map.insert(peer, tx.clone());
             }
+
         }
 
         // 7) Spawn drone thread
@@ -557,8 +590,8 @@ impl SimulationController {
 
         let sky_factory = self
             .group_implementations
-            .get("group_7")
-            .expect("SkyLink group implementation must exist");
+            .get("group_1")
+            .expect("LeDron_JamesDrone group implementation must exist");
 
         let mut drone = sky_factory(id, controller_send, controller_recv, packet_recv, packet_send_map, pdr);
         std::thread::spawn(move || {
@@ -566,11 +599,11 @@ impl SimulationController {
         });
 
         // 8) ✅ CRITICAL: Send AddSender commands bidirectionally
-        let new_drone_packet_tx = self.packet_senders.get(&id).unwrap().clone();
+        let new_drone_packet_tx = self.packet_senders.lock().unwrap().get(&id).unwrap().clone();
 
         for &peer in &connections {
             // Tell the new drone about its peer
-            if let Some(peer_packet_tx) = self.packet_senders.get(&peer) {
+            if let Some(peer_packet_tx) = self.packet_senders.lock().unwrap().get(&peer).and_then(|m| m.get(&id)) {
                 if let Some(new_drone_cmd_tx) = self.command_senders.get(&id) {
                     new_drone_cmd_tx
                         .send(DroneCommand::AddSender(peer, peer_packet_tx.clone()))
@@ -578,12 +611,14 @@ impl SimulationController {
                 }
             }
 
-            // Tell the peer about the new drone
-            if let Some(peer_cmd_tx) = self.command_senders.get(&peer) {
-                peer_cmd_tx
-                    .send(DroneCommand::AddSender(id, new_drone_packet_tx.clone()))
-                    .map_err(|e| format!("Failed to tell peer {} about new drone {}: {}", peer, id, e))?;
+            if let Some(new_drone_packet_tx) = self.packet_senders.lock().unwrap().get(&id).and_then(|m| m.get(&peer)) {
+                if let Some(peer_cmd_tx) = self.command_senders.get(&peer) {
+                    peer_cmd_tx
+                        .send(DroneCommand::AddSender(id, new_drone_packet_tx.clone()))
+                        .map_err(|e| format!("Failed to tell peer {} about new drone {}: {}", peer, id, e))?;
+                }
             }
+
         }
 
         // 9) ✅ NEW: Force topology refresh for flood protocol
@@ -605,8 +640,9 @@ impl SimulationController {
         broadcast_topology_change(
             &self.gui_input,
             &self.network_config,
-            &"[FloodRequired]::SpawnDrone".to_string(),
+            &format!("[FloodRequired]::SpawnDrone::{}::{:?}", id, connections),
         );
+
 
         println!("✅ Successfully spawned drone {} with connections {:?}", id, connections);
 
@@ -617,6 +653,10 @@ impl SimulationController {
     }
 
 
+    pub fn add_connection(&mut self, a: NodeId, b: NodeId) {
+        self.network_graph.entry(a).or_default().insert(b);
+        self.network_graph.entry(b).or_default().insert(a);
+    }
 
     // Validate that adding a new drone won't violate network constraints
     fn validate_new_drone(&self, id: NodeId, connections: &[NodeId]) -> Result<bool, Box<dyn Error>> {
@@ -641,9 +681,9 @@ impl SimulationController {
         let mut group_implementations = HashMap::new();
 
         group_implementations.insert(
-            "group_7".to_string(),
+            "group_1".to_string(),
             Box::new(|id, sim_contr_send, sim_contr_recv, packet_recv, packet_send, pdr| {
-                Box::new(SkyLinkDrone::new(
+                Box::new(LeDron_JamesDrone::new(
                     id,
                     sim_contr_send,
                     sim_contr_recv,
@@ -668,10 +708,10 @@ impl SimulationController {
         if !self.command_senders.contains_key(&b) {
             return Err(format!("No command sender for node {}", b).into());
         }
-        if !self.packet_senders.contains_key(&a) {
+        if !self.packet_senders.lock().unwrap().contains_key(&a) {
             return Err(format!("No packet sender for node {}", a).into());
         }
-        if !self.packet_senders.contains_key(&b) {
+        if !self.packet_senders.lock().unwrap().contains_key(&b) {
             return Err(format!("No packet sender for node {}", b).into());
         }
 
@@ -683,8 +723,8 @@ impl SimulationController {
         }
 
         // 3. Clone packet senders (used to send packets to these nodes)
-        let packet_to_a = self.packet_senders[&a].clone();
-        let packet_to_b = self.packet_senders[&b].clone();
+        let packet_to_a = self.packet_senders.lock().unwrap()[&b][&a].clone();
+        let packet_to_b = self.packet_senders.lock().unwrap()[&a][&b].clone();
 
         // 4. Send AddSender to each node
         let command_to_a = self.command_senders[&a].clone();
@@ -700,13 +740,60 @@ impl SimulationController {
         // 5. Update the internal network graph
         self.network_graph.entry(a).or_default().insert(b);
         self.network_graph.entry(b).or_default().insert(a);
-        broadcast_topology_change(&self.gui_input,&self.network_config,&"[FloodRequired]::AddSender".to_string());
+
+       // self.push_packet_senders_to_clients_and_servers();
+        {
+            let mut cfg = self.network_config.lock().unwrap();
+            let a_type = self.get_node_type(a);
+            let b_type = self.get_node_type(b);
+
+            match (a_type, b_type) {
+                (Some(NodeType::Drone), Some(NodeType::Drone)) => {
+                    cfg.append_drone_connection(a, b);
+                    cfg.append_drone_connection(b, a);
+                }
+                (Some(NodeType::Drone), Some(NodeType::Client)) => {
+                    cfg.append_drone_connection(a, b);
+                    cfg.append_client_connection(b, a);
+                }
+                (Some(NodeType::Client), Some(NodeType::Drone)) => {
+                    cfg.append_drone_connection(b, a);
+                    cfg.append_client_connection(a, b);
+                }
+                (Some(NodeType::Drone), Some(NodeType::Server)) => {
+                    cfg.append_drone_connection(a, b);
+                    cfg.append_server_connection(b, a);
+                }
+                (Some(NodeType::Server), Some(NodeType::Drone)) => {
+                    cfg.append_drone_connection(b, a);
+                    cfg.append_server_connection(a, b);
+                }
+                _ => {} // Client–Server or unsupported case
+            }
+        }
+
+
+        broadcast_topology_change(
+            &self.gui_input,
+            &self.network_config,
+            &format!("[FloodRequired]::AddSender::{}::{}", a, b),
+        );
+
         Ok(())
     }
-    pub fn add_connection(&mut self, a: NodeId, b: NodeId) {
-        self.network_graph.entry(a).or_default().insert(b);
-        self.network_graph.entry(b).or_default().insert(a);
-    }
+
+
+   /* pub fn refresh_channels(&mut self) {
+        let (new_receivers, new_senders) = self.initializer.lock().unwrap().setup_channels();
+        // Step 2: Copy into the controller’s fields
+        self.packet_receivers = Arc::new(Mutex::new(new_receivers));
+        self.packet_senders = Arc::new(Mutex::new(new_senders));
+
+
+        for (id, neighbors) in self.packet_senders.lock().unwrap().iter() {
+            println!("Node {} has {} neighbors", id, neighbors.len());
+        }
+    }*/
 
 
     pub fn get_node_state(&self, node_id: NodeId) -> Option<Node> {
@@ -756,18 +843,24 @@ impl SimulationController {
         None
     }
 
-    pub fn get_packet_sender(&self, node_id: &NodeId) -> Option<&Sender<Packet>> {
-        self.packet_senders.get(node_id)
+    pub fn get_packet_sender(&self, from: NodeId, to: NodeId) -> Option<Sender<Packet>> {
+        self.packet_senders.lock().unwrap().get(&from)?.get(&to).cloned()
     }
 
     pub fn register_command_sender(&mut self, node_id: NodeId, sender: Sender<DroneCommand>) {
         self.command_senders.insert(node_id, sender);
     }
 
-    pub fn register_packet_sender(&mut self, node_id: NodeId, sender: Sender<Packet>) {
-        self.packet_senders.insert(node_id, sender);
+    pub fn register_packet_sender(&mut self, from: NodeId, to: NodeId, sender: Sender<Packet>) {
+        self.packet_senders
+            .lock().unwrap().entry(from)
+            .or_insert_with(HashMap::new)
+            .insert(to, sender);
     }
     pub fn registered_nodes(&self) -> Vec<NodeId> {
-        self.packet_senders.keys().cloned().collect()
+        self.packet_senders.lock().unwrap().keys().cloned().collect()
     }
+
+
+
 }

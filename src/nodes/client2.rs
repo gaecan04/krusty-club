@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet, BinaryHeap};
 use std::string::String;
 use std::default::Default;
 use std::{fs, io, thread};
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use wg_2024::controller::{DroneCommand, DroneEvent};
 use wg_2024::network::{NodeId, SourceRoutingHeader};
 use wg_2024::packet::{Ack, FloodRequest, FloodResponse, Fragment, Nack, NodeType, NackType,  Packet, PacketType};
@@ -29,6 +29,8 @@ use petgraph::visit::NodeIndexable;
 use serde::de::StdError;
 use serde::de::Unexpected::Str;
 use std::cmp::Reverse;
+use std::fs::OpenOptions;
+use std::path::Path;
 use std::time::Duration;
 use bincode::error::IntegerType::Usize;
 use rand::random;
@@ -46,20 +48,25 @@ static CHATTING_STATUS: Lazy<Mutex<(bool , NodeId , NodeId)>> = Lazy::new(|| Mut
 #[derive(Debug,Clone)]
 pub struct MyClient{
     pub id: NodeId,
-    pub packet_recv: Receiver<Packet>, // Receives packets from other nodes
-    pub packet_send: HashMap<NodeId, Sender<Packet>>, // Sends packets to neighbors
+    pub packet_recv: Receiver<Packet>,
+    pub packet_send: HashMap<NodeId, Sender<Packet>>,
     pub sim_contr_recv: Receiver<DroneCommand>,
-    sent_messages: HashMap<u64, Vec<Fragment>>,//keeps track of the fragment we send for dropped fragments recovery
-    net_graph: Graph<u8, u8, Undirected>,//graph to keep track of the network topology
-    node_map: HashMap<NodeId , (NodeIndex , NodeType)>,//hashmap to know the types and ids of each node in the graph
-    received_packets: HashMap<u64 , Vec<u8>>,//hashmap to store and reassemble fragments
-    seen_flood_ids : HashSet<(u64 , NodeId)>,//hashset to keep track of the floods passing through the client
+    sent_messages: HashMap<u64, Vec<Fragment>>,
+    net_graph: Graph<u8, u8, Undirected>,
+    node_map: HashMap<NodeId , (NodeIndex , NodeType)>,
+    received_packets: HashMap<u64 , Vec<u8>>,
+    seen_flood_ids : HashSet<(u64 , NodeId)>,
     simulation_log: Arc<Mutex<Vec<String>>>,
-
+    pub shared_senders: Option<Arc<Mutex<HashMap<NodeId, Sender<Packet>>>>>,
 }
 
 impl MyClient {
-    pub(crate) fn new(id: NodeId, packet_recv: Receiver<Packet>, packet_send: HashMap<NodeId, Sender<Packet>>) -> Self {
+    pub(crate) fn new(
+        id: NodeId,
+        packet_recv: Receiver<Packet>,
+        packet_send: HashMap<NodeId, Sender<Packet>>,
+        shared_senders: Option<Arc<Mutex<HashMap<NodeId, Sender<Packet>>>>>,
+    ) -> Self {
         Self {
             id,
             sim_contr_recv: crossbeam_channel::never(),
@@ -71,10 +78,11 @@ impl MyClient {
             received_packets: HashMap::new(),
             seen_flood_ids: HashSet::new(),
             simulation_log: Arc::new(Mutex::new(Vec::new())),
-
+            shared_senders,
         }
     }
-    pub (crate)fn run(&mut self, gui_input: SharedGuiInput) {
+
+    pub(crate) fn run(&mut self, gui_input: SharedGuiInput) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.inner_run(gui_input.clone());
         }));
@@ -92,25 +100,48 @@ impl MyClient {
                     warn!("⚠ run() panicked with unknown error.");
                 }
 
-                // Relaunch the application binary
-                info!("Restarting the entire application...");
+                // Prevent multiple restarts with a lock file
+                let lock_path = Path::new("/tmp/drone_client_restart.lock");
+                let lock_result = OpenOptions::new().write(true).create_new(true).open(lock_path);
 
-                let current_exe = std::env::current_exe().expect("Failed to get current executable path");
+                match lock_result {
+                    Ok(mut file) => {
+                        let current_exe = std::env::current_exe().expect("Failed to get current executable path");
 
-                let _ = Command::new(current_exe)
-                    .args(std::env::args().skip(1)) // preserve original args
-                    .spawn()
-                    .expect("Failed to restart application");
+                        info!("🔁 Restarting the application...");
 
-                // Optional: give the new process a second to initialize
-                std::thread::sleep(std::time::Duration::from_secs(1));
+                        // Write process ID to lock for debugging
+                        let _ = writeln!(file, "Restarted by PID: {}", std::process::id());
 
-                // Terminate the current process
-                exit(0);
+                        // Launch new instance (non-blocking is fine here)
+                        let _ = Command::new(current_exe)
+                            .args(std::env::args().skip(1))
+                            .spawn()
+                            .expect("Failed to restart application");
+
+                        // Give the child time to start and take over
+                        std::thread::sleep(Duration::from_secs(1));
+
+                        // Cleanup: remove lock file so future restarts work
+                        let _ = std::fs::remove_file(lock_path);
+
+                        // Exit old instance
+                        exit(0);
+                    }
+
+                    Err(ref e) if e.kind() == ErrorKind::AlreadyExists => {
+                        warn!("⚠ Restart already in progress (lock file present). Skipping restart.");
+                        // Sleep to avoid respamming restarts
+                        std::thread::sleep(Duration::from_secs(2));
+                    }
+
+                    Err(e) => {
+                        warn!("⚠ Failed to create lock file for restart protection: {}", e);
+                    }
+                }
             }
         }
-    }
-    fn inner_run(&mut self, gui_input: SharedGuiInput) {
+    }    fn inner_run(&mut self, gui_input: SharedGuiInput) {
         info!("Client {} starting run loop", self.id);
         self.send_flood_request();
         loop {

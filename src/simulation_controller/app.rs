@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use eframe::{egui, CreationContext};
 use eframe::egui::{Stroke, StrokeKind};
 use egui::{Color32, RichText, Vec2, Rect, Sense, Shape, Pos2};
-use crate::network::initializer::{ ParsedConfig};
+use crate::network::initializer::{NetworkInitializer, ParsedConfig};
 use crate::simulation_controller::network_designer::NetworkRenderer;
 use std::thread;
 use crossbeam_channel::{ Receiver, Sender};
@@ -56,6 +56,9 @@ pub struct NetworkApp {
     chat_ui:ChatUIState,
     packet_senders: HashMap<NodeId, Sender<Packet>>,
 
+    show_shared_senders_popup:bool,
+    shared_senders: Arc<Mutex<HashMap<(NodeId, NodeId), Sender<Packet>>>>,
+
 }
 
 impl NetworkApp {
@@ -75,7 +78,6 @@ impl NetworkApp {
                 }
             }
         }
-        println!("👋👋👋👋NetworkApp log addr: {:p}", Arc::as_ptr(&app.simulation_log));
 
         // Log available topologies
         app.log("Application started".to_string());
@@ -363,6 +365,13 @@ impl NetworkApp {
                         ui.label("Click on nodes to modify properties");
 
                     });
+                    ui.horizontal(|ui| {
+
+                        ui.add_space(10.0);
+                        if ui.button("Shared senders").clicked() {
+                            self.show_shared_senders_popup = true;
+                        }
+                    });
 
                     // Network view with zoom and pan
                     let (response, painter) = ui.allocate_painter(ui.available_size(), Sense::drag());
@@ -394,6 +403,32 @@ impl NetworkApp {
                     }
                 });
         });
+
+        if self.show_shared_senders_popup {
+            egui::Window::new("Shared Senders Table")
+                .collapsible(false)
+                .resizable(true)
+                .show(ctx, |ui| {
+                    if let Ok(map) = self.shared_senders.lock() {
+                        if map.is_empty() {
+                            ui.label("No shared senders available.");
+                        } else {
+                            egui::ScrollArea::vertical().show(ui, |ui| {
+                                for ((src, dst), _) in map.iter() {
+                                    ui.label(format!("({src}, {dst})"));
+                                }
+                            });
+                        }
+                    } else {
+                        ui.label("⚠ Failed to acquire lock on shared_senders.");
+                    }
+
+                    if ui.button("Close").clicked() {
+                        self.show_shared_senders_popup = false;
+                    }
+                });
+        }
+
 
         // Spawn drone popup
         if self.show_spawn_drone_popup {
@@ -542,7 +577,7 @@ impl NetworkApp {
             self.chat_ui.render(ui, &mut |from: NodeId, to: NodeId, msg: String| {
                 if let Some(ctrl) = &self.simulation_controller {
                     let mut ctrl = ctrl.lock().unwrap();
-                    if let Some(sender) = ctrl.get_packet_sender(&from) {
+                    if let Some(sender) = ctrl.get_packet_sender(from, to) {
                         let data = msg.clone().into_bytes();
                         let mut buf = [0u8; 128];
                         let len = data.len().min(128);
@@ -578,21 +613,43 @@ impl NetworkApp {
         drone_factory: Arc<dyn Fn(NodeId, Sender<DroneEvent>, Receiver<DroneCommand>, Receiver<Packet>, HashMap<NodeId, Sender<Packet>>, f32) -> Box<dyn wg_2024::drone::Drone> + Send + Sync>,
         config_path: &str,
         gui_input: SharedGuiInput,
-        simulation_log:Arc<Mutex<Vec<String>>>,
+        simulation_log: Arc<Mutex<Vec<String>>>,
+        packet_senders: Arc<Mutex<HashMap<NodeId, HashMap<NodeId, Sender<Packet>>>>>,
+        packet_receivers: Arc<Mutex<HashMap<NodeId, Receiver<Packet>>>>,
+        shared_senders: Arc<Mutex<HashMap<(NodeId, NodeId), Sender<Packet>>>>,
     ) -> Self {
-
         cc.egui_ctx.set_visuals(egui::Visuals::light());
 
         let mut app = Self::new(cc);
 
         app.controller_send = Some(event_sender.clone());
 
+        // ✅ Use the shared_senders passed from main
+        let initializer = Arc::new(Mutex::new(
+            NetworkInitializer::new(
+                config_path,
+                vec![],
+                simulation_log.clone(),
+                shared_senders.clone(), // ✅ shared senders passed into initializer
+            )
+                .expect("Failed to create initializer"),
+        ));
+
+        // Step 1: Setup the channels
+
+        // Step 2: Wrap them in Arc<Mutex<...>>
+
+
+        // Step 3: Add them to the controller constructor
         let controller = SimulationController::new(
             config.clone(),
             event_sender.clone(),
             command_sender.clone(),
             drone_factory.clone(),
             gui_input.clone(),
+            initializer.clone(),
+            packet_senders.clone(),
+            packet_receivers.clone(),
         );
 
         let controller = Arc::new(Mutex::new(controller));
@@ -607,8 +664,16 @@ impl NetworkApp {
         });
 
         app.controller_thread = Some(controller_thread);
-        app.simulation_log=simulation_log.clone();
-        app.network_renderer = Some(NetworkRenderer::new_from_config("custom", 50.0, 50.0, config.clone(), &cc.egui_ctx, gui_input.clone()));
+        app.simulation_log = simulation_log.clone();
+
+        app.network_renderer = Some(NetworkRenderer::new_from_config(
+            "custom",
+            50.0,
+            50.0,
+            config.clone(),
+            &cc.egui_ctx,
+            gui_input.clone(),
+        ));
 
         if let Some(renderer) = &mut app.network_renderer {
             renderer.set_controller_sender(event_sender);
@@ -621,6 +686,7 @@ impl NetworkApp {
         app.detect_and_log_topology(config_path, config.clone());
         app.topology_selected = true;
         app.state = AppState::Welcome;
+        app.shared_senders=shared_senders.clone();
         app
     }
 
@@ -670,6 +736,9 @@ impl Default for NetworkApp {
             new_drone_connections_str: String::new(),
             chat_ui: ChatUIState::new(Arc::new(Default::default())),
             packet_senders: HashMap::new(),
+            show_shared_senders_popup:false,
+            shared_senders: Arc::new(Mutex::new(HashMap::new())),
+
         }
     }
 }

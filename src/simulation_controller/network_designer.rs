@@ -781,7 +781,7 @@ impl NetworkRenderer {
 
     // Add a new node to the network
     // "I don't know neighbors, just drop node somewhere."
-    fn add_new_node(&mut self, node_type: NodeType) -> usize {
+   /* fn add_new_node(&mut self, node_type: NodeType) -> usize {
 
         // Find the next available ID
         let max_id = self.nodes.iter().map(|n| n.id).max().unwrap_or(0);
@@ -825,7 +825,7 @@ impl NetworkRenderer {
         }
 
         new_id
-    }
+    }*/
 
     fn build_grid(&mut self, config: &ParsedConfig, previous_states: &HashMap<usize, bool>) {
         const WINDOW_WIDTH: f32 = 600.0;

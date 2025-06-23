@@ -392,12 +392,15 @@ pub struct NetworkInitializer {
     config: Config,
     pub(crate) drone_impls: Vec<DroneWithId>,
     // CORRECT
-    pub(crate) packet_senders: HashMap<NodeId, HashMap<NodeId, Sender<Packet>>>,
-    pub(crate) packet_receivers: HashMap<NodeId, Receiver<Packet>>,
+    pub(crate) packet_senders: Arc<Mutex<HashMap<NodeId, HashMap<NodeId, Sender<Packet>>>>>,
+    pub(crate) packet_receivers: Arc<Mutex<HashMap<NodeId, Receiver<Packet>>>>,
+
     controller_tx: Sender<DroneEvent>,
     controller_rx: Receiver<DroneCommand>,
-    simulation_controller: Arc<Mutex<SimulationController>>,
+    simulation_controller: Option<Arc<Mutex<SimulationController>>>,
     simulation_log: Arc<Mutex<Vec<String>>>,
+    pub(crate) shared_senders:  Option<Arc<Mutex<HashMap<(NodeId, NodeId), Sender<Packet>>>>,
+    >,
 }
 
 /*
@@ -429,7 +432,7 @@ use rolling_drone::RollingDrone;
 //ok
 
 impl NetworkInitializer {
-    pub fn new(config_path: &str, drone_impls: Vec<DroneWithId>, simulation_controller: Arc<Mutex<SimulationController>>, simulation_log: Arc<Mutex<Vec<String>>>) -> Result<Self, Box<dyn Error>> {
+    pub fn new(config_path: &str, drone_impls: Vec<DroneWithId>, simulation_log: Arc<Mutex<Vec<String>>>, shared_senders: Arc<Mutex<HashMap<(NodeId, NodeId), Sender<Packet>>>>) -> Result<Self, Box<dyn Error>> {
         // Read config file
         let config_str = fs::read_to_string(config_path)?;
 
@@ -447,23 +450,24 @@ impl NetworkInitializer {
         Ok(NetworkInitializer {
             config,
             drone_impls,
-            packet_senders: HashMap::new(),
-            packet_receivers:HashMap::new() ,
-
+            packet_senders: Arc::new(Mutex::new(HashMap::new())),
+            packet_receivers: Arc::new(Mutex::new(HashMap::new())),
             controller_tx,
             controller_rx,
-            simulation_controller,
-            simulation_log
-
+            simulation_controller: None,
+            simulation_log,
+            shared_senders: Some(shared_senders),
         })
+
+    }
+
+    pub fn set_controller(&mut self, ctrl: Arc<Mutex<SimulationController>>) {
+        self.simulation_controller = Some(ctrl);
     }
 
     pub fn initialize(&mut self, gui_input_queue: SharedGuiInput) -> Result<(), Box<dyn Error>> {
-        // Validate the network configuration
+       // Validate the network configuration
         self.validate_config()?;
-
-        // Create channels for all nodes
-        //self.setup_channels();
 
         // Distribute drone implementations and spawn drone threads
         self.initialize_drones();
@@ -477,9 +481,8 @@ impl NetworkInitializer {
         // Spawn simulation controller thread
         self.spawn_controller();
 
-
-
         Ok(())
+
     }
 
     fn validate_config(&self) -> Result<(), Box<dyn Error>> {
@@ -712,14 +715,27 @@ impl NetworkInitializer {
         Ok(())
     }
 
-    pub fn setup_channels(&mut self) {
+    pub fn setup_channels(
+        &mut self,
+    ) -> (
+        HashMap<NodeId, Receiver<Packet>>,
+        HashMap<NodeId, HashMap<NodeId, Sender<Packet>>>,
+    ) {
+        if let Some(ref arc) = self.shared_senders {
+            println!("👋👋👋👋👋👋 INIT SHAREDSENDERS i: {:p}", Arc::as_ptr(arc));
+        } else {
+            println!("❌ shared_senders is None");
+        }
+
         let all_node_ids: Vec<NodeId> = self
-            .config.drone.iter().map(|d| d.id)
+            .config
+            .drone
+            .iter()
+            .map(|d| d.id)
             .chain(self.config.client.iter().map(|c| c.id))
             .chain(self.config.server.iter().map(|s| s.id))
             .collect();
 
-        // Create a receiver for each node
         let mut receivers = HashMap::new();
         let mut senders = HashMap::new();
 
@@ -729,29 +745,61 @@ impl NetworkInitializer {
             senders.insert(id, tx);
         }
 
-        // Now build per-node neighbor senders
-        self.packet_senders.clear();
+        let mut packet_senders_map = HashMap::new();
+        let mut shared_senders_map = HashMap::new(); // 🔧 NEW fully-keyed map: (src, dst) -> Sender
+
         for &id in &all_node_ids {
             let mut neighbor_senders = HashMap::new();
-            // Get neighbors from config
-            let neighbors: Vec<NodeId> =
-                if let Some(drone) = self.config.drone.iter().find(|d| d.id == id) {
-                    drone.connected_node_ids.clone()
-                } else if let Some(client) = self.config.client.iter().find(|c| c.id == id) {
-                    client.connected_drone_ids.clone()
-                } else if let Some(server) = self.config.server.iter().find(|s| s.id == id) {
-                    server.connected_drone_ids.clone()
-                } else { vec![] };
+
+            let neighbors: Vec<NodeId> = if let Some(drone) = self.config.drone.iter().find(|d| d.id == id) {
+                drone.connected_node_ids.clone()
+            } else if let Some(client) = self.config.client.iter().find(|c| c.id == id) {
+                client.connected_drone_ids.clone()
+            } else if let Some(server) = self.config.server.iter().find(|s| s.id == id) {
+                server.connected_drone_ids.clone()
+            } else {
+                vec![]
+            };
+
             for &neighbor in &neighbors {
-                if let Some(sender) = senders.get(&neighbor) {
-                    neighbor_senders.insert(neighbor, sender.clone());
+                if let Some(sender_to_neighbor) = senders.get(&neighbor) {
+                    neighbor_senders.insert(neighbor, sender_to_neighbor.clone());
+
+                    // 🔁 Insert directional mapping: (src, dst) = (id, neighbor)
+                    shared_senders_map.insert((id, neighbor), sender_to_neighbor.clone());
                 }
             }
-            self.packet_senders.insert(id, neighbor_senders);
+
+            packet_senders_map.insert(id, neighbor_senders);
         }
 
-        self.packet_receivers = receivers;
+        // ✅ Update shared fields
+        *self.packet_senders.lock().unwrap() = packet_senders_map.clone();
+        *self.packet_receivers.lock().unwrap() = receivers.clone();
+
+        // ✅ Replace the flat shared_senders with the (src, dst) form
+        if let Some(shared) = &self.shared_senders {
+            let mut flat = shared.lock().unwrap();
+            flat.clear();
+            for ((src, dst), tx) in shared_senders_map {
+                flat.insert((src, dst), tx);
+            }
+        }
+
+        //printing the shared maps
+        if let Some(shared) = &self.shared_senders {
+            let flat = shared.lock().unwrap();
+            println!("🫵🏻🫀🫴🏼💎🫵🏻🫀🫴🏼💎 Shared Senders Table:");
+            for ((src, dst), _) in flat.iter() {
+                println!("  ({src}, {dst})");
+            }
+        }
+
+
+
+        (receivers, packet_senders_map)
     }
+
 
     fn initialize_drones(&mut self) {
 
@@ -778,33 +826,38 @@ impl NetworkInitializer {
             // Get the full sender map for this client (set up in setup_channels)
             let senders = self
                 .packet_senders
-                .get(&client_id)
+                .lock().unwrap().get(&client_id)
                 .expect("packet_senders must have client entries")
                 .clone();
 
             let client_rx = self
                 .packet_receivers
-                .get(&client_id)
+                .lock().unwrap().get(&client_id)
                 .expect("setup_channels must have created this")
                 .clone();
 
             let gui_clone = gui_input.clone();
             let log_clone = self.simulation_log.clone();
-
+            let shared_senders = Arc::clone(self.shared_senders.as_ref().unwrap());
             if self.config.client.len() == 2 {
                 if client_id % 2 == 0 {
                     // client2
                     thread::spawn(move || {
                         //println!("client2 spawned");
-                        let mut cl2 = client2::MyClient::new(client_id, client_rx, senders);
+                       /* let mut cl2 = client2::MyClient::new(client_id, client_rx, senders);
                         cl2.attach_log(log_clone);
-                        cl2.run(gui_clone);
+                        cl2.run(gui_clone);*/
+                        let mut cl1 = client1::MyClient::new(client_id, client_rx, senders, HashMap::new(), None, HashSet::new(), None);
+                        cl1.shared_senders= Some(shared_senders.clone());
+                        cl1.attach_log(log_clone);
+                        cl1.run(gui_clone);
                     });
                 } else {
                     // client1
                     thread::spawn(move || {
                         //println!("client1 spawned");
-                        let mut cl1 = client1::MyClient::new(client_id, client_rx, senders, HashMap::new(), None, HashSet::new());
+                        let mut cl1 = client1::MyClient::new(client_id, client_rx, senders, HashMap::new(), None, HashSet::new(), None);
+                        cl1.shared_senders= Some(shared_senders.clone());
                         cl1.attach_log(log_clone);
                         cl1.run(gui_clone);
                     });
@@ -814,15 +867,20 @@ impl NetworkInitializer {
                     // client2 for even-indexed clients
                     thread::spawn(move || {
                         //println!("client2 spawned");
-                        let mut cl2 = client2::MyClient::new(client_id, client_rx, senders);
+                        /*let mut cl2 = client2::MyClient::new(client_id, client_rx, senders);
                         cl2.attach_log(log_clone);
-                        cl2.run(gui_clone);
+                        cl2.run(gui_clone);*/
+                        let mut cl1 = client1::MyClient::new(client_id, client_rx, senders, HashMap::new(), None, HashSet::new(), None);
+                        cl1.shared_senders= Some(shared_senders.clone());
+                        cl1.attach_log(log_clone);
+                        cl1.run(gui_clone);
                     });
                 } else {
                     // client1 for odd-indexed clients
                     thread::spawn(move || {
                         //println!("client1 spawned");
-                        let mut cl1 = client1::MyClient::new(client_id, client_rx, senders, HashMap::new(), None, HashSet::new());
+                        let mut cl1 = client1::MyClient::new(client_id, client_rx, senders, HashMap::new(), None, HashSet::new(), None);
+                        cl1.shared_senders= Some(shared_senders.clone());
                         cl1.attach_log(log_clone);
                         cl1.run(gui_clone);
                     });
@@ -839,21 +897,24 @@ impl NetworkInitializer {
             // Get the full sender map for this server (set up in setup_channels)
             let senders = self
                 .packet_senders
-                .get(&server_id)
+                .lock().unwrap().get(&server_id)
                 .expect("packet_senders must have server entries")
                 .clone();
 
             let server_rx = self
                 .packet_receivers
-                .get(&server_id)
+                .lock().unwrap().get(&server_id)
                 .expect("setup_channels must have created this")
                 .clone();
             println!("👋👋NetworkApp log addr: {:p}", Arc::as_ptr(&log_clone));
 
             let gui_clone = gui_input.clone();
+            let shared_senders = Arc::clone(self.shared_senders.as_ref().unwrap());
+            
             thread::spawn(move || {
-                let mut srv = server::server::new(server_id as u8, senders, server_rx);
+                let mut srv = server::server::new(server_id as u8, senders, server_rx, None);
                 srv.attach_log(log_clone);
+                srv.shared_senders= Some(shared_senders.clone());
                 srv.run(gui_clone);
             });
         }
@@ -862,7 +923,7 @@ impl NetworkInitializer {
 
     fn spawn_controller(&self) {
         // Get all node IDs for the controller to manage
-        let nodes = self.packet_senders.keys().cloned().collect::<Vec<_>>();
+        let nodes = self.packet_senders.lock().unwrap().keys().cloned().collect::<Vec<_>>();
 
         // Create controller send/receive channels for commands and events
         let (controller_tx, controller_rx) = channel::unbounded::<DroneEvent>();
@@ -891,7 +952,7 @@ impl NetworkInitializer {
 
 
     pub fn create_drone_implementations(
-        config: &ParsedConfig,
+        config: Arc<Mutex<ParsedConfig>>,
         controller_send: Sender<DroneEvent>,
         controller_recv: Receiver<DroneCommand>,
         packet_receivers: &HashMap<NodeId, Receiver<Packet>>,
@@ -903,7 +964,7 @@ impl NetworkInitializer {
         let group_implementations = Self::load_group_implementations();
         let num_impls = group_implementations.len();
 
-        let drone_configs = &config.drone;
+        let drone_configs =config.lock().unwrap().drone.clone();
 
         // Determine per-drone which implementation to use, as in your current code.
         let num_drones = drone_configs.len();
@@ -1130,6 +1191,17 @@ impl NetworkInitializer {
 
         group_implementations
     }
+
+    pub fn get_shared_packet_senders(&self) -> Arc<Mutex<HashMap<NodeId, HashMap<NodeId, Sender<Packet>>>>> {
+        Arc::clone(&self.packet_senders)
+    }
+
+    pub fn get_shared_packet_receivers(&self) -> Arc<Mutex<HashMap<NodeId, Receiver<Packet>>>> {
+        Arc::clone(&self.packet_receivers)
+    }
+
+
+
 }
 
 
