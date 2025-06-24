@@ -30,7 +30,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(60);
 
-    let (event_sender, event_receiver) = unbounded::<DroneEvent>();
+    let (event_sender, event_receiverr) = unbounded::<DroneEvent>();
     let (command_sender, command_receiver) = unbounded::<DroneCommand>();
 
     println!("✅ Channels created");
@@ -76,7 +76,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?));
     println!("✅ NetworkInitializer created");
 
-    let (receivers, senders) = initializer.lock().unwrap().setup_channels();
+    let (receivers, senders,event_receiver) = initializer.lock().unwrap().setup_channels();
     println!("✅ setup_channels() completed");
 
 
@@ -126,7 +126,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("🖥️ Starting GUI");
     run_gui_application(
         event_sender.clone(),
-        event_receiver.clone(),
+        //event_receiver.clone(),
         command_sender.clone(),
         command_receiver.clone(),
         parsed_config,
@@ -147,7 +147,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 fn run_gui_application(
     event_sender: Sender<DroneEvent>,
-    event_receiver: Receiver<DroneEvent>,
+    //event_receiver: Receiver<DroneEvent>,
     command_sender: Sender<DroneCommand>,
     command_receiver: Receiver<DroneCommand>,
     config: Arc<Mutex<ParsedConfig>>,
@@ -175,7 +175,7 @@ fn run_gui_application(
             Ok(Box::new(NetworkApp::new_with_network(
                 cc,
                 event_sender.clone(),
-                event_receiver.clone(),
+                //event_receiver.clone(),
                 command_sender.clone(),
                 command_receiver.clone(),
                 config.clone(),

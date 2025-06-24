@@ -127,6 +127,7 @@ impl SimulationController {
     pub fn start_background_thread(controller: Arc<Mutex<Self>>, event_receiver: Receiver<DroneEvent>) {
         let controller_clone = controller.clone(); // No need to double-Arc
         std::thread::spawn(move || {
+            println!("😎✨🖇️💗⚡ background thread started");
             while let Ok(event) = event_receiver.recv() {
                 let mut ctrl = controller_clone.lock().unwrap();
                 ctrl.process_event(event);

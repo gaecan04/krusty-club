@@ -494,7 +494,7 @@ impl NetworkInitializer {
         self.initialize_servers(gui_input_queue.clone(),self.simulation_log.clone());
 
         // Spawn simulation controller thread
-        self.spawn_controller();
+       // self.spawn_controller(); done in main!!!
 
         Ok(())
 
@@ -732,10 +732,7 @@ impl NetworkInitializer {
 
     pub fn setup_channels(
         &mut self,
-    ) -> (
-        HashMap<NodeId, Receiver<Packet>>,
-        HashMap<NodeId, HashMap<NodeId, Sender<Packet>>>,
-    ) {
+    ) -> (HashMap<NodeId, Receiver<Packet>>, HashMap<NodeId, HashMap<NodeId, Sender<Packet>>>, Receiver<DroneEvent>) {
         if let Some(ref arc) = self.shared_senders {
             println!("👋👋👋👋👋👋 INIT SHAREDSENDERS i: {:p}", Arc::as_ptr(arc));
         } else {
@@ -799,7 +796,7 @@ impl NetworkInitializer {
             command_receivers_map.insert(drone.id, cmd_rx);
         }
 
-        self.controller_event_receiver = Some(event_rx);
+        self.controller_event_receiver = Some(event_rx.clone());
         self.command_receivers = command_receivers_map;
         *self.command_senders.lock().unwrap() = command_senders_map;
         self.event_sender = Some(event_tx);
@@ -829,7 +826,7 @@ impl NetworkInitializer {
                 println!("  ({src}, {dst})");
             }
         }
-        (receivers, packet_senders_map)
+        (receivers, packet_senders_map , event_rx)
     }
 
 
@@ -953,14 +950,12 @@ impl NetworkInitializer {
     }
 
 
-    fn spawn_controller(&self) {
+   /* fn spawn_controller(&self) {
+        println!("😎✨🖇️💗⚡ SPAWN");
         // Get all node IDs for the controller to manage
         let nodes = self.packet_senders.lock().unwrap().keys().cloned().collect::<Vec<_>>();
-
         // Create controller send/receive channels for commands and events
         let (controller_tx, controller_rx) = channel::unbounded::<DroneEvent>();
-
-
         thread::spawn(move || {
 
             // Controller main loop
@@ -980,7 +975,7 @@ impl NetworkInitializer {
                 }
             }
         });
-    }
+    }*/
 
 
     pub fn create_drone_implementations(&self) -> Vec<DroneWithId> {

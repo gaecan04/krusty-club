@@ -570,7 +570,7 @@ impl NetworkApp {
     pub fn new_with_network(
         cc: &eframe::CreationContext<'_>,
         event_sender: Sender<DroneEvent>,
-        event_receiver: Receiver<DroneEvent>,
+       // event_receiver: Receiver<DroneEvent>,
         command_sender: Sender<DroneCommand>,
         command_receiver: Receiver<DroneCommand>,
         config: Arc<Mutex<ParsedConfig>>,
@@ -624,7 +624,7 @@ impl NetworkApp {
         let controller = Arc::new(Mutex::new(controller));
         app.simulation_controller = Some(controller.clone());
 
-        let controller_clone = controller.clone();
+       /* let controller_clone = controller.clone();
         let controller_thread = thread::spawn(move || {
             while let Ok(event) = event_receiver.recv() {
                 let mut ctrl = controller_clone.lock().unwrap();
@@ -632,7 +632,7 @@ impl NetworkApp {
             }
         });
 
-        app.controller_thread = Some(controller_thread);
+        app.controller_thread = Some(controller_thread);*/
         app.simulation_log = simulation_log.clone();
 
         app.network_renderer = Some(NetworkRenderer::new_from_config(
