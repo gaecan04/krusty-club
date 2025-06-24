@@ -147,42 +147,6 @@ impl NetworkApp {
         }
     }
 
-    fn add_connection(&mut self, a: NodeId, b: NodeId) {
-        // 1) ask the SC to wire up channels both ways
-        if let Some(ctrl_arc) = &self.simulation_controller {
-            let mut ctrl = ctrl_arc.lock().unwrap();
-            // You’ll need to expose a method on SC like `connect(a, b)`
-            if let Err(e) = ctrl.add_link(a, b) {
-               self.log(format!("SC refused link {}↔{}: {}", a, b, e));
-                return;
-            }
-        }
-
-        // 2) update config
-        if let Some(cfg_arc) = &self.network_config {
-            let mut cfg = cfg_arc.lock().unwrap();
-            // add b to a’s list
-            if let Some(dr) = cfg.drone.iter_mut().find(|d| d.id == a) {
-                if !dr.connected_node_ids.contains(&b) {
-                    dr.connected_node_ids.push(b);
-                }
-            }
-            // and a to b’s list
-            if let Some(dr) = cfg.drone.iter_mut().find(|d| d.id == b) {
-                if !dr.connected_node_ids.contains(&a) {
-                    dr.connected_node_ids.push(a);
-                }
-            }
-        }
-
-        // 3) rebuild GUI
-        if let (Some(r), Some(cfg_arc)) = (&mut self.network_renderer, &self.network_config) {
-            r.build_from_config(cfg_arc.clone());
-        }
-
-       self.log(format!("🔗 Connected {} ↔ {}", a, b));
-    }
-
     fn spawn_drone(&mut self, id: NodeId, pdr: f32, connections: Vec<NodeId>) {
         // 1. Ask the Simulation Controller to spawn (MUST happen first)
         if let Some(ctrl_arc) = &self.simulation_controller {
@@ -616,6 +580,8 @@ impl NetworkApp {
         simulation_log: Arc<Mutex<Vec<String>>>,
         packet_senders: Arc<Mutex<HashMap<NodeId, HashMap<NodeId, Sender<Packet>>>>>,
         packet_receivers: Arc<Mutex<HashMap<NodeId, Receiver<Packet>>>>,
+        command_senders: Arc<Mutex<HashMap<NodeId, Sender<DroneCommand>>>>, // ✅ ADD THIS
+
         shared_senders: Arc<Mutex<HashMap<(NodeId, NodeId), Sender<Packet>>>>,
     ) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::light());
@@ -650,6 +616,9 @@ impl NetworkApp {
             initializer.clone(),
             packet_senders.clone(),
             packet_receivers.clone(),
+            command_senders.clone(),
+
+            shared_senders.clone(),
         );
 
         let controller = Arc::new(Mutex::new(controller));

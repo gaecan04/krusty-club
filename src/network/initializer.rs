@@ -348,6 +348,20 @@ impl_drone_adapter!(RustasticDrone);
 impl_drone_adapter!(CppEnjoyersDrone);
 
 
+/*
+Group Krusty_club buys:
+-Ledron James
+-CppEnjoyers
+-Dr ones
+-Skylink
+-Rustastics
+-Bagel bomber
+-Fungi
+-Rust
+-Rustafarian
+-Rolling Drone
+ */
+
 
 //So MyDrone is your fallback implementation, used only when a group’s implementation is missing or fails to register.
 impl wg_2024::drone::Drone for MyDrone {
@@ -391,31 +405,24 @@ pub struct DroneWithId {
 pub struct NetworkInitializer {
     config: Config,
     pub(crate) drone_impls: Vec<DroneWithId>,
-    // CORRECT
+
     pub(crate) packet_senders: Arc<Mutex<HashMap<NodeId, HashMap<NodeId, Sender<Packet>>>>>,
     pub(crate) packet_receivers: Arc<Mutex<HashMap<NodeId, Receiver<Packet>>>>,
+
+    pub(crate) command_senders: Arc<Mutex<HashMap<NodeId, Sender<DroneCommand>>>>,
+    pub(crate) command_receivers: HashMap<NodeId, Receiver<DroneCommand>>, // ✅ Add this
+
+    pub(crate) controller_event_receiver: Option<Receiver<DroneEvent>>,
+    pub(crate) event_sender: Option<Sender<DroneEvent>>, // ✅ Also added previously
 
     controller_tx: Sender<DroneEvent>,
     controller_rx: Receiver<DroneCommand>,
     simulation_controller: Option<Arc<Mutex<SimulationController>>>,
     simulation_log: Arc<Mutex<Vec<String>>>,
-    pub(crate) shared_senders:  Option<Arc<Mutex<HashMap<(NodeId, NodeId), Sender<Packet>>>>,
-    >,
+
+    pub(crate) shared_senders: Option<Arc<Mutex<HashMap<(NodeId, NodeId), Sender<Packet>>>>>,
 }
 
-/*
-Group Krusty_club buys:
--Ledron James
--CppEnjoyers
--Dr ones
--Skylink
--Rustastics
--Bagel bomber
--Fungi
--Rust
--Rustafarian
--Rolling Drone
- */
 
 use LeDron_James::Drone as LeDron_JamesDrone; //ok
 use ap2024_unitn_cppenjoyers_drone::CppEnjoyersDrone; //ok
@@ -450,8 +457,16 @@ impl NetworkInitializer {
         Ok(NetworkInitializer {
             config,
             drone_impls,
+
             packet_senders: Arc::new(Mutex::new(HashMap::new())),
             packet_receivers: Arc::new(Mutex::new(HashMap::new())),
+
+            command_senders: Arc::new(Mutex::new(HashMap::new())),
+            command_receivers: HashMap::new(),
+
+            controller_event_receiver: None,
+            event_sender: None,
+
             controller_tx,
             controller_rx,
             simulation_controller: None,
@@ -773,9 +788,29 @@ impl NetworkInitializer {
             packet_senders_map.insert(id, neighbor_senders);
         }
 
+        // 🚀 Setup controller <-> drone command/event channels
+        let mut command_senders_map = HashMap::new();
+        let mut command_receivers_map = HashMap::new();
+        let (event_tx, event_rx) = unbounded::<DroneEvent>(); // Shared receiver for controller
+
+        for drone in &self.config.drone {
+            let (cmd_tx, cmd_rx) = unbounded::<DroneCommand>();
+            command_senders_map.insert(drone.id, cmd_tx);
+            command_receivers_map.insert(drone.id, cmd_rx);
+        }
+
+        self.controller_event_receiver = Some(event_rx);
+        self.command_receivers = command_receivers_map;
+        *self.command_senders.lock().unwrap() = command_senders_map;
+        self.event_sender = Some(event_tx);
+
+        println!("🔒🏻❤️‍🔥⚜ Trying to lock packet_senders in setup");
         // ✅ Update shared fields
         *self.packet_senders.lock().unwrap() = packet_senders_map.clone();
+        println!("🔒🏻❤️‍🔥⚜ after lock packet_senders in setup");
+
         *self.packet_receivers.lock().unwrap() = receivers.clone();
+
 
         // ✅ Replace the flat shared_senders with the (src, dst) form
         if let Some(shared) = &self.shared_senders {
@@ -794,9 +829,6 @@ impl NetworkInitializer {
                 println!("  ({src}, {dst})");
             }
         }
-
-
-
         (receivers, packet_senders_map)
     }
 
@@ -951,33 +983,22 @@ impl NetworkInitializer {
     }
 
 
-    pub fn create_drone_implementations(
-        config: Arc<Mutex<ParsedConfig>>,
-        controller_send: Sender<DroneEvent>,
-        controller_recv: Receiver<DroneCommand>,
-        packet_receivers: &HashMap<NodeId, Receiver<Packet>>,
-        packet_senders: &HashMap<NodeId, HashMap<NodeId, Sender<Packet>>>,
-    ) -> Vec<DroneWithId> {
+    pub fn create_drone_implementations(&self) -> Vec<DroneWithId> {
         let mut implementations: Vec<DroneWithId> = Vec::new();
 
         // Load group implementations
         let group_implementations = Self::load_group_implementations();
         let num_impls = group_implementations.len();
 
-        let drone_configs =config.lock().unwrap().drone.clone();
-
-        // Determine per-drone which implementation to use, as in your current code.
+        let drone_configs = self.config.drone.clone();
         let num_drones = drone_configs.len();
-        let mut impl_counts = vec![0; num_impls];
-        let min_count = if num_impls > 0 { num_drones / num_impls } else { 0 };
-        let remainder = if num_impls > 0 { num_drones % num_impls } else { 0 };
 
-        for i in 0..num_impls {
-            impl_counts[i] = min_count;
-            if i < remainder {
-                impl_counts[i] += 1;
-            }
+        // Even distribution of drone implementations across groups
+        let mut impl_counts = vec![num_drones / num_impls; num_impls];
+        for i in 0..(num_drones % num_impls) {
+            impl_counts[i] += 1;
         }
+
         let group_keys: Vec<String> = group_implementations.keys().cloned().collect();
 
         let mut impl_index = 0;
@@ -985,57 +1006,44 @@ impl NetworkInitializer {
 
         for drone_config in drone_configs {
             if num_impls > 0 && count >= impl_counts[impl_index] {
-                impl_index = (impl_index + 1) % num_impls;
+                impl_index += 1;
                 count = 0;
             }
+
             let id = drone_config.id;
             let pdr = drone_config.pdr;
 
-            let packet_recv = packet_receivers.get(&id).unwrap().clone();
-            let packet_send = packet_senders.get(&id).unwrap().clone();
+            let packet_recv = self.packet_receivers.lock().unwrap().get(&id).unwrap().clone();
+            println!("🔒🏻❤️‍🔥⚜ Trying to lock packet_senders in create drone impl");
+            let packet_send = self.packet_senders.lock().unwrap().get(&id).unwrap().clone();
+            println!("🔒🏻❤️‍🔥⚜ released lock packet_senders in create drone impl");
 
-            // Choose implementation (custom or fallback)
+            let command_recv = self.command_receivers.get(&id).expect("Missing command_receiver").clone();
+            let event_send = self.event_sender.as_ref().expect("Missing event_sender").clone();
+
             let drone_impl: Box<dyn DroneImplementation> = if num_impls == 0 {
-                Box::new(MyDrone::new(
-                    id,
-                    controller_send.clone(),
-                    controller_recv.clone(),
-                    packet_recv,
-                    packet_send,
-                    pdr,
-                ))
+                Box::new(MyDrone::new(id, event_send, command_recv, packet_recv, packet_send, pdr))
             } else {
                 let impl_key = &group_keys[impl_index];
-                if let Some(create_impl) = group_implementations.get(impl_key) {
-                    create_impl(
-                        id,
-                        controller_send.clone(),
-                        controller_recv.clone(),
-                        packet_recv,
-                        packet_send,
-                        pdr,
-                    )
+                if let Some(create_fn) = group_implementations.get(impl_key) {
+                    create_fn(id, event_send, command_recv, packet_recv, packet_send, pdr)
                 } else {
-                    warn!("ATTENTION: default drone impl");
-                    Box::new(MyDrone::new(
-                        id,
-                        controller_send.clone(),
-                        controller_recv.clone(),
-                        packet_recv,
-                        packet_send,
-                        pdr,
-                    ))
+                    warn!("⚠️ Unknown group key, falling back to MyDrone");
+                    Box::new(MyDrone::new(id, event_send, command_recv, packet_recv, packet_send, pdr))
                 }
             };
+
             implementations.push(DroneWithId {
                 id,
                 instance: drone_impl,
             });
+
             count += 1;
         }
 
         implementations
     }
+
 
     // Method to load group implementations
     fn load_group_implementations() -> HashMap<String, GroupImplFactory> {

@@ -348,36 +348,18 @@ impl server {
                                     ///IN TEORIA THIS IS WHAT SERVER SHOULD DO:
                                     if let Some(stripped) = message.strip_prefix("[FloodRequired]::") {
                                     info!("Server {} received message from GUI: FloodRequired::{:?}", self.id, stripped);
-
                                     match stripped {
                                     _ if stripped.starts_with("RemoveSender::") => {
-                                        println!("🧸🧸🧸🧸🧸🧸🧸 RECEIVED REMOVE SENDER");
-
                                         let parts: Vec<&str> = stripped.split("::").collect();
                                         if parts.len() == 3 {
                                             if let (Ok(drone_id), Ok(peer_id)) = (parts[1].parse::<NodeId>(), parts[2].parse::<NodeId>()) {
-
-                                                    //ti ho dato la duty di aggiornare shared_senders
-                                                    if let Some(shared) = &self.shared_senders {
-                                                        if let Ok(mut map) = shared.lock() {
-                                                            if map.remove(&(drone_id, peer_id)).is_some() {
-                                                                info!("🧹 Removed ({}, {}) from shared_senders", drone_id, peer_id);
-                                                            }
-                                                            if map.remove(&(peer_id, drone_id)).is_some() {
-                                                                info!("🧹 Removed ({}, {}) from shared_senders", peer_id, drone_id);
-                                                            }
-                                                        }
-                                                    }
-
-
-                                                    if self.id != drone_id && self.id != peer_id {
+                                                if self.id != drone_id && self.id != peer_id {
                                                     info!("🟡 Server {} is not involved in link between {} and {}", self.id, drone_id, peer_id);
                                                     self.initiate_network_discovery();
-                                                    continue; // ✅ don’t return — just skip this message
+                                                    continue;
                                                 }
 
                                                 let to_remove = if self.id == drone_id { peer_id } else { drone_id };
-
                                                 if self.packet_sender.remove(&to_remove).is_some() {
                                                     info!("✅ Removed sender to {} from packet_sender.", to_remove);
                                                 } else {
@@ -398,14 +380,25 @@ impl server {
                                         let parts: Vec<&str> = stripped.split("::").collect();
                                         if parts.len() == 3 {
                                             if let (Ok(a), Ok(b)) = (parts[1].parse::<NodeId>(), parts[2].parse::<NodeId>()) {
+                                                // Always update shared_senders
+                                                if let Some(shared) = &self.shared_senders {
+                                                    if let Ok(mut map) = shared.lock() {
+                                                        if let Some(sender) = self.packet_sender.get(&b) {
+                                                            map.entry((a, b)).or_insert_with(|| sender.clone());
+                                                        }
+                                                        if let Some(sender) = self.packet_sender.get(&a) {
+                                                            map.entry((b, a)).or_insert_with(|| sender.clone());
+                                                        }
+                                                    }
+                                                }
+
                                                 if self.id != a && self.id != b {
                                                     info!("🟡 Server {} not involved in AddSender between {} and {}", self.id, a, b);
                                                     self.initiate_network_discovery();
-                                                    continue; // ✅ don’t block future messages
+                                                    continue;
                                                 }
 
                                                 let peer = if self.id == a { b } else { a };
-
                                                 if self.packet_sender.contains_key(&peer) {
                                                     info!("✅ Peer {} already exists in packet_sender.", peer);
                                                 } else if let Some(shared) = &self.shared_senders {
@@ -420,8 +413,6 @@ impl server {
                                                         } else {
                                                             warn!("❌ shared_senders has no sender for ({}, {})", self.id, peer);
                                                         }
-                                                    } else {
-                                                        warn!("❌ Failed to lock shared_senders");
                                                     }
                                                 }
 
@@ -435,57 +426,67 @@ impl server {
                                     }
 
                                     _ if stripped.starts_with("SpawnDrone::") => {
-    let parts: Vec<&str> = stripped.split("::").collect();
-    if parts.len() == 3 {
-        if let Ok(drone_id) = parts[1].parse::<NodeId>() {
-            // Parse the peer list from JSON-like format
-            let peers_result: Result<Vec<NodeId>, _> = serde_json::from_str(parts[2]);
-            match peers_result {
-                Ok(peer_list) => {
-                    if !peer_list.contains(&self.id) {
-                        info!("🟡 Server {} not involved in SpawnDrone({}, {:?})", self.id, drone_id, peer_list);
-                        return; // ✅ not involved, ignore
-                    }
+                                        let parts: Vec<&str> = stripped.split("::").collect();
+                                        if parts.len() == 3 {
+                                            if let Ok(drone_id) = parts[1].parse::<NodeId>() {
+                                                let peers_result: Result<Vec<NodeId>, _> = serde_json::from_str(parts[2]);
+                                                match peers_result {
+                                                    Ok(peer_list) => {
+                                                        // Always update shared_senders
+                                                        if let Some(shared) = &self.shared_senders {
+                                                            if let Ok(mut map) = shared.lock() {
+                                                                for &peer in &peer_list {
+                                                                    if let Some(sender) = self.packet_sender.get(&peer) {
+                                                                        map.entry((drone_id, peer)).or_insert_with(|| sender.clone());
+                                                                        map.entry((peer, drone_id)).or_insert_with(|| sender.clone());
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
 
-                    if self.packet_sender.contains_key(&drone_id) {
-                        info!("✅ Already connected to new drone {}", drone_id);
-                    } else if let Some(shared) = &self.shared_senders {
-                        if let Ok(map) = shared.lock() {
-                            let key = (self.id, drone_id);
-                            if let Some(sender_to_drone) = map.get(&key) {
-                                self.packet_sender.insert(drone_id, sender_to_drone.clone());
-                                info!("✅ Inserted new drone {} into packet_sender", drone_id);
+                                                        if !peer_list.contains(&self.id) {
+                                                            info!("🟡 Server {} not involved in SpawnDrone({}, {:?})", self.id, drone_id, peer_list);
+                                                            return;
+                                                        }
 
-                                let peer_type = self.network_graph.node_types.get(&self.id).copied().unwrap_or(NodeType::Server);
-                                self.network_graph.add_link(self.id, peer_type, drone_id, NodeType::Drone);
-                                self.network_graph.node_types.insert(drone_id, NodeType::Drone);
-                            } else {
-                                warn!("❌ shared_senders has no entry for ({}, {})", self.id, drone_id);
-                            }
-                        } else {
-                            warn!("❌ Failed to lock shared_senders");
-                        }
-                    }
+                                                        if self.packet_sender.contains_key(&drone_id) {
+                                                            info!("✅ Already connected to new drone {}", drone_id);
+                                                        } else if let Some(shared) = &self.shared_senders {
+                                                            if let Ok(map) = shared.lock() {
+                                                                let key = (self.id, drone_id);
+                                                                if let Some(sender_to_drone) = map.get(&key) {
+                                                                    self.packet_sender.insert(drone_id, sender_to_drone.clone());
+                                                                    info!("✅ Inserted new drone {} into packet_sender", drone_id);
 
-                    self.initiate_network_discovery();
-                }
-                Err(e) => {
-                    warn!("❌ Failed to parse peer list in SpawnDrone: {}", e);
-                }
-            }
-        } else {
-            warn!("⚠ Could not parse drone ID in SpawnDrone message: {:?}", parts[1]);
-        }
-    } else {
-        warn!("⚠ Malformed SpawnDrone message. Expected format: SpawnDrone::<drone_id>::<[peer1, peer2]>");
-    }
-}
+                                                                    let peer_type = self.network_graph.node_types.get(&self.id).copied().unwrap_or(NodeType::Server);
+                                                                    self.network_graph.add_link(self.id, peer_type, drone_id, NodeType::Drone);
+                                                                    self.network_graph.node_types.insert(drone_id, NodeType::Drone);
+                                                                } else {
+                                                                    warn!("❌ shared_senders has no entry for ({}, {})", self.id, drone_id);
+                                                                }
+                                                            }
+                                                        }
 
+                                                        self.initiate_network_discovery();
+                                                    }
+                                                    Err(e) => {
+                                                        warn!("❌ Failed to parse peer list in SpawnDrone: {}", e);
+                                                    }
+                                                }
+                                            } else {
+                                                warn!("⚠ Could not parse drone ID in SpawnDrone message: {:?}", parts[1]);
+                                            }
+                                        } else {
+                                            warn!("⚠ Malformed SpawnDrone message. Expected format: SpawnDrone::<drone_id>::<[peer1, peer2]>");
+                                        }
+                                    }
 
                                     other => {
                                         warn!("⚠ Unknown FloodRequired action: {}", other);
                                     }
                                 }
+
+
 
                                 }
 

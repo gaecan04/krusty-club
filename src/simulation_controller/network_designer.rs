@@ -875,7 +875,7 @@ impl NetworkRenderer {
 
 
     // Add a connection between two nodes
-    fn add_connection(&mut self, source_id: usize, target_id: usize) -> bool {
+    fn add_connection_networkdesigner(&mut self, source_id: usize, target_id: usize) -> bool {
         if let (Some(&source_idx), Some(&target_idx)) = (
             self.node_id_to_index.get(&(source_id as NodeId)),
             self.node_id_to_index.get(&(target_id as NodeId)),
@@ -1496,8 +1496,13 @@ impl NetworkRenderer {
                                     });
 
                                 if let Some(peer_id) = pending_connection {
-                                    self.add_connection(node_id as usize, peer_id as usize);
-                                    broadcast_topology_change(&self.gui_input, &(self.config.clone().unwrap()), "[FloodRequired]::AddSender");
+                                    if let Some(ctrl_arc) = &self.simulation_controller {
+                                        let mut ctrl = ctrl_arc.lock().unwrap();
+                                        ctrl.add_link(node_id as NodeId, peer_id);
+
+                                    }
+                                    self.add_connection_networkdesigner(node_id as usize, peer_id as usize);
+
                                 }
 
 

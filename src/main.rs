@@ -60,6 +60,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let shared_senders: Arc<Mutex<HashMap<(NodeId, NodeId), Sender<Packet>>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
+    /*let command_senders: Arc<Mutex<HashMap<NodeId, Sender<DroneCommand>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
+    for id in config.drone.iter().map(|d| d.id) {
+        command_senders.lock().unwrap().insert(id, command_sender.clone());
+    }*/
+
 
     let initializer = Arc::new(Mutex::new(NetworkInitializer::new(
         &config_path,
@@ -72,9 +79,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (receivers, senders) = initializer.lock().unwrap().setup_channels();
     println!("✅ setup_channels() completed");
 
+
+
+
     let packet_receivers = Arc::new(Mutex::new(receivers));
     let packet_senders = Arc::new(Mutex::new(senders));
+
     let shared_senders = initializer.lock().unwrap().shared_senders.clone().expect("Shared senders not initialized");
+
+    let command_senders = initializer.lock().unwrap().command_senders.clone();
 
 
 
@@ -87,6 +100,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         initializer.clone(),
         packet_senders.clone(),    // ✅ shared
         packet_receivers.clone(),  // ✅ shared
+        command_senders.clone(),
+        shared_senders.clone(),
     )));
 
     println!("✅ SimulationController created");
@@ -95,13 +110,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("✅ Controller injected into initializer");
 
     // 🔁 Now use the shared ones for drone creation
-    let drone_impls = NetworkInitializer::create_drone_implementations(
-        parsed_config.clone(),
-        event_sender.clone(),
-        command_receiver.clone(),
-        &packet_receivers.lock().unwrap(),
-        &packet_senders.lock().unwrap(),
-    );
+    let drone_impls = initializer.lock().unwrap().create_drone_implementations();
+
     println!("✅ Drone implementations created");
 
     initializer.lock().unwrap().drone_impls = drone_impls;
@@ -126,6 +136,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         simulation_log.clone(),
         packet_senders.clone(),
         packet_receivers.clone(),
+        command_senders.clone(),
         shared_senders.clone(),
 
     )?;
@@ -146,6 +157,8 @@ fn run_gui_application(
     simulation_log: Arc<Mutex<Vec<String>>>,
     packet_senders: Arc<Mutex<HashMap<NodeId, HashMap<NodeId, Sender<Packet>>>>>,
     packet_receivers: Arc<Mutex<HashMap<NodeId, Receiver<Packet>>>>,
+    command_senders: Arc<Mutex<HashMap<NodeId, Sender<DroneCommand>>>>, // ✅ ADD THIS
+    // ✅ ADD THIS TOO
     shared_senders: Arc<Mutex<HashMap<(NodeId, NodeId), Sender<Packet>>>>,
 ) -> Result<(), Box<dyn Error>> {
 
@@ -172,6 +185,7 @@ fn run_gui_application(
                 simulation_log.clone(),
                 packet_senders.clone(),
                 packet_receivers.clone(),
+                command_senders.clone(), // ✅ ADD THIS TOO
                 shared_senders.clone(),
             )))
 
