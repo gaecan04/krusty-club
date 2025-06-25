@@ -95,10 +95,8 @@ impl NetworkApp {
 
     // This function is kept for the UI but delegates to NetworkRenderer if possible
     fn crash_drone(&mut self, drone_id: NodeId) {
-
         if let Some(ctrl_arc) = &self.simulation_controller {
             let mut ctrl = ctrl_arc.lock().unwrap();
-
             match ctrl.crash_drone(drone_id) {
                 Ok(_) => {
                     self.log(format!("✅ Drone {} crashed successfully", drone_id));

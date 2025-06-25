@@ -448,6 +448,7 @@ impl server {
                                                             info!("🟡 Server {} not involved in SpawnDrone({}, {:?})", self.id, drone_id, peer_list);
                                                             return;
                                                         }
+                                                        self.network_graph.node_types.insert(drone_id, NodeType::Drone);
 
                                                         if self.packet_sender.contains_key(&drone_id) {
                                                             info!("✅ Already connected to new drone {}", drone_id);
@@ -457,10 +458,8 @@ impl server {
                                                                 if let Some(sender_to_drone) = map.get(&key) {
                                                                     self.packet_sender.insert(drone_id, sender_to_drone.clone());
                                                                     info!("✅ Inserted new drone {} into packet_sender", drone_id);
-
                                                                     let peer_type = self.network_graph.node_types.get(&self.id).copied().unwrap_or(NodeType::Server);
                                                                     self.network_graph.add_link(self.id, peer_type, drone_id, NodeType::Drone);
-                                                                    self.network_graph.node_types.insert(drone_id, NodeType::Drone);
                                                                 } else {
                                                                     warn!("❌ shared_senders has no entry for ({}, {})", self.id, drone_id);
                                                                 }
@@ -480,6 +479,11 @@ impl server {
                                             warn!("⚠ Malformed SpawnDrone message. Expected format: SpawnDrone::<drone_id>::<[peer1, peer2]>");
                                         }
                                     }
+                                    _ if stripped.starts_with("Crash") => {
+                                        //addNODEID
+                                            self.initiate_network_discovery();
+                                        }
+
 
                                     other => {
                                         warn!("⚠ Unknown FloodRequired action: {}", other);

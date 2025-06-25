@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::sync::{Arc, Mutex};
 use crossbeam_channel::{unbounded, Receiver, Sender};
-use LeDron_James::Drone as LeDron_JamesDrone;
 use log::{info, warn};
+use rustastic_drone::RustasticDrone;
 use wg_2024::packet::Packet;
 use wg_2024::controller::{DroneCommand,DroneEvent};
 use wg_2024::drone::Drone;
@@ -211,6 +211,8 @@ impl SimulationController {
             return Err("Crashing this drone would violate network constraints".into());
         }
 
+        println!("🧪🧪🧪 Checking command_senders before crash: {:?}", self.command_senders.lock().unwrap().keys());
+
         // ✅ ONLY NOW perform the crash
 
         // Remove from neighbors
@@ -268,12 +270,27 @@ impl SimulationController {
         self.command_senders.lock().unwrap().remove(&drone_id);
         self.packet_senders.lock().unwrap().remove(&drone_id);
 
+        // 🧼 Clean up shared_senders entries for crashed drone
+        if let Ok(mut shared) = self.shared_senders.lock() {
+            let keys_to_remove: Vec<(NodeId, NodeId)> = shared
+                .keys()
+                .filter(|(a, b)| *a == drone_id || *b == drone_id)
+                .cloned()
+                .collect();
+
+            for key in keys_to_remove {
+                shared.remove(&key);
+                println!("🧹 Removed shared_senders link {:?}", key);
+            }
+        }
+
         // Mark inactive
         if let Some(mut state) = self.get_node_state(drone_id) {
             state.active = false;
         }
 
-        broadcast_topology_change(&self.gui_input,&self.network_config,&"[FloodRequired]::Crash".to_string());
+
+        broadcast_topology_change(&self.gui_input,&self.network_config,&"[FloodRequired]::Crash::{drone_id}".to_string());
 
         Ok(())
     }
@@ -612,7 +629,7 @@ impl SimulationController {
         let sky_factory = self
             .group_implementations
             .get("group_1")
-            .expect("LeDron_JamesDrone group implementation must exist");
+            .expect("rustastic_drone group implementation must exist");
 
         let mut drone = sky_factory(id, controller_send, controller_recv, packet_recv, packet_send_map, pdr);
         std::thread::spawn(move || {
@@ -642,6 +659,34 @@ impl SimulationController {
 
         }
 
+        //You must initialize missing packet_senders[peer][id] entries dynamically when spawning drones.
+        //If peer is a server or client
+        // And peer didn't have id as a neighbor during the original TOML parsing
+        // Then packet_senders[peer][id] doesn't exist, and:
+
+        {
+            let mut psenders = self.packet_senders.lock().unwrap();
+            let mut precvs = self.packet_receivers.lock().unwrap();
+
+            for &peer in &connections {
+                psenders.entry(peer).or_insert_with(HashMap::new);
+                psenders.entry(id).or_insert_with(HashMap::new);
+
+                if !psenders[&peer].contains_key(&id) {
+                    let (tx, rx) = crossbeam_channel::unbounded::<Packet>();
+                    psenders.get_mut(&peer).unwrap().insert(id, tx.clone());
+                    precvs.insert(peer, rx);
+                }
+
+                if !psenders[&id].contains_key(&peer) {
+                    let (tx, rx) = crossbeam_channel::unbounded::<Packet>();
+                    psenders.get_mut(&id).unwrap().insert(peer, tx.clone());
+                    precvs.insert(id, rx);
+                }
+            }
+        }
+
+
         // 8.5) ✅ Insert new links into shared_senders map
 
         if let Ok(mut map) = self.shared_senders.lock() {
@@ -659,20 +704,7 @@ impl SimulationController {
         }
 
 
-        // 9) ✅ NEW: Force topology refresh for flood protocol
-        // Send a special command to refresh routing tables
-        for &peer in &connections {
-            if let Some(peer_cmd_tx) = self.command_senders.lock().unwrap().get(&peer) {
-                // If you have a RefreshTopology or similar command, send it here
-                // peer_cmd_tx.send(DroneCommand::RefreshTopology).ok();
-            }
-        }
 
-        // 10) ✅ NEW: Initialize the new drone's flood protocol state
-        if let Some(new_drone_cmd_tx) = self.command_senders.lock().unwrap().get(&id) {
-            // Send initialization command to ensure flood protocol is active
-            // new_drone_cmd_tx.send(DroneCommand::InitializeFloodProtocol).ok();
-        }
 
         // 11) Broadcast to GUI
         broadcast_topology_change(
@@ -721,7 +753,7 @@ impl SimulationController {
         group_implementations.insert(
             "group_1".to_string(),
             Box::new(|id, sim_contr_send, sim_contr_recv, packet_recv, packet_send, pdr| {
-                Box::new(LeDron_JamesDrone::new(
+                Box::new(RustasticDrone::new(
                     id,
                     sim_contr_send,
                     sim_contr_recv,
@@ -743,14 +775,16 @@ impl SimulationController {
         println!("      {:?}",self.command_senders.lock().unwrap());
 
         // 1. Validate that nodes exist
-        if !self.command_senders.lock().unwrap().contains_key(&a) {
-            println!("🚨 Missing command_sender for node {}", a);
-            return Err(format!("No command sender for node {}", a).into());
-        }
+        if self.get_node_type(a) == Some(NodeType::Drone) {
+            if !self.command_senders.lock().unwrap().contains_key(&a) {
+                println!("🚨 Missing command_sender for node {}", a);
+                return Err(format!("No command sender for node {}", a).into());
+        }}
+        if self.get_node_type(b) == Some(NodeType::Drone) {
         if !self.command_senders.lock().unwrap().contains_key(&b) {
             println!("🚨 Missing command_sender for node {}", b);
             return Err(format!("No command sender for node {}", b).into());
-        }
+        }}
         if !self.packet_senders.lock().unwrap().contains_key(&a) {
             println!("🚨 Missing packet_sender map for node {}", a);
             return Err(format!("No packet sender for node {}", a).into());
@@ -799,15 +833,19 @@ impl SimulationController {
         println!("🤎🧸🍂🤎🧸🍂🤎🧸🍂🤎🧸🍂Adding channel detected");
 
         // 4. Send AddSender to each node
-        let command_to_a = self.command_senders.lock().unwrap()[&a].clone();
-        command_to_a
-            .send(DroneCommand::AddSender(b, packet_to_b.clone()))
-            .map_err(|e| format!("Failed to send AddSender to {}: {}", a, e))?;
+        if self.get_node_type(a) == Some(NodeType::Drone) {
+            if let Some(command_to_a) = self.command_senders.lock().unwrap().get(&a) {
+                command_to_a.send(DroneCommand::AddSender(b, packet_to_b.clone()))
+                    .map_err(|e| format!("Failed to send AddSender to {}: {}", a, e))?;
+            }
+        }
 
-        let command_to_b = self.command_senders.lock().unwrap()[&b].clone();
-        command_to_b
-            .send(DroneCommand::AddSender(a, packet_to_a.clone()))
-            .map_err(|e| format!("Failed to send AddSender to {}: {}", b, e))?;
+        if self.get_node_type(b) == Some(NodeType::Drone) {
+            if let Some(command_to_b) = self.command_senders.lock().unwrap().get(&b) {
+                command_to_b.send(DroneCommand::AddSender(a, packet_to_a.clone()))
+                    .map_err(|e| format!("Failed to send AddSender to {}: {}", b, e))?;
+            }
+        }
 
         println!("🤎🧸🍂🤎🧸🍂🤎🧸🍂🤎🧸🍂Adding addsender finished");
 
