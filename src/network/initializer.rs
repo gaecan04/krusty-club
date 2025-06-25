@@ -480,7 +480,8 @@ impl NetworkInitializer {
         self.simulation_controller = Some(ctrl);
     }
 
-    pub fn initialize(&mut self, gui_input_queue: SharedGuiInput) -> Result<(), Box<dyn Error>> {
+    pub fn initialize(&mut self, gui_input_queue: SharedGuiInput, host_receivers: HashMap<NodeId, Receiver<Packet>>, // NEW!
+    ) -> Result<(), Box<dyn Error>> {
        // Validate the network configuration
         self.validate_config()?;
 
@@ -488,10 +489,10 @@ impl NetworkInitializer {
         self.initialize_drones();
 
         // Spawn client threads
-        self.initialize_clients(gui_input_queue.clone(),self.simulation_log.clone());
+        self.initialize_clients(gui_input_queue.clone(),self.simulation_log.clone(),&host_receivers);
 
         // Spawn server threads
-        self.initialize_servers(gui_input_queue.clone(),self.simulation_log.clone());
+        self.initialize_servers(gui_input_queue.clone(),self.simulation_log.clone(),&host_receivers);
 
         // Spawn simulation controller thread
        // self.spawn_controller(); done in main!!!
@@ -846,7 +847,7 @@ impl NetworkInitializer {
     }
 
 
-    fn initialize_clients(&mut self, gui_input: SharedGuiInput,log: Arc<Mutex<Vec<String>>>) {
+    fn initialize_clients(&mut self, gui_input: SharedGuiInput, log: Arc<Mutex<Vec<String>>>, host_receivers: &HashMap<NodeId, Receiver<Packet>>) {
         for (i, client) in self.config.client.iter().enumerate() {
             let log_clone=log.clone();
 
@@ -868,6 +869,9 @@ impl NetworkInitializer {
             let gui_clone = gui_input.clone();
             let log_clone = self.simulation_log.clone();
             let shared_senders = Arc::clone(self.shared_senders.as_ref().unwrap());
+            let shortcut_rx = host_receivers.get(&client_id).cloned().unwrap();
+
+
             if self.config.client.len() == 2 {
                 if client_id % 2 == 0 {
                     // client2
@@ -918,7 +922,7 @@ impl NetworkInitializer {
         }
     }
 
-    fn initialize_servers(&mut self, gui_input: SharedGuiInput,log: Arc<Mutex<Vec<String>>>) {
+    fn initialize_servers(&mut self, gui_input: SharedGuiInput, log: Arc<Mutex<Vec<String>>>, host_receivers: &HashMap<NodeId, Receiver<Packet>>) {
         for server in &self.config.server {
             let log_clone=log.clone();
             let server_id = server.id;
@@ -939,9 +943,11 @@ impl NetworkInitializer {
 
             let gui_clone = gui_input.clone();
             let shared_senders = Arc::clone(self.shared_senders.as_ref().unwrap());
-            
+            let shortcut_rx = host_receivers.get(&server_id).cloned().unwrap();
+
+
             thread::spawn(move || {
-                let mut srv = server::server::new(server_id as u8, senders, server_rx, None);
+                let mut srv = server::server::new(server_id as u8, senders, server_rx, None,Some(shortcut_rx));
                 srv.attach_log(log_clone);
                 srv.shared_senders= Some(shared_senders.clone());
                 srv.run(gui_clone);

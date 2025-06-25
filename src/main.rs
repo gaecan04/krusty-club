@@ -89,6 +89,15 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let command_senders = initializer.lock().unwrap().command_senders.clone();
 
+    let mut host_senders = HashMap::new();
+    let mut host_receivers = HashMap::new();
+
+    for id in config.client.iter().map(|c| c.id).chain(config.server.iter().map(|s| s.id)) {
+        let (sc_to_host_tx, sc_to_host_rx) = unbounded::<Packet>();
+        host_senders.insert(id, sc_to_host_tx);
+        host_receivers.insert(id, sc_to_host_rx);
+    }
+
 
 
     let controller = Arc::new(Mutex::new(SimulationController::new(
@@ -101,6 +110,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         packet_senders.clone(),    // ✅ shared
         packet_receivers.clone(),  // ✅ shared
         command_senders.clone(),
+        host_senders.clone(),
         shared_senders.clone(),
     )));
 
@@ -117,7 +127,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     initializer.lock().unwrap().drone_impls = drone_impls;
 
     println!("⏳ Calling initializer.initialize()");
-    initializer.lock().unwrap().initialize(gui_input_queue.clone())?;
+    initializer.lock().unwrap().initialize(gui_input_queue.clone(),host_receivers.clone())?;
     println!("✅ initializer.initialize() completed");
 
     SimulationController::start_background_thread(controller.clone(), event_receiver.clone());
@@ -138,7 +148,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         packet_receivers.clone(),
         command_senders.clone(),
         shared_senders.clone(),
-
+        host_senders.clone(),
     )?;
     println!("✅ GUI exited cleanly");
 
@@ -160,6 +170,8 @@ fn run_gui_application(
     command_senders: Arc<Mutex<HashMap<NodeId, Sender<DroneCommand>>>>, // ✅ ADD THIS
     // ✅ ADD THIS TOO
     shared_senders: Arc<Mutex<HashMap<(NodeId, NodeId), Sender<Packet>>>>,
+    host_senders: HashMap<NodeId, Sender<Packet>>, // ✅ sc->hosts
+
 ) -> Result<(), Box<dyn Error>> {
 
     let options = eframe::NativeOptions {
@@ -187,6 +199,7 @@ fn run_gui_application(
                 packet_receivers.clone(),
                 command_senders.clone(), // ✅ ADD THIS TOO
                 shared_senders.clone(),
+                host_senders.clone(),
             )))
 
         }),

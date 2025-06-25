@@ -209,6 +209,8 @@ pub struct server {
     media_storage: HashMap<String, (NodeId, String)>,
     simulation_log: Arc<Mutex<Vec<String>>>,
     pub shared_senders: Option<Arc<Mutex<HashMap<(NodeId, NodeId), Sender<Packet>>>>>,
+    shortcut_receiver: Option<Receiver<Packet>>, // added to receive packets from sc (shortcut)
+
 }
 
 impl server {
@@ -222,7 +224,7 @@ impl server {
             log.push(message.to_string());
         }
     }
-    pub(crate) fn new(id: u8, packet_sender: HashMap<NodeId,Sender<Packet>>, packet_receiver: Receiver<Packet>, shared_senders: Option<Arc<Mutex<HashMap<(NodeId,NodeId), Sender<Packet>>>>>) -> Self {
+    pub(crate) fn new(id: u8, packet_sender: HashMap<NodeId,Sender<Packet>>, packet_receiver: Receiver<Packet>, shared_senders: Option<Arc<Mutex<HashMap<(NodeId,NodeId), Sender<Packet>>>>>,shortcut_receiver: Option<Receiver<Packet>>,) -> Self {
         info!("Server {} created.", id);
         let net_graph = NetworkGraph::new(shared_senders.clone());
 
@@ -240,6 +242,8 @@ impl server {
             media_storage: HashMap::new(),
             simulation_log: Arc::new(Mutex::new(Vec::new())),
             shared_senders,
+            shortcut_receiver, // new field
+
         }
     }
     fn initiate_network_discovery(&mut self) {
@@ -532,6 +536,23 @@ impl server {
                             }
                             Err(e) => {
                                 warn!("❌ Server {} failed to receive packet: {}", self.id, e);
+                            }
+                        }
+                    }
+                    recv(self.shortcut_receiver.as_ref().unwrap()) -> shortcut_packet => {
+                        match shortcut_packet {
+                            Ok(packet) => {
+                                println!("🔁 Shortcut packet received in host {}: {:?}", self.id, packet);
+                                // Handle normally (likely matches PacketType::Ack/Nack/FloodResponse)
+                                match packet.pack_type {
+                                    PacketType::Ack(_) => {  }
+                                    PacketType::Nack(_) => {  }
+                                    PacketType::FloodResponse(_) => {  }
+                                    _ => warn!("Host {} got unexpected shortcut type", self.id),
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Failed to receive shortcut packet: {}", e);
                             }
                         }
                     }

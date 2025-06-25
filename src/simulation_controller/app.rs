@@ -58,6 +58,7 @@ pub struct NetworkApp {
 
     show_shared_senders_popup:bool,
     shared_senders: Arc<Mutex<HashMap<(NodeId, NodeId), Sender<Packet>>>>,
+    host_senders: HashMap<NodeId, Sender<Packet>>, // ✅ the sc-hosts hashmap
 
 }
 
@@ -579,8 +580,9 @@ impl NetworkApp {
         packet_senders: Arc<Mutex<HashMap<NodeId, HashMap<NodeId, Sender<Packet>>>>>,
         packet_receivers: Arc<Mutex<HashMap<NodeId, Receiver<Packet>>>>,
         command_senders: Arc<Mutex<HashMap<NodeId, Sender<DroneCommand>>>>, // ✅ ADD THIS
-
         shared_senders: Arc<Mutex<HashMap<(NodeId, NodeId), Sender<Packet>>>>,
+        host_senders: HashMap<NodeId, Sender<Packet>>, // ✅ the sc-hosts hashmap
+
     ) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::light());
 
@@ -615,8 +617,9 @@ impl NetworkApp {
             packet_senders.clone(),
             packet_receivers.clone(),
             command_senders.clone(),
-
+            host_senders.clone(), // ✅ NEW ARG
             shared_senders.clone(),
+
         );
 
         let controller = Arc::new(Mutex::new(controller));
@@ -705,6 +708,7 @@ impl Default for NetworkApp {
             packet_senders: HashMap::new(),
             show_shared_senders_popup:false,
             shared_senders: Arc::new(Mutex::new(HashMap::new())),
+            host_senders: HashMap::new(), // ✅ the sc-hosts hashmap
 
         }
     }

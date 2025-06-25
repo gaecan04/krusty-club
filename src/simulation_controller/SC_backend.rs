@@ -24,6 +24,8 @@ pub struct SimulationController {
     pub(crate) packet_senders: Arc<Mutex<HashMap<NodeId, HashMap<NodeId, Sender<Packet>>>>>,
     pub(crate) packet_receivers: Arc<Mutex<HashMap<NodeId, Receiver<Packet>>>>,
 
+    host_senders: HashMap<NodeId, Sender<Packet>>, // For SC → Host delivery
+
     drone_factory: Arc<dyn Fn(
         NodeId,
         Sender<DroneEvent>,
@@ -52,7 +54,7 @@ impl SimulationController {
         packet_senders: Arc<Mutex<HashMap<NodeId, HashMap<NodeId, Sender<Packet>>>>>,
         packet_receivers: Arc<Mutex<HashMap<NodeId, Receiver<Packet>>>>,
         command_senders: Arc<Mutex<HashMap<NodeId, Sender<DroneCommand>>>>,
-
+        host_senders: HashMap<NodeId, Sender<Packet>>, //SC->hosts
         shared_senders: Arc<Mutex<HashMap<(NodeId, NodeId), Sender<Packet>>>>,
     ) -> Self {
         let group_implementations = SimulationController::load_group_implementations();
@@ -66,6 +68,7 @@ impl SimulationController {
             network_graph: HashMap::new(),
             packet_senders,
             packet_receivers,
+            host_senders,
             drone_factory,
             gui_input,
             group_implementations,
@@ -175,20 +178,20 @@ impl SimulationController {
             },
             DroneEvent::ControllerShortcut(packet) => {
                 if let Some(dest_id) = packet.routing_header.destination() {
-                    let from_id = packet.routing_header.hops.first().copied().unwrap_or(0); // or whatever default you use
-                    if let Some(sender) = self.get_packet_sender(from_id, dest_id) {
+                    if let Some(sender) = self.host_senders.get(&dest_id) {
                         if let Err(e) = sender.send(packet.clone()) {
-                            eprintln!("Failed to forward ControllerShortcut to node {}: {}", dest_id, e);
+                            eprintln!("❌ Failed to send ControllerShortcut to node {}: {}", dest_id, e);
                         } else {
-                            println!("ControllerShortcut forwarded to node {}", dest_id);
+                            println!("✅ ControllerShortcut delivered to node {}", dest_id);
                         }
                     } else {
-                        eprintln!("No packet sender found from {} to {}", from_id, dest_id);
+                        eprintln!("❌ No direct host_sender for destination {}", dest_id);
                     }
                 } else {
-                    eprintln!("ControllerShortcut has no destination");
+                    eprintln!("❌ ControllerShortcut has no destination");
                 }
             }
+
         }
     }
 
@@ -675,13 +678,13 @@ impl SimulationController {
                 if !psenders[&peer].contains_key(&id) {
                     let (tx, rx) = crossbeam_channel::unbounded::<Packet>();
                     psenders.get_mut(&peer).unwrap().insert(id, tx.clone());
-                    precvs.insert(peer, rx);
+                   // precvs.insert(peer, rx);
                 }
 
                 if !psenders[&id].contains_key(&peer) {
                     let (tx, rx) = crossbeam_channel::unbounded::<Packet>();
                     psenders.get_mut(&id).unwrap().insert(peer, tx.clone());
-                    precvs.insert(id, rx);
+                    //precvs.insert(id, rx);
                 }
             }
         }
