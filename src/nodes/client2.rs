@@ -58,6 +58,8 @@ pub struct MyClient{
     seen_flood_ids : HashSet<(u64 , NodeId)>,
     simulation_log: Arc<Mutex<Vec<String>>>,
     pub shared_senders: Option<Arc<Mutex<HashMap<NodeId, Sender<Packet>>>>>,
+    shortcut_receiver: Option<Receiver<Packet>>, // added to receive packets from sc (shortcut)
+
 }
 
 impl MyClient {
@@ -66,6 +68,8 @@ impl MyClient {
         packet_recv: Receiver<Packet>,
         packet_send: HashMap<NodeId, Sender<Packet>>,
         shared_senders: Option<Arc<Mutex<HashMap<NodeId, Sender<Packet>>>>>,
+        shortcut_receiver: Option<Receiver<Packet>>, // added to receive packets from sc (shortcut)
+
     ) -> Self {
         Self {
             id,
@@ -79,6 +83,7 @@ impl MyClient {
             seen_flood_ids: HashSet::new(),
             simulation_log: Arc::new(Mutex::new(Vec::new())),
             shared_senders,
+            shortcut_receiver,
         }
     }
 

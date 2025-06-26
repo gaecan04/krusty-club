@@ -880,7 +880,7 @@ impl NetworkInitializer {
                        /* let mut cl2 = client2::MyClient::new(client_id, client_rx, senders);
                         cl2.attach_log(log_clone);
                         cl2.run(gui_clone);*/
-                        let mut cl1 = client1::MyClient::new(client_id, client_rx, senders, HashMap::new(), None, HashSet::new(), None);
+                        let mut cl1 = client1::MyClient::new(client_id, client_rx, senders, HashMap::new(), None, HashSet::new(), None,Some(shortcut_rx));
                         cl1.shared_senders= Some(shared_senders.clone());
                         cl1.attach_log(log_clone);
                         cl1.run(gui_clone);
@@ -889,7 +889,7 @@ impl NetworkInitializer {
                     // client1
                     thread::spawn(move || {
                         //println!("client1 spawned");
-                        let mut cl1 = client1::MyClient::new(client_id, client_rx, senders, HashMap::new(), None, HashSet::new(), None);
+                        let mut cl1 = client1::MyClient::new(client_id, client_rx, senders, HashMap::new(), None, HashSet::new(), None,Some(shortcut_rx));
                         cl1.shared_senders= Some(shared_senders.clone());
                         cl1.attach_log(log_clone);
                         cl1.run(gui_clone);
@@ -903,7 +903,7 @@ impl NetworkInitializer {
                         /*let mut cl2 = client2::MyClient::new(client_id, client_rx, senders);
                         cl2.attach_log(log_clone);
                         cl2.run(gui_clone);*/
-                        let mut cl1 = client1::MyClient::new(client_id, client_rx, senders, HashMap::new(), None, HashSet::new(), None);
+                        let mut cl1 = client1::MyClient::new(client_id, client_rx, senders, HashMap::new(), None, HashSet::new(), None,Some(shortcut_rx));
                         cl1.shared_senders= Some(shared_senders.clone());
                         cl1.attach_log(log_clone);
                         cl1.run(gui_clone);
@@ -912,7 +912,7 @@ impl NetworkInitializer {
                     // client1 for odd-indexed clients
                     thread::spawn(move || {
                         //println!("client1 spawned");
-                        let mut cl1 = client1::MyClient::new(client_id, client_rx, senders, HashMap::new(), None, HashSet::new(), None);
+                        let mut cl1 = client1::MyClient::new(client_id, client_rx, senders, HashMap::new(), None, HashSet::new(), None,Some(shortcut_rx));
                         cl1.shared_senders= Some(shared_senders.clone());
                         cl1.attach_log(log_clone);
                         cl1.run(gui_clone);
@@ -955,33 +955,6 @@ impl NetworkInitializer {
         }
     }
 
-
-   /* fn spawn_controller(&self) {
-        println!("😎✨🖇️💗⚡ SPAWN");
-        // Get all node IDs for the controller to manage
-        let nodes = self.packet_senders.lock().unwrap().keys().cloned().collect::<Vec<_>>();
-        // Create controller send/receive channels for commands and events
-        let (controller_tx, controller_rx) = channel::unbounded::<DroneEvent>();
-        thread::spawn(move || {
-
-            // Controller main loop
-            loop {
-                // Process incoming drone events
-                select! {
-                    recv(controller_rx) -> event => {
-                        if let Ok(event) = event {
-                            println!("Controller received event: {:?}", event);
-                            // Process the event
-                        }
-                    }
-                    default => {
-                        // No events received, can do periodic controller tasks here
-                        thread::sleep(std::time::Duration::from_millis(100));
-                    }
-                }
-            }
-        });
-    }*/
 
 
     pub fn create_drone_implementations(&self) -> Vec<DroneWithId> {

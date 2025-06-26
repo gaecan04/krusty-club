@@ -259,7 +259,7 @@ impl server {
         let routing_header = SourceRoutingHeader::empty_route(); // ignored by drones for FloodRequest
 
         let packet = Packet::new_flood_request(routing_header, flood_id, flood_request);
-        info!("♥♥♥♥♥♥♥ server has senders towards this drones: {:?}", self.packet_sender);
+        println!("♥♥♥♥♥♥♥ server has senders towards this drones: {:?}", self.packet_sender);
         //let mut sent_to = HashSet::new();
         for (&neighbor_id, sender) in &self.packet_sender {
             if self.network_graph.node_types.contains_key(&neighbor_id) {

@@ -15,6 +15,8 @@ use wg_2024::packet::{Ack, FloodRequest, FloodResponse, Fragment, Nack, NackType
 //use wg_2024::packet::PacketType::MsgFragment;
 //use wg_2024::drone::Drone;
 use crossbeam_channel::{select_biased, Receiver, Sender};
+use log::info;
+use petgraph::visit::{EdgeRef, IntoEdgeReferences};
 use crate::simulation_controller::gui_input_queue::{SharedGuiInput};
 
 static SESSION_COUNTER : Lazy<Mutex<u64>> = Lazy::new(|| Mutex::new(0));
@@ -56,6 +58,7 @@ pub struct MyClient{
     pub route_cache : HashMap<NodeId, Vec<NodeId>>,
     pub simulation_log: Arc<Mutex<Vec<String>>>,
     pub shared_senders: Option<Arc<Mutex<HashMap<(NodeId, NodeId), Sender<Packet>>>>>,
+    shortcut_receiver: Option<Receiver<Packet>>, // added to receive packets from sc (shortcut)
 
 }
 
@@ -76,6 +79,8 @@ impl MyClient {
         connected_server_id: Option<NodeId>,
         seen_flood_ids : HashSet<(u64, NodeId)>,
         shared_senders: Option<Arc<Mutex<HashMap<(NodeId,NodeId), Sender<Packet>>>>>,
+        shortcut_receiver: Option<Receiver<Packet>>, // added to receive packets from sc (shortcut)
+
     ) -> Self {
         Self {
             id,
@@ -91,6 +96,7 @@ impl MyClient {
             route_cache : HashMap::new(),
             simulation_log: Arc::new(Mutex::new(Vec::new())),
             shared_senders, // ✅ store reference
+            shortcut_receiver,
         }
     }
 
@@ -127,6 +133,13 @@ impl MyClient {
                         self.process_packet(packet);
                     }
                 },
+                recv(self.shortcut_receiver.as_ref().unwrap()) -> packet => {
+                    if let Ok(packet) = packet {
+                        println!("Client {} received shortcut packet: {:?}", self.id, packet);
+                        self.process_packet(packet);
+                    }
+                }
+
                 default => {
                         std::thread::sleep(std::time::Duration::from_millis(1));
                 },
@@ -304,6 +317,9 @@ impl MyClient {
             },
             session_id: new_flood_id,
         };
+
+       println!("♥♥♥♥♥♥♥ client1 has senders towards this drones: {:?}", self.packet_send);
+
 
         println!("Client {} sending FloodRequest {} to all neighbors.", self.id, new_flood_id);
         //4.sending flood_request to all neighbors
@@ -684,6 +700,142 @@ impl MyClient {
         println!("Client {} processing GUI command '{}' for {}.", self.id, command_string, dest_id);
         let tokens: Vec<&str> = command_string.trim().split("::").collect();
         let command_type_str = tokens.get(0).unwrap_or(&"");
+
+        if tokens.len() >= 2 && tokens[0] == "[FloodRequired]" {
+            let action = tokens[1..].join("::");
+            println!("Client {} received FLOOD REQUIRED command due to action: {}.", self.id, action);
+            self.log(format!("Client {} received a call to flooding the network", self.id));
+
+            if let Some(parts) = action.strip_prefix("AddSender::") {
+                let nodes: Vec<&str> = parts.splitn(2, "::").collect();
+                if nodes.len() == 2 {
+                    if let (Ok(a), Ok(b)) = (nodes[0].parse::<NodeId>(), nodes[1].parse::<NodeId>()) {
+                        if self.id == a || self.id == b {
+                            let peer = if self.id == a { b } else { a };
+                            if let Some(shared) = &self.shared_senders {
+                                if let Ok(map) = shared.lock() {
+                                    if let Some(sender) = map.get(&(self.id, peer)) {
+                                        self.packet_send.insert(peer, sender.clone());
+                                        let self_idx = *self.node_id_to_index.get(&self.id).unwrap();
+
+                                        let peer_idx = if let Some(&idx) = self.node_id_to_index.get(&peer) {
+                                            idx
+                                        } else {
+                                            let idx = self.network_graph.add_node(NodeInfo { id: peer, node_type: NodeType::Drone });
+                                            self.node_id_to_index.insert(peer, idx);
+                                            idx
+                                        };
+
+                                        self.network_graph.add_edge(self_idx, peer_idx, 0);
+                                        self.network_graph.add_edge(peer_idx, self_idx, 0);
+                                        println!("Client {} added link to {} via AddSender", self.id, peer);
+                                    }
+                                }
+                                self.start_flood_discovery();
+
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+
+            if let Some(parts) = action.strip_prefix("RemoveSender::") {
+                let nodes: Vec<&str> = parts.splitn(2, "::").collect();
+                if nodes.len() == 2 {
+                    if let (Ok(a), Ok(b)) = (nodes[0].parse::<NodeId>(), nodes[1].parse::<NodeId>()) {
+                        if self.id == a || self.id == b {
+                            let peer = if self.id == a { b } else { a };
+                            self.packet_send.remove(&peer);
+                            if let (Some(&a_idx), Some(&b_idx)) = (self.node_id_to_index.get(&a), self.node_id_to_index.get(&b)) {
+                                if let Some(edge) = self.network_graph.find_edge(a_idx, b_idx).or_else(|| self.network_graph.find_edge(b_idx, a_idx)) {
+                                    self.network_graph.remove_edge(edge);
+                                    println!("Client {} removed link to {} via RemoveSender", self.id, peer);
+                                }
+
+                            }
+                        }
+                        self.start_flood_discovery();
+
+                    }
+                }
+                return;
+            }
+
+            if let Some(parts) = action.strip_prefix("SpawnDrone::") {
+                let components: Vec<&str> = parts.splitn(2, "::").collect();
+                if components.len() == 2 {
+                    if let Ok(drone_id) = components[0].parse::<NodeId>() {
+                        if let Ok(peer_vec) = serde_json::from_str::<Vec<NodeId>>(components[1]) {
+                            println!("Client {} parsing SpawnDrone with id {} and peers {:?}", self.id, drone_id, peer_vec);
+                            // Instead of checking if self.id is in peer_vec, check if there’s a sender available for this drone
+                            if let Some(shared) = &self.shared_senders {
+                                println!("shared senders found");
+                                if let Ok(map) = shared.lock() {
+                                    println!("map found");
+
+                                    if map.contains_key(&(drone_id, self.id)) || map.contains_key(&(self.id, drone_id)) {
+                                        // Proceed with insertion
+
+
+                                        for ((from, to), sender) in map.iter() {
+                                            if *from == self.id && *to == drone_id {
+                                                self.packet_send.insert(drone_id, sender.clone());
+                                                println!("Client {} added sender to drone {} (from shared_senders)", self.id, drone_id);
+                                            }
+                                            if *to == self.id && *from == drone_id {
+                                                self.packet_send.insert(drone_id, sender.clone());
+                                                println!("Client {} added sender from drone {} (from shared_senders)", self.id, drone_id);
+                                            }
+
+
+
+                                        }
+                                        let idx = self.network_graph.add_node(NodeInfo { id: drone_id, node_type: NodeType::Drone });
+                                        self.node_id_to_index.insert(drone_id, idx);
+                                    }
+                                }
+                            }
+                            self.start_flood_discovery();
+
+                        } else {
+                            println!("Client {} failed to parse peer list in SpawnDrone: {}", self.id, components[1]);
+                        }
+                    } else {
+                        println!("Client {} failed to parse drone ID in SpawnDrone: {}", self.id, components[0]);
+                    }
+                } else {
+                    println!("Client {} received malformed SpawnDrone message: {}", self.id, parts);
+                }
+                return;
+            }
+
+            if action.starts_with("Crash::") {
+                let parts: Vec<&str> = action.split("::").collect();
+                if parts.len() == 2 {
+                    if let Ok(crashed_id) = parts[1].parse::<NodeId>() {
+                        println!("Client {} received crash signal for node {}. Cleaning up and triggering rediscovery.", self.id, crashed_id);
+                        self.packet_send.remove(&crashed_id);
+                        if let Some(index) = self.node_id_to_index.remove(&crashed_id) {
+                            self.network_graph.remove_node(index);
+                            println!("Client {} removed node {} from graph.", self.id, crashed_id);
+                        } else {
+                            println!("Client {} received crash for unknown node {}.", self.id, crashed_id);
+                        }
+                        self.start_flood_discovery();
+                    } else {
+                        println!("Client {} received invalid Crash ID: {}", self.id, parts[1]);
+                    }
+                } else {
+                    println!("Client {} received malformed Crash command: {}", self.id, action);
+                }
+                return;
+            }
+
+            self.start_flood_discovery();
+            return;
+        }
+
         let high_level_message_info: Option<String> = match tokens.as_slice() {
             ["[Login]", server_id] => {
                 if let Ok(parsed_server_id) = server_id.parse::<NodeId>() {
@@ -816,13 +968,7 @@ impl MyClient {
                     None
                 }
             },
-            ["[FloodRequired]",action] => {
-                println!("Client {} received FLOOD REQUIRED command due to action: {}.", self.id, action);
-                self.log(format!("Client {} received a call to flooding the network", self.id));
-                self.start_flood_discovery();
-                None
-            },
-            _ => {
+                _ => {
                 eprintln!("Client {} received unrecognized GUI command: {}.", self.id, command_string);
                 None
             }
@@ -913,8 +1059,28 @@ impl MyClient {
         }
     }
 
-    fn best_path(&self, from: NodeId, to: NodeId) -> Option<Vec<NodeId>> {
+    fn best_path(&mut self, from: NodeId, to: NodeId) -> Option<Vec<NodeId>> {
+
         println!("Client {} calculating path from {} to {}.", self.id, from, to);
+
+        //added this to sync your graph with shared_senders
+        if let Some(shared) = &self.shared_senders {
+            if let Ok(map) = shared.lock() {
+                let mut to_remove = vec![];
+                for edge in self.network_graph.edge_references() {
+                    let a_id = self.network_graph[edge.source()].id;
+                    let b_id = self.network_graph[edge.target()].id;
+                    if !map.contains_key(&(a_id, b_id)) && !map.contains_key(&(b_id, a_id)) {
+                        to_remove.push((edge.source(), edge.target()));
+                    }
+                }
+                for (src, dst) in to_remove {
+                    self.network_graph.remove_edge(self.network_graph.find_edge(src, dst).unwrap());
+                }
+            }
+        }
+
+
         if from == self.id {
             if let Some(cached_path) = self.route_cache.get(&to) {
                 println!("Client {}: found path from {} to {}: {:?}", self.id, from, to, cached_path);
@@ -988,12 +1154,15 @@ impl MyClient {
 
     fn send_to_neighbor(&mut self, neighbor_id: NodeId, packet: Packet) -> Result<(), String> {
         if let Some(sender) = self.packet_send.get(&neighbor_id) {
-            sender.send(packet.clone()).map_err(|e| format!("Failed to send packet to neighbor {}: {}", neighbor_id, e))
+            sender
+                .send(packet.clone())
+                .map_err(|e| format!("Failed to send packet to neighbor {}: {}", neighbor_id, e))
         } else if let Some(shared) = &self.shared_senders {
             if let Ok(map) = shared.lock() {
-                let key = (self.id, neighbor_id);  // 🔑 use (src, dst)
-                if let Some(shared_sender) = map.get(&key) {
-                    return shared_sender.send(packet.clone()).map_err(|e| format!("Failed to send packet to neighbor {} (from shared): {}", neighbor_id, e));
+                if let Some(shared_sender) = map.get(&(self.id, neighbor_id)) {
+                    return shared_sender
+                        .send(packet.clone())
+                        .map_err(|e| format!("Failed to send packet to neighbor {} (from shared): {}", neighbor_id, e));
                 }
             }
             Err(format!("Neighbor {} not found in shared_senders", neighbor_id))
@@ -1001,6 +1170,10 @@ impl MyClient {
             Err(format!("Neighbor {} not found in local or shared map", neighbor_id))
         }
     }
+
+
+
+
 
 
 }

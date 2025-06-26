@@ -596,7 +596,7 @@ impl SimulationController {
             }
         }
 
-        // 3) ✅ CRITICAL: Update network graph - UNCOMMENT AND FIX
+        // 3) Update network graph
         for &peer in &connections {
             self.network_graph.entry(id).or_default().insert(peer);
             self.network_graph.entry(peer).or_default().insert(id);
@@ -606,28 +606,55 @@ impl SimulationController {
         let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
         self.command_senders.lock().unwrap().insert(id, cmd_tx);
 
-        // 5) Channels: packet
-        let (pkt_tx, pkt_rx) = crossbeam_channel::unbounded();
+        // 5) ⚠️ CRITICAL FIX: Create a single receiver for the new drone
+        let (new_drone_main_tx, new_drone_main_rx) = crossbeam_channel::unbounded();
+
+        // Store the main receiver for the drone
+        self.packet_receivers.lock().unwrap().insert(id, new_drone_main_rx.clone());
+
+        // 6) Initialize packet_senders map for the new drone
         self.packet_senders.lock().unwrap().insert(id, HashMap::new());
-        self.packet_receivers.lock().unwrap().insert(id, pkt_rx.clone());
 
-        // 6) Build send map for the new drone
-        let mut packet_send_map = self.packet_senders
-            .lock().unwrap().get(&id)
-            .cloned()
-            .unwrap_or_default(); // ✅ this gives the map: HashMap<NodeId, Sender<Packet>>
+        // 7) ⚠️ CRITICAL FIX: Create bidirectional channels and update packet_senders
+        {
+            let mut psenders = self.packet_senders.lock().unwrap();
 
-        for &peer in &connections {
-            if let Some(tx) = self.packet_senders.lock().unwrap().get(&peer).and_then(|m| m.get(&id)) {
-                packet_send_map.insert(peer, tx.clone());
+            println!("😂😂😂😂psenders: {:?}",psenders);
+
+            for &peer in &connections {
+                // Ensure peer has an entry in packet_senders
+                psenders.entry(peer).or_insert_with(HashMap::new);
+
+                // Create channel from new drone to peer (id -> peer)
+                let (tx_to_peer, rx_from_new_drone) = crossbeam_channel::unbounded::<Packet>();
+                psenders.get_mut(&id).unwrap().insert(peer, tx_to_peer.clone());
+
+                // Create channel from peer to new drone (peer -> id)
+                // Use the main receiver we created for the new drone
+                psenders.get_mut(&peer).unwrap().insert(id, new_drone_main_tx.clone());
+
+                // ⚠️ IMPORTANT: If peer is an existing drone, we need to update its receiver
+                // to handle packets from the new drone
+                if self.get_node_type(peer) == Some(NodeType::Drone) {
+                    // The existing peer drone needs to be notified about the new receiver
+                    // This is handled by the AddSender command below
+                }
             }
+            println!("😂😂after😂😂psenders: {:?}",psenders);
 
         }
 
-        // 7) Spawn drone thread
+
+        // 8) Build send map for the new drone
+        let packet_send_map = {
+            let psenders = self.packet_senders.lock().unwrap();
+            psenders.get(&id).cloned().unwrap_or_default()
+        };
+
+        // 9) Spawn drone thread
         let controller_send = self.event_sender.clone();
         let controller_recv = cmd_rx;
-        let packet_recv = pkt_rx;
+        let packet_recv = new_drone_main_rx; // Use the main receiver
 
         let sky_factory = self
             .group_implementations
@@ -639,87 +666,55 @@ impl SimulationController {
             drone.run();
         });
 
-        // 8) ✅ CRITICAL: Send AddSender commands bidirectionally
-        let new_drone_packet_tx = self.packet_senders.lock().unwrap().get(&id).unwrap().clone();
-
+        // 10) ⚠️ CRITICAL: Send AddSender commands to peers
         for &peer in &connections {
-            // Tell the new drone about its peer
-            if let Some(peer_packet_tx) = self.packet_senders.lock().unwrap().get(&peer).and_then(|m| m.get(&id)) {
-                if let Some(new_drone_cmd_tx) = self.command_senders.lock().unwrap().get(&id) {
+            // Tell peer drones about the new drone's sender
+            if self.get_node_type(peer) == Some(NodeType::Drone) {
+                if let Some(peer_cmd_tx) = self.command_senders.lock().unwrap().get(&peer) {
+                    if let Some(sender_to_peer) = self.packet_senders.lock().unwrap().get(&id).and_then(|m| m.get(&peer)) {
+                        peer_cmd_tx
+                            .send(DroneCommand::AddSender(id, sender_to_peer.clone()))
+                            .map_err(|e| format!("Failed to tell peer {} about new drone {}: {}", peer, id, e))?;
+                    }
+                }
+            }
+
+            // Tell the new drone about its peers
+            if let Some(new_drone_cmd_tx) = self.command_senders.lock().unwrap().get(&id) {
+                if let Some(sender_to_new_drone) = self.packet_senders.lock().unwrap().get(&peer).and_then(|m| m.get(&id)) {
                     new_drone_cmd_tx
-                        .send(DroneCommand::AddSender(peer, peer_packet_tx.clone()))
+                        .send(DroneCommand::AddSender(peer, sender_to_new_drone.clone()))
                         .map_err(|e| format!("Failed to tell new drone {} about peer {}: {}", id, peer, e))?;
                 }
             }
-
-            if let Some(new_drone_packet_tx) = self.packet_senders.lock().unwrap().get(&id).and_then(|m| m.get(&peer)) {
-                if let Some(peer_cmd_tx) = self.command_senders.lock().unwrap().get(&peer) {
-                    peer_cmd_tx
-                        .send(DroneCommand::AddSender(id, new_drone_packet_tx.clone()))
-                        .map_err(|e| format!("Failed to tell peer {} about new drone {}: {}", peer, id, e))?;
-                }
-            }
-
         }
 
-        //You must initialize missing packet_senders[peer][id] entries dynamically when spawning drones.
-        //If peer is a server or client
-        // And peer didn't have id as a neighbor during the original TOML parsing
-        // Then packet_senders[peer][id] doesn't exist, and:
-
-        {
-            let mut psenders = self.packet_senders.lock().unwrap();
-            let mut precvs = self.packet_receivers.lock().unwrap();
-
+        // 11) ⚠️ Update shared_senders map
+        if let Ok(mut shared) = self.shared_senders.lock() {
+            let psenders = self.packet_senders.lock().unwrap();
             for &peer in &connections {
-                psenders.entry(peer).or_insert_with(HashMap::new);
-                psenders.entry(id).or_insert_with(HashMap::new);
-
-                if !psenders[&peer].contains_key(&id) {
-                    let (tx, rx) = crossbeam_channel::unbounded::<Packet>();
-                    psenders.get_mut(&peer).unwrap().insert(id, tx.clone());
-                   // precvs.insert(peer, rx);
+                // Insert both directions
+                if let Some(sender_to_peer) = psenders.get(&id).and_then(|m| m.get(&peer)) {
+                    shared.insert((id, peer), sender_to_peer.clone());
                 }
-
-                if !psenders[&id].contains_key(&peer) {
-                    let (tx, rx) = crossbeam_channel::unbounded::<Packet>();
-                    psenders.get_mut(&id).unwrap().insert(peer, tx.clone());
-                    //precvs.insert(id, rx);
-                }
-            }
-        }
-
-
-        // 8.5) ✅ Insert new links into shared_senders map
-
-        if let Ok(mut map) = self.shared_senders.lock() {
-            for &peer in &connections {
-                // Insert both directions: (id, peer) and (peer, id)
-                if let Some(sender_to_peer) = self.packet_senders.lock().unwrap().get(&id).and_then(|m| m.get(&peer)) {
-                    map.insert((id, peer), sender_to_peer.clone());
-                }
-                if let Some(sender_from_peer) = self.packet_senders.lock().unwrap().get(&peer).and_then(|m| m.get(&id)) {
-                    map.insert((peer, id), sender_from_peer.clone());
+                if let Some(sender_to_new_drone) = psenders.get(&peer).and_then(|m| m.get(&id)) {
+                    shared.insert((peer, id), sender_to_new_drone.clone());
                 }
             }
         } else {
             warn!("❌ Failed to lock shared_senders during spawn_drone");
         }
 
-
-
-
-        // 11) Broadcast to GUI
+        // 12) Broadcast to GUI
         broadcast_topology_change(
             &self.gui_input,
             &self.network_config,
             &format!("[FloodRequired]::SpawnDrone::{}::{:?}", id, connections),
         );
 
-
         println!("✅ Successfully spawned drone {} with connections {:?}", id, connections);
 
-        // 12) ✅ NEW: Add small delay to ensure all commands are processed
+        // 13) Add small delay to ensure all commands are processed
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         Ok(())
