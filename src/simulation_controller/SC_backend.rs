@@ -293,8 +293,7 @@ impl SimulationController {
         }
 
 
-        broadcast_topology_change(&self.gui_input,&self.network_config,&"[FloodRequired]::Crash::{drone_id}".to_string());
-
+        broadcast_topology_change(&self.gui_input,&self.network_config,&format!("[FloodRequired]::Crash::{}",drone_id));
         Ok(())
     }
 
@@ -777,12 +776,12 @@ impl SimulationController {
             if !self.command_senders.lock().unwrap().contains_key(&a) {
                 println!("🚨 Missing command_sender for node {}", a);
                 return Err(format!("No command sender for node {}", a).into());
-        }}
+            }}
         if self.get_node_type(b) == Some(NodeType::Drone) {
-        if !self.command_senders.lock().unwrap().contains_key(&b) {
-            println!("🚨 Missing command_sender for node {}", b);
-            return Err(format!("No command sender for node {}", b).into());
-        }}
+            if !self.command_senders.lock().unwrap().contains_key(&b) {
+                println!("🚨 Missing command_sender for node {}", b);
+                return Err(format!("No command sender for node {}", b).into());
+            }}
         if !self.packet_senders.lock().unwrap().contains_key(&a) {
             println!("🚨 Missing packet_sender map for node {}", a);
             return Err(format!("No packet sender for node {}", a).into());
@@ -917,17 +916,17 @@ impl SimulationController {
         Ok(())
     }
 
-   /* pub fn refresh_channels(&mut self) {
-        let (new_receivers, new_senders) = self.initializer.lock().unwrap().setup_channels();
-        // Step 2: Copy into the controller’s fields
-        self.packet_receivers = Arc::new(Mutex::new(new_receivers));
-        self.packet_senders = Arc::new(Mutex::new(new_senders));
+    /* pub fn refresh_channels(&mut self) {
+         let (new_receivers, new_senders) = self.initializer.lock().unwrap().setup_channels();
+         // Step 2: Copy into the controller’s fields
+         self.packet_receivers = Arc::new(Mutex::new(new_receivers));
+         self.packet_senders = Arc::new(Mutex::new(new_senders));
 
 
-        for (id, neighbors) in self.packet_senders.lock().unwrap().iter() {
-            println!("Node {} has {} neighbors", id, neighbors.len());
-        }
-    }*/
+         for (id, neighbors) in self.packet_senders.lock().unwrap().iter() {
+             println!("Node {} has {} neighbors", id, neighbors.len());
+         }
+     }*/
 
 
     pub fn get_node_state(&self, node_id: NodeId) -> Option<Node> {

@@ -544,7 +544,7 @@ impl MyClient {
     fn send_ack(&mut self, packet: &mut Packet, fragment: &Fragment) {
         let mut ack_routing_header = packet.routing_header.clone();
         ack_routing_header.hops.reverse();
-        //ack_routing_header.hop_index = 1;
+        ack_routing_header.hop_index = 1;
 
         let destination_node_id = ack_routing_header.hops.first().copied();
         let next_hop_for_ack_option = ack_routing_header.hops.get(1).copied();

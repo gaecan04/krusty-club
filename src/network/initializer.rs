@@ -495,7 +495,7 @@ impl NetworkInitializer {
         self.initialize_servers(gui_input_queue.clone(),self.simulation_log.clone(),&host_receivers);
 
         // Spawn simulation controller thread
-       // self.spawn_controller(); done in main!!!
+        // self.spawn_controller(); done in main!!!
 
         Ok(())
 
@@ -870,7 +870,6 @@ impl NetworkInitializer {
             let log_clone = self.simulation_log.clone();
             let shared_senders = Arc::clone(self.shared_senders.as_ref().unwrap());
             let shortcut_rx = host_receivers.get(&client_id).cloned().unwrap();
-
 
             if self.config.client.len() == 2 {
                 if client_id % 2 == 0 {

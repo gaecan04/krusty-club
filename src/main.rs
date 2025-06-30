@@ -60,6 +60,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let shared_senders: Arc<Mutex<HashMap<(NodeId, NodeId), Sender<Packet>>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
+
+
     /*let command_senders: Arc<Mutex<HashMap<NodeId, Sender<DroneCommand>>>> =
         Arc::new(Mutex::new(HashMap::new()));
 

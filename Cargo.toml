@@ -39,9 +39,10 @@ serde_json = "1.0.140"
 
 
 [features]
-default = []
 serialize = []
 unlimited_buffer = ["ap2024_unitn_cppenjoyers_drone/unlimited_buffer"]
+log = []
+default = ["log"]
 
 [workspace]
 members = ["AP-unitn", ]
