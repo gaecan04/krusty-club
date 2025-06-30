@@ -40,7 +40,7 @@ pub struct SimulationController {
 
     pub initializer: Arc<Mutex<NetworkInitializer>>,
     shared_senders:  Arc<Mutex<HashMap<(NodeId, NodeId), Sender<Packet>>>>,
-
+    inbox_senders:Arc<Mutex<HashMap<NodeId, Sender<Packet>>>>
 }
 
 impl SimulationController {
@@ -56,6 +56,7 @@ impl SimulationController {
         command_senders: Arc<Mutex<HashMap<NodeId, Sender<DroneCommand>>>>,
         host_senders: HashMap<NodeId, Sender<Packet>>, //SC->hosts
         shared_senders: Arc<Mutex<HashMap<(NodeId, NodeId), Sender<Packet>>>>,
+        inbox_senders: Arc<Mutex<HashMap<NodeId, Sender<Packet>>>>,
     ) -> Self {
         let group_implementations = SimulationController::load_group_implementations();
 
@@ -74,6 +75,7 @@ impl SimulationController {
             group_implementations,
             initializer,
             shared_senders,
+            inbox_senders,
         };
 
         controller.initialize_network_graph();
@@ -614,34 +616,39 @@ impl SimulationController {
         // 6) Initialize packet_senders map for the new drone
         self.packet_senders.lock().unwrap().insert(id, HashMap::new());
 
+        self.inbox_senders.lock().unwrap().insert(id, new_drone_main_tx.clone());
+
         // 7) ⚠️ CRITICAL FIX: Create bidirectional channels and update packet_senders
         {
             let mut psenders = self.packet_senders.lock().unwrap();
 
-            println!("😂😂😂😂psenders: {:?}",psenders);
-
             for &peer in &connections {
-                // Ensure peer has an entry in packet_senders
                 psenders.entry(peer).or_insert_with(HashMap::new);
 
-                // Create channel from new drone to peer (id -> peer)
                 let (tx_to_peer, rx_from_new_drone) = crossbeam_channel::unbounded::<Packet>();
                 psenders.get_mut(&id).unwrap().insert(peer, tx_to_peer.clone());
-
-                // Create channel from peer to new drone (peer -> id)
-                // Use the main receiver we created for the new drone
                 psenders.get_mut(&peer).unwrap().insert(id, new_drone_main_tx.clone());
 
-                // ⚠️ IMPORTANT: If peer is an existing drone, we need to update its receiver
-                // to handle packets from the new drone
-                if self.get_node_type(peer) == Some(NodeType::Drone) {
-                    // The existing peer drone needs to be notified about the new receiver
-                    // This is handled by the AddSender command below
+                // Forward rx_from_new_drone into peer's inbox
+                if let Some(peer_inbox_tx) = self.inbox_senders.lock().unwrap().get(&peer) {
+                    let peer_inbox_tx = peer_inbox_tx.clone();
+                    std::thread::spawn(move || {
+                        for pkt in rx_from_new_drone {
+                            if let Err(e) = peer_inbox_tx.send(pkt) {
+                                eprintln!("❌ Forwarding thread {} → {} failed: {}", id, peer, e);
+                                break;
+                            }
+                        }
+                        println!("⚠️ Forwarding thread from {} to {} exited", id, peer);
+                    });
+                } else {
+                    eprintln!("❌ No inbox Sender found for peer {}", peer);
                 }
-            }
-            println!("😂😂after😂😂psenders: {:?}",psenders);
 
+            }
         }
+
+        println!("😂😂😂😂 inbox senders : {:?}",self.inbox_senders.lock().unwrap());
 
 
         // 8) Build send map for the new drone

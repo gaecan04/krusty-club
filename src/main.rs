@@ -60,6 +60,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let shared_senders: Arc<Mutex<HashMap<(NodeId, NodeId), Sender<Packet>>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
+    let inbox_senders: Arc<Mutex<HashMap<NodeId, Sender<Packet>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
 
 
     /*let command_senders: Arc<Mutex<HashMap<NodeId, Sender<DroneCommand>>>> =
@@ -78,7 +80,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?));
     println!("✅ NetworkInitializer created");
 
-    let (receivers, senders,event_receiver) = initializer.lock().unwrap().setup_channels();
+    let (receivers, senders, event_receiver) = initializer
+        .lock()
+        .unwrap()
+        .setup_channels(inbox_senders.clone());
     println!("✅ setup_channels() completed");
 
 
@@ -114,6 +119,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         command_senders.clone(),
         host_senders.clone(),
         shared_senders.clone(),
+        inbox_senders.clone(), // ✅ Add here
+
     )));
 
     println!("✅ SimulationController created");
@@ -151,6 +158,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         command_senders.clone(),
         shared_senders.clone(),
         host_senders.clone(),
+        inbox_senders.clone(),
     )?;
     println!("✅ GUI exited cleanly");
 
@@ -173,6 +181,7 @@ fn run_gui_application(
     // ✅ ADD THIS TOO
     shared_senders: Arc<Mutex<HashMap<(NodeId, NodeId), Sender<Packet>>>>,
     host_senders: HashMap<NodeId, Sender<Packet>>, // ✅ sc->hosts
+    inbox_senders: Arc<Mutex<HashMap<NodeId, Sender<Packet>>>>,
 
 ) -> Result<(), Box<dyn Error>> {
 
@@ -202,6 +211,7 @@ fn run_gui_application(
                 command_senders.clone(), // ✅ ADD THIS TOO
                 shared_senders.clone(),
                 host_senders.clone(),
+                inbox_senders.clone(),
             )))
 
         }),

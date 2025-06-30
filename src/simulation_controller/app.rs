@@ -582,6 +582,8 @@ impl NetworkApp {
         command_senders: Arc<Mutex<HashMap<NodeId, Sender<DroneCommand>>>>, // ✅ ADD THIS
         shared_senders: Arc<Mutex<HashMap<(NodeId, NodeId), Sender<Packet>>>>,
         host_senders: HashMap<NodeId, Sender<Packet>>, // ✅ the sc-hosts hashmap
+        inbox_senders: Arc<Mutex<HashMap<NodeId, Sender<Packet>>>>,
+
 
     ) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::light());
@@ -607,20 +609,7 @@ impl NetworkApp {
 
 
         // Step 3: Add them to the controller constructor
-        let controller = SimulationController::new(
-            config.clone(),
-            event_sender.clone(),
-            command_sender.clone(),
-            drone_factory.clone(),
-            gui_input.clone(),
-            initializer.clone(),
-            packet_senders.clone(),
-            packet_receivers.clone(),
-            command_senders.clone(),
-            host_senders.clone(), // ✅ NEW ARG
-            shared_senders.clone(),
-
-        );
+        let controller = SimulationController::new(config.clone(), event_sender.clone(), command_sender.clone(), drone_factory.clone(), gui_input.clone(), initializer.clone(), packet_senders.clone(), packet_receivers.clone(), command_senders.clone(), host_senders.clone(), shared_senders.clone(),inbox_senders.clone() );
 
         let controller = Arc::new(Mutex::new(controller));
         app.simulation_controller = Some(controller.clone());

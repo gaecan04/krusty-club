@@ -733,6 +733,7 @@ impl NetworkInitializer {
 
     pub fn setup_channels(
         &mut self,
+        inbox_senders: Arc<Mutex<HashMap<NodeId, Sender<Packet>>>>
     ) -> (HashMap<NodeId, Receiver<Packet>>, HashMap<NodeId, HashMap<NodeId, Sender<Packet>>>, Receiver<DroneEvent>) {
         if let Some(ref arc) = self.shared_senders {
             println!("👋👋👋👋👋👋 INIT SHAREDSENDERS i: {:p}", Arc::as_ptr(arc));
@@ -757,6 +758,15 @@ impl NetworkInitializer {
             receivers.insert(id, rx);
             senders.insert(id, tx);
         }
+
+        {
+            let mut inbox_map = inbox_senders.lock().unwrap();
+            for (&id, tx) in &senders {
+                inbox_map.insert(id, tx.clone());
+            }
+        }
+
+
 
         let mut packet_senders_map = HashMap::new();
         let mut shared_senders_map = HashMap::new(); // 🔧 NEW fully-keyed map: (src, dst) -> Sender
