@@ -72,6 +72,7 @@ impl NetworkGraph {
         self.graph.update_edge(a_idx, b_idx, 1);
         self.graph.update_edge(b_idx, a_idx, 1);
     }
+
     pub fn increment_drop(&mut self, a: NodeId, b: NodeId) {
         if let (Some(&a_idx), Some(&b_idx)) = (self.node_indices.get(&a), self.node_indices.get(&b)) {
             if let Some(edge) = self.graph.find_edge(a_idx, b_idx) {
@@ -306,7 +307,6 @@ impl server {
                                 }
                             }
                         }
-
                     },
 
                 // 📡 Incoming network packet
@@ -357,6 +357,7 @@ impl server {
                                     _ => warn!("Host {} got unexpected shortcut type", self.id),
                                 }
                             }
+
                             Err(e) => {
                                 warn!("Failed to receive shortcut packet: {}", e);
                             }
@@ -550,15 +551,10 @@ impl server {
                     //addNODEID
                     self.initiate_network_discovery();
                 }
-
-
                 other => {
                     warn!("⚠ Unknown FloodRequired action: {}", other);
                 }
             }
-
-
-
         }
 
     }
