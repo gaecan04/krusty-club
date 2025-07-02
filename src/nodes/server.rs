@@ -471,7 +471,6 @@ impl server {
                             if self.id != drone_id && self.id != peer_id {
                                 info!("🟡 Server {} is not involved in link between {} and {}", self.id, drone_id, peer_id);
                                 self.initiate_network_discovery();
-                                return;
                             }
 
                             let to_remove = if self.id == drone_id { peer_id } else { drone_id };
@@ -505,29 +504,38 @@ impl server {
                                     }
                                 }
                             }
+                            /*
                             if self.id != a && self.id != b {
                                 info!("Server {} not involved in AddSender between {} and {}", self.id, a, b);
                                 self.initiate_network_discovery();
-                                return;
-                            }
+                                return
+                            }*/
                             let peer = if self.id == a { b } else { a };
-                            if self.packet_sender.contains_key(&peer) {
-                                info!("✅ Peer {} already exists in packet_sender.", peer);
-                            } else if let Some(shared) = &self.shared_senders {
-                                if let Ok(map) = shared.lock() {
-                                    if let Some(sender_to_peer) = map.get(&(self.id, peer)) {
-                                        self.packet_sender.insert(peer, sender_to_peer.clone());
-                                        info!("⚙️⚙️⚙️⚙️ Inserted sender from {} to {} into packet_sender ⚙️⚙️⚙️⚙️", self.id, peer);
 
-                                        let my_type = self.network_graph.node_types.get(&self.id).copied().unwrap_or(NodeType::Server);
-                                        let peer_type = self.network_graph.node_types.get(&peer).copied().unwrap_or(NodeType::Drone);
-                                        self.network_graph.add_link(self.id, my_type, peer, peer_type);
-                                    } else {
-                                        warn!("❌❌❌ shared_senders has no sender for ({}, {}) ❌❌❌", self.id, peer);
+                            let my_type = self.network_graph.node_types.get(&a).copied().unwrap_or(NodeType::Drone);
+                            let peer_type = self.network_graph.node_types.get(&b).copied().unwrap_or(NodeType::Drone);
+                            self.network_graph.add_link(a, my_type, b, peer_type);
+
+                            // 🧠 Now, only add sender to `packet_sender` if we are involved
+                            if self.id == a || self.id == b {
+                                let peer = if self.id == a { b } else { a };
+
+                                if self.packet_sender.contains_key(&peer) {
+                                    info!("✅ Peer {} already exists in packet_sender.", peer);
+                                } else if let Some(shared) = &self.shared_senders {
+                                    if let Ok(map) = shared.lock() {
+                                        if let Some(sender_to_peer) = map.get(&(self.id, peer)) {
+                                            self.packet_sender.insert(peer, sender_to_peer.clone());
+                                            info!("⚙️ Inserted sender from {} to {} into packet_sender", self.id, peer);
+                                        } else {
+                                            warn!("❌ shared_senders has no sender for ({}, {})", self.id, peer);
+                                        }
                                     }
                                 }
                             }
+
                             self.initiate_network_discovery();
+                            self.network_graph.print_graph();
                         } else {
                             warn!("⚠ Could not parse node IDs in AddSender message: {:?}", parts);
                         }
@@ -535,7 +543,73 @@ impl server {
                         warn!("⚠ Malformed AddSender message. Expected format: AddSender::<a>::<b>");
                     }
                 }
+                _ if stripped.starts_with("SpawnDrone::") => { //format is SpawnDrone::NodeId::NeighboursNodedIds
+                    let parts: Vec<&str> = stripped.split("::").collect();
+                    if parts.len() == 3 {
+                        if let Ok(drone_id) = parts[1].parse::<NodeId>() {
+                            let peers_result: Result<Vec<NodeId>, _> = serde_json::from_str(parts[2]);
+                            match peers_result {
+                                Ok(peer_list) => {
+                                    // Always update shared_senders
+                                    if let Some(shared) = &self.shared_senders {
+                                        if let Ok(mut map) = shared.lock() {
+                                            for &peer in &peer_list {
+                                                if let Some(sender) = self.packet_sender.get(&peer) {
+                                                    map.entry((drone_id, peer)).or_insert_with(|| sender.clone());
+                                                    map.entry((peer, drone_id)).or_insert_with(|| sender.clone());
+                                                }
+                                            }
+                                        }
+                                    }
 
+                                    // If this server is not one of the peers, do not participate
+                                    if !peer_list.contains(&self.id) {
+                                        info!("Server {} not involved in SpawnDrone({}, {:?})", self.id, drone_id, peer_list);
+                                    }
+
+                                    // Register the new drone type in the graph
+                                    self.network_graph.node_types.entry(drone_id).or_insert(NodeType::Drone);
+
+                                    // Insert the sender into packet_sender only if not already present
+                                    if !self.packet_sender.contains_key(&drone_id) {
+                                        if let Some(shared) = &self.shared_senders {
+                                            if let Ok(map) = shared.lock() {
+                                                let key = (self.id, drone_id);
+                                                if let Some(sender_to_drone) = map.get(&key) {
+                                                    self.packet_sender.insert(drone_id, sender_to_drone.clone());
+                                                    info!("✅ Inserted new drone {} into packet_sender", drone_id);
+                                                } else {
+                                                    warn!("❌❌❌ shared_senders has no entry for ({}, {}) ❌❌❌", self.id, drone_id);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // Update network graph links
+                                    for &peer in &peer_list {
+                                        if self.network_graph.node_types.contains_key(&peer) {
+                                            let peer_type = self.network_graph.node_types[&peer];
+                                            self.network_graph.add_link(drone_id, NodeType::Drone, peer, peer_type);
+                                        } else {
+                                            warn!("⚠️ Peer {} does not exist in node_types. Skipping link to drone {}", peer, drone_id);
+                                        }
+                                    }
+                                    self.initiate_network_discovery();
+                                    self.network_graph.print_graph();
+                                }
+                                Err(e) => {
+                                    warn!("❌❌❌❌ Failed to parse peer list in SpawnDrone: {} ❌❌❌❌", e);
+                                }
+                            }
+                        } else {
+                            warn!("⚠ Could not parse drone ID in SpawnDrone message: {:?}", parts[1]);
+                        }
+                    } else {
+                        warn!("⚠ Malformed SpawnDrone message. Expected format: SpawnDrone::<drone_id>::<[peer1, peer2]>");
+                    }
+                    println!("👿👿👿👿👿👿PACKET SENDER OF SERVER {:?}", self.packet_sender);
+                }
+
+                /*
                 _ if stripped.starts_with("SpawnDrone::") => {
                     let parts: Vec<&str> = stripped.split("::").collect();
                     if parts.len() == 3 {
@@ -557,7 +631,7 @@ impl server {
 
                                     if !peer_list.contains(&self.id) {
                                         info!("Server {} not involved in SpawnDrone({}, {:?})", self.id, drone_id, peer_list);
-                                        return;
+                                        continue;
                                     }
                                     self.network_graph.node_types.insert(drone_id, NodeType::Drone);
 
@@ -588,10 +662,11 @@ impl server {
                         warn!("⚠ Malformed SpawnDrone message. Expected format: SpawnDrone::<drone_id>::<[peer1, peer2]>");
                     }
                     println!("👿👿👿👿👿👿PACKET SENDER OF SERVER {:?}",self.packet_sender);
-                }
+                }*/
                 _ if stripped.starts_with("Crash") => {
                     //addNODEID
                     let parts: Vec<&str> = stripped.split("::").collect();
+                    info!("Received crash command!");
                     if parts.len() == 2 {
                         if let Ok(drone_id) = parts[1].parse::<NodeId>() {
                             info!("Detected crash node {}! 💥💥💥💥💥", drone_id);
