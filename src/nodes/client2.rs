@@ -17,7 +17,7 @@ use petgraph::algo::dijkstra;
 use petgraph::data::Build;
 use petgraph::prelude::EdgeRef;
 use petgraph::Undirected;
-use wg_2024::packet::NodeType::{Client, Server};
+use wg_2024::packet::NodeType::{Client,Server};
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
 use std::sync::Arc;
@@ -57,7 +57,7 @@ pub struct MyClient{
     received_packets: HashMap<u64 , Vec<u8>>,
     seen_flood_ids : HashSet<(u64 , NodeId)>,
     simulation_log: Arc<Mutex<Vec<String>>>,
-    pub shared_senders: Option<Arc<Mutex<HashMap<NodeId, Sender<Packet>>>>>,
+    pub shared_senders: Option<Arc<Mutex<HashMap<(NodeId, NodeId), Sender<Packet>>>>>,
     shortcut_receiver: Option<Receiver<Packet>>, // added to receive packets from sc (shortcut)
 
 }
@@ -67,7 +67,7 @@ impl MyClient {
         id: NodeId,
         packet_recv: Receiver<Packet>,
         packet_send: HashMap<NodeId, Sender<Packet>>,
-        shared_senders: Option<Arc<Mutex<HashMap<NodeId, Sender<Packet>>>>>,
+        shared_senders: Option<Arc<Mutex<HashMap<(NodeId, NodeId), Sender<Packet>>>>>,
         shortcut_receiver: Option<Receiver<Packet>>, // added to receive packets from sc (shortcut)
 
     ) -> Self {
@@ -125,10 +125,10 @@ impl MyClient {
                             .expect("Failed to restart application");
 
                         // Give the child time to start and take over
-                        std::thread::sleep(Duration::from_secs(1));
+                        thread::sleep(Duration::from_secs(1));
 
                         // Cleanup: remove lock file so future restarts work
-                        let _ = std::fs::remove_file(lock_path);
+                        let _ = fs::remove_file(lock_path);
 
                         // Exit old instance
                         exit(0);
@@ -137,7 +137,7 @@ impl MyClient {
                     Err(ref e) if e.kind() == ErrorKind::AlreadyExists => {
                         warn!("⚠ Restart already in progress (lock file present). Skipping restart.");
                         // Sleep to avoid respamming restarts
-                        std::thread::sleep(Duration::from_secs(2));
+                        thread::sleep(Duration::from_secs(2));
                     }
 
                     Err(e) => {
@@ -146,7 +146,9 @@ impl MyClient {
                 }
             }
         }
-    }    fn inner_run(&mut self, gui_input: SharedGuiInput) {
+    }
+
+    fn inner_run(&mut self, gui_input: SharedGuiInput) {
         info!("Client {} starting run loop", self.id);
         self.send_flood_request();
         loop {
@@ -183,6 +185,12 @@ impl MyClient {
                     info!("Packet channel closed.");
                 }
             },
+            recv(self.shortcut_receiver.as_ref().unwrap()) -> packet => {
+                    if let Ok(packet) = packet {
+                        println!("Client {} received shortcut packet: {:?}", self.id, packet);
+                        self.process_packet(packet);
+                    }
+                }
             default => {
                 thread::sleep(Duration::from_millis(1));
             }
@@ -328,10 +336,11 @@ impl MyClient {
     }
 
     fn process_nack(&mut self, nack: &Nack, packet: &mut Packet) {
+        let message_list = self.sent_messages.clone();
         match nack.nack_type {
             NackType::Dropped => {
                 self.increase_cost(packet.routing_header.hops[0]); // to properly use our pathfinding algorithms the links between the drones are weighted based on the number of "Dropped" Nacks we receive from each drone
-                if let Some(fragments) = self.sent_messages.get(&packet.session_id) {
+                if let Some(fragments) = message_list.get(&packet.session_id) {
                     for fragment in fragments {
                         if fragment.fragment_index == nack.fragment_index {
                             info!("Fragment found");
@@ -353,8 +362,8 @@ impl MyClient {
             }
             NackType::ErrorInRouting(node_id) => {
                 // since the error in routing most likely implies that a drone has crashed we remove the drone and its edges from the network, if the drone hasn't crashed we just add it again during the flooding
-                self.node_map.remove(&node_id);
-                self.remove_all_edges_with_node(node_id);
+                let crash_index = self.node_map.remove(&node_id).unwrap().0;
+                self.remove_all_edges_with_node(crash_index);
                 self.send_flood_request();
             }
             _ => {
@@ -523,6 +532,144 @@ impl MyClient {
         let chatting_status = *CHATTING_STATUS.lock().unwrap();
         println!("Client {} processing GUI command '{}'", self.id, command_string.clone());
         let tokens: Vec<&str> = command_string.trim().split("::").collect();
+        if tokens.len() >= 2 && tokens[0] == "[FloodRequired]" {
+            let action = tokens[1..].join("::");
+            println!("Client {} received FLOOD REQUIRED command due to action: {}.", self.id, action);
+            self.log(format!("Client {} received a call to flooding the network", self.id));
+            if let Some(parts) = action.strip_prefix("AddSender::") {
+                let shared_senders = self.shared_senders.clone();
+                let nodes: Vec<&str> = parts.splitn(2, "::").collect();
+                if nodes.len() == 2 {
+                    if let (Ok(a), Ok(b)) = (nodes[0].parse::<NodeId>(), nodes[1].parse::<NodeId>()) {
+                        if self.id == a || self.id == b {
+                            let peer = if self.id == a { b } else { a };
+                            if let Some(shared) = &shared_senders {
+                                if let Ok(map) = shared.lock() {
+                                    if let Some(sender) = map.get(&(self.id, peer)) {
+                                        self.packet_send.insert(peer, sender.clone());
+                                        let self_idx = (*self.node_map.get(&self.id).unwrap_or(&(NodeIndex::default(), NodeType::Drone))).0;
+                                        let maybe_node_index: Option<&NodeIndex> = self.node_map.get(&peer).map(|(index, _)| index);
+                                        let peer_idx = if let Some(idx) = maybe_node_index {
+                                            *idx
+                                        } else {
+                                            let idx = self.add_node_no_duplicate(&mut (self.net_graph.clone()), &mut (self.node_map.clone()) , peer , NodeType::Drone);
+                                            //self.node_map.insert(peer, (idx, NodeType::Drone));
+                                            idx
+                                        };
+                                        self.add_edge_no_duplicate(&mut (self.net_graph.clone()), self_idx , peer_idx, 1);
+                                        println!("Client {} added link to {} via AddSender", self.id, peer);
+                                    }
+                                }
+                                self.send_flood_request();
+                            }
+                        }
+                    }
+                }
+                info!("retunring from addsender");
+                return Ok("NO_CHAT_COMMAND".to_string());
+            }
+
+            if let Some(parts) = action.strip_prefix("RemoveSender::") {
+                let nodes: Vec<&str> = parts.splitn(2, "::").collect();
+                if nodes.len() == 2 {
+                    if let (Ok(a), Ok(b)) = (nodes[0].parse::<NodeId>(), nodes[1].parse::<NodeId>()) {
+                        if self.id == a || self.id == b {
+                            let peer = if self.id == a { b } else { a };
+                            self.packet_send.remove(&peer);
+                            if let (a_idx, b_idx) = ((*self.node_map.get(&a).unwrap_or(&(NodeIndex::default(), NodeType::Drone))).0, (*self.node_map.get(&b).unwrap_or(&(NodeIndex::default(), NodeType::Drone))).0) {
+                                if let Some(edge) = self.net_graph.find_edge(a_idx, b_idx).or_else(|| self.net_graph.find_edge(b_idx, a_idx)) {
+                                    self.net_graph.remove_edge(edge);
+                                    println!("Client {} removed link to {} via RemoveSender", self.id, peer);
+                                }
+
+                            }
+                        }
+                        self.send_flood_request();
+
+                    }
+                }
+                info!("returning from remove sender");
+                return Ok("NO_CHAT_COMMAND".to_string());
+            }
+
+            if let Some(parts) = action.strip_prefix("SpawnDrone::") {
+                let shared_senders = self.shared_senders.clone();
+                let components: Vec<&str> = parts.splitn(2, "::").collect();
+                if components.len() == 2 {
+                    if let Ok(drone_id) = components[0].parse::<NodeId>() {
+                        if let Ok(peer_vec) = serde_json::from_str::<Vec<NodeId>>(components[1]) {
+                            println!("Client {} parsing SpawnDrone with id {} and peers {:?}", self.id, drone_id, peer_vec);
+                            // Instead of checking if self.id is in peer_vec, check if there’s a sender available for this drone
+                            if let Some(shared) = &shared_senders {
+                                println!("shared senders found");
+                                if let Ok(map) = shared.lock() {
+                                    println!("map found");
+
+                                    if map.contains_key(&(drone_id, self.id)) || map.contains_key(&(self.id, drone_id)) {
+                                        // Proceed with insertion
+
+
+                                        for ((from, to), sender) in map.iter() {
+                                            if *from == self.id && *to == drone_id {
+                                                self.packet_send.insert(drone_id, sender.clone());
+                                                println!("Client {} added sender to drone {} (from shared_senders)", self.id, drone_id);
+                                            }
+                                            if *to == self.id && *from == drone_id {
+                                                self.packet_send.insert(drone_id, sender.clone());
+                                                println!("Client {} added sender from drone {} (from shared_senders)", self.id, drone_id);
+                                            }
+
+
+
+                                        }
+                                        let idx = self.add_node_no_duplicate(&mut (self.net_graph.clone()), &mut (self.node_map.clone()) , drone_id , NodeType::Drone);
+                                        //self.node_map.insert(drone_id, (idx, NodeType::Drone));
+                                    }
+                                }
+                            }
+                            self.send_flood_request();
+
+                        } else {
+                            println!("Client {} failed to parse peer list in SpawnDrone: {}", self.id, components[1]);
+                        }
+                    } else {
+                        println!("Client {} failed to parse drone ID in SpawnDrone: {}", self.id, components[0]);
+                    }
+                } else {
+                    println!("Client {} received malformed SpawnDrone message: {}", self.id, parts);
+                }
+                info!("returning from spawn drone");
+                return Ok("NO_CHAT_COMMAND".to_string());
+            }
+
+            if action.starts_with("Crash::") {
+                let parts: Vec<&str> = action.split("::").collect();
+                if parts.len() == 2 {
+                    if let Ok(crashed_id) = parts[1].parse::<NodeId>() {
+                        println!("Client {} received crash signal for node {}. Cleaning up and triggering rediscovery.", self.id, crashed_id);
+                        self.packet_send.remove(&crashed_id);
+
+                        let maybe_node_index: Option<NodeIndex> = self.node_map.remove(&crashed_id).map(|(index, _)| index);
+                        if let Some(index) = maybe_node_index {
+                            self.net_graph.remove_node(index);
+                            self.remove_all_edges_with_node(index);
+                            println!("Client {} removed node {} from graph.", self.id, crashed_id);
+                        } else {
+                            println!("Client {} received crash for unknown node {}.", self.id, crashed_id);
+                        }
+                        self.send_flood_request();
+                    } else {
+                        println!("Client {} received invalid Crash ID: {}", self.id, parts[1]);
+                    }
+                } else {
+                    println!("Client {} received malformed Crash command: {}", self.id, action);
+                }
+                return Ok("NO_CHAT_COMMAND".to_string());
+            }
+            info!("returning from crash");
+            self.send_flood_request();
+            return Ok("NO_CHAT_COMMAND".to_string());
+        }
         match tokens.as_slice() {
             ["[Login]", server_id_str] => {
                 let server_id: NodeId = match server_id_str.parse() {
@@ -538,12 +685,12 @@ impl MyClient {
             },
             ["[Logout]"] => {
                 if chatting_status.0 == true { //we make sure to not log out while in the middle of a chat
-                    Err(Box::new(io::Error::new(io::ErrorKind::Interrupted, "You are still in a chat with another user. End the chat before logging out")))
+                    Err(Box::new(io::Error::new(ErrorKind::Interrupted, "You are still in a chat with another user. End the chat before logging out")))
                 } else if chatting_status.2 != 0 {
                     self.log(format!("Logout from client {}",self.id));
                     Ok(command_string)
                 } else { //if we are yet to log in to any server we can log out of it
-                    Err(Box::new(io::Error::new(io::ErrorKind::NotFound, "You have yet to login to any server")))
+                    Err(Box::new(io::Error::new(ErrorKind::NotFound, "You have yet to login to any server")))
                 }
             },
             ["[ClientListRequest]"] => {
@@ -568,7 +715,7 @@ impl MyClient {
                     self.change_chat_status(true , peer_id ,chatting_status.2);
                     Ok(command_string)
                 } else {
-                    Err(Box::new(io::Error::new(io::ErrorKind::Interrupted, "You are already in a chat with another user.")))
+                    Err(Box::new(io::Error::new(ErrorKind::Interrupted, "You are already in a chat with another user.")))
                 }
             },
             ["[HistoryRequest]", personal_id, peer_id] => {
@@ -589,7 +736,7 @@ impl MyClient {
                     self.change_chat_status(false , 0 , chatting_status.2);
                     Ok(command_string)
                 } else {
-                    Err(Box::new(io::Error::new(io::ErrorKind::Interrupted, "You are not chatting with any user.")))
+                    Err(Box::new(io::Error::new(ErrorKind::Interrupted, "You are not chatting with any user.")))
                 }
             },
             ["[MediaBroadcast]", media_name, encoded_media] => {
@@ -603,14 +750,9 @@ impl MyClient {
                 info!("Requesting media list to server: {}" , chatting_status.2);
                 Ok(command_string)
             },
-            ["[FloodRequired]",action] => {
-                info!("Starting a flood for {}", action);
-                self.send_flood_request();
-                Ok("NO_COMMAND".to_string())
-            },
             _ => {
                 println!("Unknown format");
-                Err(Box::new(io::Error::new(io::ErrorKind::NotFound, "Unknown format")))
+                Err(Box::new(io::Error::new(ErrorKind::NotFound, "Unknown format")))
             },
         }
     }
@@ -673,15 +815,15 @@ impl MyClient {
     }
 
 
-    fn remove_all_edges_with_node(&mut self, crash_id: NodeId) {
-        let index = *(self.node_map.get(&crash_id).unwrap());
-        let edges_to_remove: Vec<_> = self.net_graph.edges(index.0).filter_map(|edge_ref| {
+    fn remove_all_edges_with_node(&mut self, crash_index: NodeIndex) {
+        //let index:NodeIndex = (*self.node_map.get(&crash_id).unwrap()).0;
+        let edges_to_remove: Vec<_> = self.net_graph.edges(crash_index).filter_map(|edge_ref| {
             // Get the source and target of the edge
             let source = edge_ref.source();
             let target = edge_ref.target();
 
             // If either endpoint matches our target node, keep this edge
-            if source == index.0 || target == index.0 {
+            if source == crash_index || target == crash_index {
                 Some(edge_ref.id())
             } else {
                 None
@@ -693,96 +835,121 @@ impl MyClient {
         }
     }
 
-    fn best_path(&self, source: NodeId, target: NodeId) -> Option<Vec<NodeId>> {
+    fn best_path(&mut self, source: NodeId, target: NodeId) -> Option<Vec<NodeId>> {
         use std::collections::{BinaryHeap, HashMap};
         use std::cmp::Reverse;
+        use petgraph::visit::EdgeRef;
+        use std::sync::{Arc, Mutex};
 
-        // Handle edge cases
+        // Edge case: invalid target
         if target == 0 {
             return None;
         }
 
+        // Return early if source and target are the same
         if source == target {
             return Some(vec![source]);
         }
+        let shared_senders = self.shared_senders.clone();
+        // --- Sync net_graph with shared_senders ---
+        if let Some(shared) = &shared_senders {
+            let map_guard = match shared.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    eprintln!("⚠ Mutex for shared_senders was poisoned — recovering...");
+                    let recovered = poisoned.into_inner();
+                    // Fix self.shared_senders with the recovered map
+                    self.shared_senders = Some(Arc::new(Mutex::new(recovered.clone())));
+                    // Try locking again
+                    match self.shared_senders.as_ref().unwrap().lock() {
+                        Ok(guard) => guard,
+                        Err(_) => {
+                            eprintln!("❌ Failed to recover shared_senders after poison");
+                            return None;
+                        }
+                    }
+                }
+            };
 
-        // Get node indices for source and target
-        let source_idx = self.node_map.get(&source)?.0;
-        let target_idx = self.node_map.get(&target)?.0;
-
-        // Initialize distances and predecessors
-        let mut distances: HashMap<NodeIndex, u32> = HashMap::new();
-        let mut predecessors: HashMap<NodeIndex, NodeIndex> = HashMap::new();
-        let mut heap = BinaryHeap::new();
-
-        // Set all distances to infinity except source
-        for node_idx in self.net_graph.node_indices() {
-            distances.insert(node_idx, u32::MAX);
-        }
-        distances.insert(source_idx, 0);
-        heap.push(Reverse((0u32, source_idx)));
-
-        // Dijkstra's algorithm
-        while let Some(Reverse((current_distance, current_node))) = heap.pop() {
-            // Skip if we've already processed this node with a better distance
-            if current_distance > distances[&current_node] {
-                continue;
+            let mut to_remove = Vec::new();
+            for edge in self.net_graph.edge_references() {
+                let a_id = self.net_graph[edge.source()];
+                let b_id = self.net_graph[edge.target()];
+                if !map_guard.contains_key(&(a_id, b_id)) && !map_guard.contains_key(&(b_id, a_id)) {
+                    to_remove.push((edge.source(), edge.target()));
+                }
             }
 
-            // Stop early if we reached the target
-            if current_node == target_idx {
-                break;
-            }
-
-            // Process all neighbors
-            for edge in self.net_graph.edges(current_node) {
-                let neighbor_idx = edge.target();
-                let edge_weight = *edge.weight() as u32;
-
-                // Find the NodeId for this neighbor to check its type
-                let neighbor_id = self.node_map.iter()
-                    .find(|(_, &(idx, _))| idx == neighbor_idx)
-                    .map(|(id, _)| *id);
-
-                if let Some(neighbor_node_id) = neighbor_id {
-                    // Check if this neighbor is a Server node
-                    let is_server = if let Some(&(_, node_type)) = self.node_map.get(&neighbor_node_id) {
-                        node_type == NodeType::Server
-                    } else {
-                        false
-                    };
-
-                    // Skip Server nodes unless they are our target
-                    if is_server && neighbor_node_id != target {
-                        continue;
-                    }
-
-                    let new_distance = current_distance.saturating_add(edge_weight);
-
-                    if new_distance < distances[&neighbor_idx] {
-                        distances.insert(neighbor_idx, new_distance);
-                        predecessors.insert(neighbor_idx, current_node);
-                        heap.push(Reverse((new_distance, neighbor_idx)));
-                    }
+            for (src, dst) in to_remove {
+                if let Some(edge_idx) = self.net_graph.find_edge(src, dst) {
+                    self.net_graph.remove_edge(edge_idx);
                 }
             }
         }
 
-        // Check if target is reachable
-        if distances.get(&target_idx) == Some(&u32::MAX) {
+        // --- Get node indices ---
+        let source_idx = self.node_map.get(&source)?.0;
+        let target_idx = self.node_map.get(&target)?.0;
+
+        // --- Initialize distances and queue ---
+        let mut distances: HashMap<NodeIndex, u32> = self.net_graph.node_indices()
+            .map(|idx| (idx, u32::MAX))
+            .collect();
+        let mut predecessors: HashMap<NodeIndex, NodeIndex> = HashMap::new();
+        let mut heap = BinaryHeap::new();
+
+        distances.insert(source_idx, 0);
+        heap.push(Reverse((0, source_idx)));
+
+        // --- Dijkstra's algorithm ---
+        while let Some(Reverse((current_dist, current_node))) = heap.pop() {
+            if current_dist > distances[&current_node] {
+                continue;
+            }
+
+            if current_node == target_idx {
+                break;
+            }
+
+            for edge in self.net_graph.edges(current_node) {
+                let neighbor_idx = edge.target();
+                let weight = *edge.weight() as u32;
+
+                // Resolve NodeId for neighbor
+                let neighbor_id = self.node_map.iter()
+                    .find(|(_, &(idx, _))| idx == neighbor_idx)
+                    .map(|(id, _)| *id)?;
+
+                let is_server = matches!(
+                self.node_map.get(&neighbor_id),
+                Some(&(_, NodeType::Server))
+            );
+
+                if is_server && neighbor_id != target {
+                    continue;
+                }
+
+                let alt_dist = current_dist.saturating_add(weight);
+                if alt_dist < distances[&neighbor_idx] {
+                    distances.insert(neighbor_idx, alt_dist);
+                    predecessors.insert(neighbor_idx, current_node);
+                    heap.push(Reverse((alt_dist, neighbor_idx)));
+                }
+            }
+        }
+
+        // --- Reconstruct path ---
+        if distances.get(&target_idx)? == &u32::MAX {
             return None;
         }
 
-        // Reconstruct path from target back to source
         let mut path = Vec::new();
         let mut current = target_idx;
 
         loop {
-            // Find NodeId for current NodeIndex
             let node_id = self.node_map.iter()
                 .find(|(_, &(idx, _))| idx == current)
                 .map(|(id, _)| *id)?;
-
             path.push(node_id);
 
             if current == source_idx {
@@ -792,9 +959,7 @@ impl MyClient {
             current = *predecessors.get(&current)?;
         }
 
-        // Reverse to get path from source to target
         path.reverse();
-
         Some(path)
     }
 
@@ -954,7 +1119,7 @@ impl MyClient {
     fn open_with_system(file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         #[cfg(target_os = "windows")]
         {
-            std::process::Command::new("cmd")
+            Command::new("cmd")
                 .args(["/C", "start", "", file_path])
                 .spawn()?;
         }
@@ -974,5 +1139,5 @@ impl MyClient {
         }
 
         Ok(())
-    }
+        }
 }

@@ -886,13 +886,14 @@ impl NetworkInitializer {
                     // client2
                     thread::spawn(move || {
                         //println!("client2 spawned");
-                       /* let mut cl2 = client2::MyClient::new(client_id, client_rx, senders);
+                        let mut cl2 = client2::MyClient::new(client_id, client_rx, senders, None,Some(shortcut_rx));
+                        cl2.shared_senders= Some(shared_senders.clone());
                         cl2.attach_log(log_clone);
-                        cl2.run(gui_clone);*/
-                        let mut cl1 = client1::MyClient::new(client_id, client_rx, senders, HashMap::new(), None, HashSet::new(), None,Some(shortcut_rx));
+                        cl2.run(gui_clone);
+                        /*let mut cl1 = client1::MyClient::new(client_id, client_rx, senders, HashMap::new(), None, HashSet::new(), None,Some(shortcut_rx));
                         cl1.shared_senders= Some(shared_senders.clone());
                         cl1.attach_log(log_clone);
-                        cl1.run(gui_clone);
+                        cl1.run(gui_clone);*/
                     });
                 } else {
                     // client1
@@ -908,14 +909,10 @@ impl NetworkInitializer {
                 if i % 2 == 0 {
                     // client2 for even-indexed clients
                     thread::spawn(move || {
-                        //println!("client2 spawned");
-                        /*let mut cl2 = client2::MyClient::new(client_id, client_rx, senders);
+                        let mut cl2 = client2::MyClient::new(client_id, client_rx, senders, None,Some(shortcut_rx));
+                        cl2.shared_senders= Some(shared_senders.clone());
                         cl2.attach_log(log_clone);
-                        cl2.run(gui_clone);*/
-                        let mut cl1 = client1::MyClient::new(client_id, client_rx, senders, HashMap::new(), None, HashSet::new(), None,Some(shortcut_rx));
-                        cl1.shared_senders= Some(shared_senders.clone());
-                        cl1.attach_log(log_clone);
-                        cl1.run(gui_clone);
+                        cl2.run(gui_clone);
                     });
                 } else {
                     // client1 for odd-indexed clients
