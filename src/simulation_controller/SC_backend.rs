@@ -775,9 +775,6 @@ impl SimulationController {
     }
 
     pub fn add_link(&mut self, a: NodeId, b: NodeId) -> Result<(), Box<dyn std::error::Error>> {
-        println!("🤴🏻❤️‍🔥⚜️🦅🦁🤴🏻❤️‍🔥⚜️🦅🦁command_senders");
-        println!("      {:?}",self.command_senders.lock().unwrap());
-
         // 1. Validate that nodes exist
         if self.get_node_type(a) == Some(NodeType::Drone) {
             if !self.command_senders.lock().unwrap().contains_key(&a) {
@@ -798,7 +795,23 @@ impl SimulationController {
             return Err(format!("No packet sender for node {}", b).into());
         }
 
-        println!("🤎🧸🍂🤎🧸🍂🤎🧸🍂🤎🧸🍂Adding {} and {} detected",a,b);
+        // 2. Constraint: Client should be connected to at most 2 drones
+        for &(client_id, drone_id) in &[(a, b), (b, a)] {
+            if self.get_node_type(client_id) == Some(NodeType::Client)
+                && self.get_node_type(drone_id) == Some(NodeType::Drone)
+            {
+                let neighbors = self.network_graph.get(&client_id).cloned().unwrap_or_default();
+                let drone_neighbors = neighbors
+                    .iter()
+                    .filter(|id| self.get_node_type(**id) == Some(NodeType::Drone))
+                    .count();
+
+                if drone_neighbors >= 2 {
+                    println!("🚨 client must be connected to at most 2 drones");
+                    return Err(format!("Client {} already has 2 drone connections", client_id).into());
+                }
+            }
+        }
 
         // 3. Clone packet senders (used to send packets to these nodes)
         let (packet_to_a, packet_to_b) = {
@@ -834,7 +847,6 @@ impl SimulationController {
             (packet_to_a, packet_to_b)
         }; // ← Lock is dropped here!
 
-        println!("🤎🧸🍂🤎🧸🍂🤎🧸🍂🤎🧸🍂Adding channel detected");
 
         // 4. Send AddSender to each node
         if self.get_node_type(a) == Some(NodeType::Drone) {
@@ -851,7 +863,6 @@ impl SimulationController {
             }
         }
 
-        println!("🤎🧸🍂🤎🧸🍂🤎🧸🍂🤎🧸🍂Adding addsender finished");
 
         // 5. Update the internal network graph
         self.network_graph.entry(a).or_default().insert(b);
@@ -888,10 +899,8 @@ impl SimulationController {
             }
         }
 
-        println!("🤎🧸🍂🤎🧸🍂🤎🧸🍂🤎🧸🍂update network finished");
 
         // 5.5) ✅ Insert into shared_senders
-        println!("🤎🧸🍂 111");
 
         // Now safe to lock again since previous locks are dropped
         {

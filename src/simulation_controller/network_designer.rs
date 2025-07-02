@@ -211,37 +211,45 @@ impl NetworkRenderer {
         if let Some(config) = &self.config {
             let config = config.lock().unwrap();
 
-            // Clear existing edges and rebuild them based on config
             self.edges.clear();
 
-            // Add drone connections
             for drone in &config.drone {
                 if let Some(&source_index) = self.node_id_to_index.get(&drone.id) {
+                    if !self.nodes[source_index].active { continue; }
+
                     for &target_id in &drone.connected_node_ids {
                         if let Some(&target_index) = self.node_id_to_index.get(&target_id) {
-                            self.edges.push((source_index, target_index));
+                            if self.nodes[target_index].active {
+                                self.edges.push((source_index, target_index));
+                            }
                         }
                     }
                 }
             }
 
-            // Add client connections
             for client in &config.client {
                 if let Some(&source_index) = self.node_id_to_index.get(&client.id) {
+                    if !self.nodes[source_index].active { continue; }
+
                     for &target_id in &client.connected_drone_ids {
                         if let Some(&target_index) = self.node_id_to_index.get(&target_id) {
-                            self.edges.push((source_index, target_index));
+                            if self.nodes[target_index].active {
+                                self.edges.push((source_index, target_index));
+                            }
                         }
                     }
                 }
             }
 
-            // Add server connections
             for server in &config.server {
                 if let Some(&source_index) = self.node_id_to_index.get(&server.id) {
+                    if !self.nodes[source_index].active { continue; }
+
                     for &target_id in &server.connected_drone_ids {
                         if let Some(&target_index) = self.node_id_to_index.get(&target_id) {
-                            self.edges.push((source_index, target_index));
+                            if self.nodes[target_index].active {
+                                self.edges.push((source_index, target_index));
+                            }
                         }
                     }
                 }
@@ -746,86 +754,53 @@ impl NetworkRenderer {
         // Add edges
         for drone in &config.drone {
             if let Some(&source_index) = self.node_id_to_index.get(&drone.id) {
+                if !self.nodes[source_index].active { continue; }
+
                 for &target_id in &drone.connected_node_ids {
                     if let Some(&target_index) = self.node_id_to_index.get(&target_id) {
-                        self.edges.push((source_index, target_index));
+                        if self.nodes[target_index].active {
+                            self.edges.push((source_index, target_index));
+                        }
                     }
                 }
             }
+
         }
 
 
         for client in &config.client {
             if let Some(&source_index) = self.node_id_to_index.get(&client.id) {
+                if !self.nodes[source_index].active { continue; }
+
                 for &target_id in &client.connected_drone_ids {
                     if let Some(&target_index) = self.node_id_to_index.get(&target_id) {
-                        self.edges.push((source_index, target_index));
+                        if self.nodes[target_index].active {
+                            self.edges.push((source_index, target_index));
+                        }
                     }
                 }
             }
+
         }
 
         for server in &config.server {
             if let Some(&source_index) = self.node_id_to_index.get(&server.id) {
+                if !self.nodes[source_index].active { continue; }
+
                 for &target_id in &server.connected_drone_ids {
                     if let Some(&target_index) = self.node_id_to_index.get(&target_id) {
-                        self.edges.push((source_index, target_index));
+                        if self.nodes[target_index].active {
+                            self.edges.push((source_index, target_index));
+                        }
                     }
                 }
             }
+
         }
 
 
     }
 
-
-    // Add a new node to the network
-    // "I don't know neighbors, just drop node somewhere."
-   /* fn add_new_node(&mut self, node_type: NodeType) -> usize {
-
-        // Find the next available ID
-        let max_id = self.nodes.iter().map(|n| n.id).max().unwrap_or(0);
-        let new_id = max_id + 1;
-
-        // Create the new node at the next available position
-        let new_node = match node_type {
-            NodeType::Drone => Node::drone(new_id, self.next_position_x, self.next_position_y,0.5),
-            NodeType::Server => Node::server(new_id, self.next_position_x, self.next_position_y),
-            NodeType::Client => Node::client(new_id, self.next_position_x, self.next_position_y),
-
-        };
-
-
-
-        // Add the node to our list
-        self.nodes.push(new_node);
-
-        // Update the lookup map
-        self.node_id_to_index.insert(new_id as NodeId, self.nodes.len() - 1);
-
-        // Update the next position for subsequent nodes
-        self.next_position_x += 50.0;
-        if self.next_position_x > 550.0 {
-            self.next_position_x = 50.0;
-            self.next_position_y += 50.0;
-        }
-
-        // Update the config if available
-        if let Some(config) = &self.config {
-            let mut config = config.lock().unwrap();
-
-            match node_type {
-                NodeType::Drone => {
-                    // Create a new drone in the config
-                    config.add_drone(new_id as NodeId);
-                },
-
-                _ => {}
-            }
-        }
-
-        new_id
-    }*/
 
     fn build_grid(&mut self, config: &ParsedConfig, previous_states: &HashMap<usize, bool>) {
         const WINDOW_WIDTH: f32 = 600.0;
@@ -880,87 +855,30 @@ impl NetworkRenderer {
             self.node_id_to_index.get(&(source_id as NodeId)),
             self.node_id_to_index.get(&(target_id as NodeId)),
         ) {
-            if self.edges.contains(&(source_idx, target_idx)) || self.edges.contains(&(target_idx, source_idx)) {
-                return false;
-            }
-
-            if let Some(cfg_arc) = &self.config {
-                let mut cfg = cfg_arc.lock().unwrap();
-
-                let a_type = self.nodes[source_idx].node_type;
-                let b_type = self.nodes[target_idx].node_type;
-
-                // 🔒 Constraint checks
-                let constraint_ok = match (a_type, b_type) {
-                    (NodeType::Client, NodeType::Drone) => {
-                        let c = cfg.client.iter().find(|c| c.id == source_id as NodeId);
-                        if let Some(c) = c {
-                            if c.connected_drone_ids.len() >= 2 {
-                                eprintln!("Client {} already has 2 drone connections!", source_id);
-                                return false;
-                            }
-                        }
-                        true
-                    }
-
-                    (NodeType::Drone, NodeType::Client) => {
-                        let c = cfg.client.iter().find(|c| c.id == target_id as NodeId);
-                        if let Some(c) = c {
-                            if c.connected_drone_ids.len() >= 2 {
-                                eprintln!("Client {} already has 2 drone connections!", target_id);
-                                return false;
-                            }
-                        }
-                        true
-                    }
-
-                    _ => true,
-                };
-
-                if !constraint_ok {
-                    return false; // 🚫 Constraint violated — exit early
-                }
-
-                // ✅ Passed checks — apply connection
-                match (a_type, b_type) {
-                    (NodeType::Drone, NodeType::Drone) => {
-                        cfg.append_drone_connection(source_id as NodeId, target_id as NodeId);
-                        cfg.append_drone_connection(target_id as NodeId, source_id as NodeId);
-                    }
-                    (NodeType::Drone, NodeType::Server) => {
-                        cfg.append_drone_connection(source_id as NodeId, target_id as NodeId);
-                        cfg.append_server_connection(target_id as NodeId, source_id as NodeId);
-                    }
-                    (NodeType::Server, NodeType::Drone) => {
-                        cfg.append_drone_connection(target_id as NodeId, source_id as NodeId);
-                        cfg.append_server_connection(source_id as NodeId, target_id as NodeId);
-                    }
-                    (NodeType::Drone, NodeType::Client) => {
-                        cfg.append_drone_connection(source_id as NodeId, target_id as NodeId);
-                        cfg.append_client_connection(target_id as NodeId, source_id as NodeId);
-                    }
-                    (NodeType::Client, NodeType::Drone) => {
-                        cfg.append_drone_connection(target_id as NodeId, source_id as NodeId);
-                        cfg.append_client_connection(source_id as NodeId, target_id as NodeId);
-                    }
-                    _ => {
-                        eprintln!("Unsupported connection between {:?} and {:?}", a_type, b_type);
-                    }
-                }
-
-                // ✅ Only now: add edge visually
-                self.edges.push((source_idx, target_idx));
-            }
-            if let Some(ctrl_arc) = &self.simulation_controller {
+            let result = if let Some(ctrl_arc) = &self.simulation_controller {
                 let mut ctrl = ctrl_arc.lock().unwrap();
-                ctrl.add_connection(source_id as NodeId, target_id as NodeId);
+                ctrl.add_link(source_id as NodeId, target_id as NodeId)
+            } else {
+                return false;
+            };
+
+            match result {
+                Ok(_) => {
+                    if let Some(cfg) = &self.config {
+                        self.build_from_config(cfg.clone());
+                    }
+                    true
+                }
+                Err(e) => {
+                    eprintln!("❌ add_link failed: {}", e);
+                    false
+                }
             }
-
-            return true;
+        } else {
+            false
         }
-
-        false
     }
+
 
 
     fn setup_star(&mut self, _x_offset: f32, _y_offset: f32) {
@@ -1496,14 +1414,22 @@ impl NetworkRenderer {
                                     });
 
                                 if let Some(peer_id) = pending_connection {
-                                    if let Some(ctrl_arc) = &self.simulation_controller {
-                                        let mut ctrl = ctrl_arc.lock().unwrap();
-                                        ctrl.add_link(node_id as NodeId, peer_id);
+                                    let added = {
+                                        if let Some(ctrl_arc) = &self.simulation_controller {
+                                            let mut ctrl = ctrl_arc.lock().unwrap();
+                                            ctrl.add_link(node_id, peer_id)
+                                        } else {
+                                            Err("No simulation_controller".into())
+                                        }
+                                    };
 
+                                    if added.is_ok() {
+                                        if let Some(cfg) = &self.config {
+                                            self.build_from_config(cfg.clone());
+                                        }
                                     }
-                                    self.add_connection_networkdesigner(node_id as usize, peer_id as usize);
-
                                 }
+
 
 
                             });
