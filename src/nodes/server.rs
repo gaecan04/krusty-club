@@ -86,14 +86,14 @@ impl NetworkGraph {
     }
 
     pub fn add_link(&mut self, a: NodeId, node_type_a: NodeType, b: NodeId, node_type_b: NodeType) {
-        info!("ADDING BIDERECTIONAL LINK to server network_graph from {} to {} ", a, b);
+        //info!("ADDING BIDERECTIONAL LINK to server network_graph from {} to {} ", a, b);
         let a_idx = self.add_node(a, node_type_a);
         let b_idx = self.add_node(b, node_type_b);
         self.graph.update_edge(a_idx, b_idx, 1);
         self.graph.update_edge(b_idx, a_idx, 1);
     }
     pub fn increment_drop(&mut self, a: NodeId, b: NodeId) {
-        info!("INCREMENTING LINK COST DUE TO DROP between {} <-----> {}", a, b);
+        //info!("INCREMENTING LINK COST DUE TO DROP between {} <-----> {}", a, b);
         if let (Some(&a_idx), Some(&b_idx)) = (self.node_indices.get(&a), self.node_indices.get(&b)) {
             if let Some(edge) = self.graph.find_edge(a_idx, b_idx) {
                 if let Some(weight) = self.graph.edge_weight_mut(edge) {
@@ -118,7 +118,6 @@ impl NetworkGraph {
             return None;
         };
 
-        let mut predecessors: HashMap<NodeIndex, NodeIndex> = HashMap::new();
         // Clean up invalid links based on shared_senders
         let mut edges_to_remove = vec![];
         if let Some(shared) = &self.shared_senders {
@@ -137,35 +136,84 @@ impl NetworkGraph {
             self.remove_link(a, b);
         }
 
-        let costs = dijkstra(&self.graph, source_idx, Some(target_idx), |e| *e.weight());
+        // Custom Dijkstra implementation with drone-only intermediate node filtering
+        let mut distances: HashMap<NodeIndex, usize> = HashMap::new();
+        let mut predecessors: HashMap<NodeIndex, NodeIndex> = HashMap::new();
+        let mut heap = std::collections::BinaryHeap::new();
 
-        if !costs.contains_key(&target_idx) {
-            warn!("❌ No path from {} to {}", source, target);
+        // Initialize with source
+        distances.insert(source_idx, 0);
+        heap.push(std::cmp::Reverse((0, source_idx)));
+
+        while let Some(std::cmp::Reverse((current_distance, current_node))) = heap.pop() {
+            // Skip if we've already found a better path to this node
+            if let Some(&best_distance) = distances.get(&current_node) {
+                if current_distance > best_distance {
+                    continue;
+                }
+            }
+
+            // If we reached the target, we can stop
+            if current_node == target_idx {
+                break;
+            }
+
+            // Explore neighbors
+            for neighbor_edge in self.graph.edges(current_node) {
+                let neighbor_node = neighbor_edge.target();
+                let neighbor_id = self.graph[neighbor_node];
+                let edge_weight = *neighbor_edge.weight();
+
+                // Check if this neighbor can be used as an intermediate node
+                let can_use_neighbor = if neighbor_node == target_idx {
+                    // Always allow the target node
+                    true
+                } else if neighbor_node == source_idx {
+                    // Never go back to source (avoid cycles)
+                    false
+                } else {
+                    // For intermediate nodes, only allow drones
+                    match self.node_types.get(&neighbor_id) {
+                        Some(NodeType::Drone) => true,
+                        Some(_) => false, // Not a drone, skip
+                        None => {
+                            warn!("❌ Node {} has no recorded type", neighbor_id);
+                            false
+                        }
+                    }
+                };
+
+                if !can_use_neighbor {
+                    continue;
+                }
+
+                let new_distance = current_distance + edge_weight;
+                let should_update = distances.get(&neighbor_node)
+                    .map(|&existing_distance| new_distance < existing_distance)
+                    .unwrap_or(true);
+
+                if should_update {
+                    distances.insert(neighbor_node, new_distance);
+                    predecessors.insert(neighbor_node, current_node);
+                    heap.push(std::cmp::Reverse((new_distance, neighbor_node)));
+                }
+            }
+        }
+
+        // Check if we found a path to the target
+        if !distances.contains_key(&target_idx) {
+            warn!("❌ No valid path to {} — cannot retransmit dropped packet", target);
             return None;
         }
 
-        // Reconstruct path by backtracking using costs
+        // Reconstruct path by backtracking
         let mut path = vec![target_idx];
         let mut current = target_idx;
 
         while current != source_idx {
-            let predecessor = self
-                .graph
-                .neighbors_directed(current, petgraph::Direction::Incoming)
-                .find(|&n| {
-                    if let Some(edge) = self.graph.find_edge(n, current) {
-                        if let Some(weight) = self.graph.edge_weight(edge) {
-                            if let (Some(&cost_to_n), Some(&cost_to_current)) = (costs.get(&n), costs.get(&current)) {
-                                return cost_to_n + weight == cost_to_current;
-                            }
-                        }
-                    }
-                    false
-                });
-
-            if let Some(prev) = predecessor {
-                path.push(prev);
-                current = prev;
+            if let Some(&predecessor) = predecessors.get(&current) {
+                path.push(predecessor);
+                current = predecessor;
             } else {
                 warn!("⚠ Could not reconstruct full path from {} to {}", source, target);
                 return None;
@@ -174,24 +222,9 @@ impl NetworkGraph {
 
         path.reverse();
         let node_path: Vec<NodeId> = path.iter().map(|&idx| self.graph[idx]).collect();
-        if node_path.len() > 2 {
-            for &node in &node_path[1..node_path.len() - 1] {
-                match self.node_types.get(&node) {
-                    Some(NodeType::Drone) => continue,
-                    Some(ntype) => {
-                        warn!("❌ Invalid intermediate node in path: {} ({:?})", node, ntype);
-                        return None;
-                    }
-                    None => {
-                        warn!("❌ Node {} has no recorded type", node);
-                        return None;
-                    }
-                }
-            }
-        }
+
         info!("🧭🧭🧭🧭🧭🧭🧭🧭🧭 Best path from {} to {}: {:?}", source, target, node_path);
         Some(node_path)
-
     }
 
     pub fn remove_link(&mut self, a: NodeId, b: NodeId) {
