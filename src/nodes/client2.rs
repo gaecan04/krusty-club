@@ -529,7 +529,13 @@ impl MyClient {
     }
 
     fn process_gui_command(&mut self, command_string: String)->Result<String , Box<dyn std::error::Error>> {
-        let chatting_status = *CHATTING_STATUS.lock().unwrap();
+        let chatting_status = match CHATTING_STATUS.lock() {
+            Ok(guard) => *guard,
+            Err(poisoned) => {
+                eprintln!("⚠️ Mutex poisoned! Recovering.");
+                *poisoned.into_inner()
+            }
+        };
         println!("Client {} processing GUI command '{}'", self.id, command_string.clone());
         let tokens: Vec<&str> = command_string.trim().split("::").collect();
         if tokens.len() >= 2 && tokens[0] == "[FloodRequired]" {
@@ -995,12 +1001,24 @@ impl MyClient {
         *val += 1;
     }
 
-    fn change_chat_status(&self,chatting: bool, peer_id : NodeId, server_id : NodeId) {
-        let mut status = CHATTING_STATUS.lock().unwrap();
-        (*status).0 = chatting;
-        (*status).1 = peer_id;
-        (*status).2 = server_id;
+    fn change_chat_status(&self, chatting: bool, peer_id: NodeId, server_id: NodeId) {
+        match CHATTING_STATUS.lock() {
+            Ok(mut status) => {
+                status.0 = chatting;
+                status.1 = peer_id;
+                status.2 = server_id;
+            }
+            Err(poisoned) => {
+                eprintln!("⚠️ CHATTING_STATUS mutex was poisoned! Recovering and updating anyway.");
+                let mut status = poisoned.into_inner();
+                status.0 = chatting;
+                status.1 = peer_id;
+                status.2 = server_id;
+                // Optionally: write back to the global if it's an Arc<Mutex<T>>
+            }
+        }
     }
+
 
     fn display_media(media_name: &str, base64_data: &str) -> Result<(), Box<dyn std::error::Error>> {
         // Decode base64
