@@ -212,9 +212,10 @@ impl SimulationController {
         let mut test_graph = self.network_graph.clone();
         test_graph.remove(&drone_id);
 
-        if !self.is_crash_allowed(&test_graph) {
+        if !self.is_crash_allowed(&test_graph, drone_id) {
             return Err("Crashing this drone would violate network constraints".into());
         }
+
 
         println!("🧪🧪🧪 Checking command_senders before crash: {:?}", self.command_senders.lock().unwrap().keys());
 
@@ -300,7 +301,7 @@ impl SimulationController {
     }
 
 
-    fn is_crash_allowed(&self, test_graph: &HashMap<NodeId, HashSet<NodeId>>) -> bool {
+    fn is_crash_allowed(&self, test_graph: &HashMap<NodeId, HashSet<NodeId>>, crashing_node: NodeId) -> bool {
         for server_id in self.get_all_server_ids() {
             let neighbors = test_graph.get(&server_id);
             let drone_neighbors = neighbors.map_or(0, |n| {
@@ -312,28 +313,27 @@ impl SimulationController {
                     .count()
             });
 
-
             if drone_neighbors < 2 {
-                println!("🚨 server must be connected to at least 2 drones");
-                return false; //
+                println!("🚨 Server {} must be connected to at least 2 drones", server_id);
+                return false;
             }
         }
 
-        if !self.all_clients_connected_to_servers(test_graph) {
-            println!("🚨 At least one client cannot reach a server");
+        if !self.all_clients_connected_to_servers(test_graph, Some(crashing_node)) {
+            println!("🚨 At least one client would lose connection to all servers");
             return false;
         }
 
-        if !self.all_servers_connected_to_clients(test_graph) {
-            println!("🚨 At least one server cannot reach a client");
+        if !self.all_servers_connected_to_clients(test_graph, Some(crashing_node)) {
+            println!("🚨 At least one server would lose connection to all clients");
             return false;
         }
 
-
-        if !self.is_connected(test_graph) {
+        if !self.is_connected(test_graph, Some(crashing_node)) {
             println!("🚨 Graph would become disconnected");
             return false;
         }
+
 
         true
     }
@@ -351,8 +351,46 @@ impl SimulationController {
         }
 
         // Reuse existing logic!
-        self.is_crash_allowed(&test_graph)
+        self.is_topology_valid(&test_graph)
     }
+
+    fn is_topology_valid(&self, test_graph: &HashMap<NodeId, HashSet<NodeId>>) -> bool {
+        // Server must remain connected to at least 2 drones
+        for server_id in self.get_all_server_ids() {
+            let neighbors = test_graph.get(&server_id);
+            let drone_neighbors = neighbors.map_or(0, |n| {
+                n.iter()
+                    .filter(|id| {
+                        self.get_node_type(**id)
+                            .map_or(false, |t| t == NodeType::Drone && test_graph.contains_key(*id))
+                    })
+                    .count()
+            });
+
+            if drone_neighbors < 2 {
+                println!("🚨 Server {} must be connected to at least 2 drones", server_id);
+                return false;
+            }
+        }
+
+        if !self.all_clients_connected_to_servers(test_graph, None) {
+            println!("🚨 At least one client would lose connection to all servers");
+            return false;
+        }
+
+        if !self.all_servers_connected_to_clients(test_graph, None) {
+            println!("🚨 At least one server would lose connection to all clients");
+            return false;
+        }
+
+        if !self.is_connected(test_graph,None) {
+            println!("🚨 Graph would become disconnected");
+            return false;
+        }
+
+        true
+    }
+
 
 
     // Add this method to your SimulationController
@@ -530,20 +568,25 @@ impl SimulationController {
     }
 
     // Check if a graph is connected using BFS
-    fn is_connected(&self, graph: &HashMap<NodeId, HashSet<NodeId>>) -> bool {
+    fn is_connected(
+        &self,
+        graph: &HashMap<NodeId, HashSet<NodeId>>,
+        excluded_node: Option<NodeId>,
+    ) -> bool {
         if graph.is_empty() {
             return true;
         }
 
-        // Find the first active node to start BFS from
+        // Find the first valid node to start BFS from
         let start_node = graph.keys()
             .find(|&&node_id| {
-                self.get_node_state(node_id)
-                    .map_or(false, |state| state.active)
+                Some(node_id) != excluded_node &&
+                    self.get_node_state(node_id)
+                        .map_or(false, |state| state.active)
             });
 
         let Some(start_node) = start_node else {
-            return true; // No active nodes, consider connected
+            return true;
         };
 
         let mut visited = HashSet::new();
@@ -553,7 +596,9 @@ impl SimulationController {
             if visited.insert(node) {
                 if let Some(neighbors) = graph.get(&node) {
                     for &neighbor in neighbors {
-                        // Only visit active neighbors
+                        if Some(neighbor) == excluded_node {
+                            continue;
+                        }
                         if !visited.contains(&neighbor) {
                             if let Some(state) = self.get_node_state(neighbor) {
                                 if state.active {
@@ -566,11 +611,12 @@ impl SimulationController {
             }
         }
 
-        // Count active nodes in the graph
+        // Count active nodes, excluding the one being crashed
         let active_node_count = graph.keys()
             .filter(|&&node_id| {
-                self.get_node_state(node_id)
-                    .map_or(false, |state| state.active)
+                Some(node_id) != excluded_node &&
+                    self.get_node_state(node_id)
+                        .map_or(false, |state| state.active)
             })
             .count();
 
@@ -581,10 +627,14 @@ impl SimulationController {
     pub fn all_clients_connected_to_servers(
         &self,
         graph: &HashMap<NodeId, HashSet<NodeId>>,
+        excluded_node: Option<NodeId>,
     ) -> bool {
         for node_id in graph.keys() {
             if let Some(state) = self.get_node_state(*node_id) {
-                if matches!(state.node_type, NodeType::Client) && state.active {
+                if matches!(state.node_type, NodeType::Client)
+                    && state.active
+                    && Some(*node_id) != excluded_node
+                {
                     let reachable = self.bfs_reachable_servers(*node_id, graph);
                     if reachable.is_empty() {
                         println!("❌ Client {} cannot reach any server", node_id);
@@ -597,27 +647,38 @@ impl SimulationController {
     }
 
 
+
     // Optional: Check if all active servers can reach at least one client
     pub fn all_servers_connected_to_clients(
         &self,
         graph: &HashMap<NodeId, HashSet<NodeId>>,
+        excluded_node: Option<NodeId>,
     ) -> bool {
         for node_id in graph.keys() {
             if let Some(state) = self.get_node_state(*node_id) {
-                if matches!(state.node_type, NodeType::Server) && state.active {
+                if matches!(state.node_type, NodeType::Server)
+                    && state.active
+                    && Some(*node_id) != excluded_node
+                {
                     let mut visited = HashSet::new();
                     let mut queue = VecDeque::from([*node_id]);
 
                     while let Some(current) = queue.pop_front() {
                         if visited.insert(current) {
                             if let Some(curr_state) = self.get_node_state(current) {
-                                if curr_state.active && matches!(curr_state.node_type, NodeType::Client) {
-                                    break; // found one reachable client
+                                if curr_state.active
+                                    && matches!(curr_state.node_type, NodeType::Client)
+                                    && Some(current) != excluded_node
+                                {
+                                    break;
                                 }
                             }
 
                             if let Some(neighs) = graph.get(&current) {
                                 for &n in neighs {
+                                    if Some(n) == excluded_node {
+                                        continue;
+                                    }
                                     if let Some(neigh_state) = self.get_node_state(n) {
                                         if neigh_state.active && !visited.contains(&n) {
                                             queue.push_back(n);
@@ -630,7 +691,9 @@ impl SimulationController {
 
                     if !visited.iter().any(|&id| {
                         self.get_node_state(id)
-                            .map_or(false, |s| s.active && matches!(s.node_type, NodeType::Client))
+                            .map_or(false, |s| {
+                                s.active && matches!(s.node_type, NodeType::Client) && Some(id) != excluded_node
+                            })
                     }) {
                         println!("❌ Server {} cannot reach any client", node_id);
                         return false;
@@ -640,6 +703,7 @@ impl SimulationController {
         }
         true
     }
+
 
 
     // Set the packet drop rate for a drone
