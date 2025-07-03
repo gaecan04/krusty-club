@@ -348,7 +348,7 @@ impl MyClient {
                                 session_id : request.flood_id,
                             };
                             match sender_channel.send(response_packet_to_send) {
-                                Ok(()) => println!("↩↩↩Client {} sent FloodResponse {} back to {} (prev hop).", self.id, request.flood_id, prev_hop_id),
+                                Ok(()) => println!("↩️↩️↩️Client {} sent FloodResponse {} back to {} (prev hop).", self.id, request.flood_id, prev_hop_id),
                                 Err(e) => eprintln!("Client {} failed to send FloodResponse {} back to {}: {}", self.id, request.flood_id, prev_hop_id, e),
                             }
                         } else {
@@ -597,7 +597,7 @@ impl MyClient {
                                                 };
 
                                                 match Command::new(open_command).args(args.clone()).spawn() {
-                                                    Ok(_) => println!("🖼🖼🖼Client {} successfully opened media '{}' with command '{} {:?}'.", self.id, media_name, open_command, args),
+                                                    Ok(_) => println!("🖼️🖼️🖼️Client {} successfully opened media '{}' with command '{} {:?}'.", self.id, media_name, open_command, args),
                                                     Err(e) => eprintln!("Client {} failed to open media '{}' using command '{} {:?}': {}", self.id, media_name, open_command, args, e),
                                                 }
 
@@ -889,11 +889,11 @@ impl MyClient {
                             self.packet_send.remove(&peer);
                             if let (Some(&a_idx), Some(&b_idx)) = (self.node_id_to_index.get(&a), self.node_id_to_index.get(&b)) {
                                 if let Some(edge_ab) = self.network_graph.find_edge(a_idx, b_idx) {
-                                    self.network_graph.remove_edge(edge_ab); //MODIFICA PER USARE REMOVE_LINK_FROM_GRAPH
+                                    self.network_graph.remove_edge(edge_ab);
                                     println!("Client {} removed link from {} to {} via RemoveSender", self.id, a, b);
                                 }
                                 if let Some(edge_ba) = self.network_graph.find_edge(b_idx, a_idx) {
-                                    self.network_graph.remove_edge(edge_ba); //MODIFICA PER USARE REMOVE_LINK_FROM_GRAPH
+                                    self.network_graph.remove_edge(edge_ba);
                                     println!("Client {} removed link from {} to {} (inverse) via RemoveSender", self.id, b, a);
                                 }
                             }
@@ -1116,18 +1116,29 @@ impl MyClient {
                 let route_option = self.best_path(self.id, id_to_send_to);
                 let route = match route_option {
                     Some(path) => {
-                        println!("Client {} computed route to server {}: {:?}", self.id, id_to_send_to, path);
+                        println!("Client {} computed route to server {}: {:?}",
+                                 self.id, id_to_send_to, path);
                         self.route_cache.insert(id_to_send_to, path.clone());
                         path
                     },
                     None => {
-                        eprintln!("Client {} could not compute route to server {}. Starting flood discovery.", self.id, dest_id);
+                        eprintln!(
+                            "Client {} could not compute route to server {}. Starting flood discovery.",
+                            self.id, id_to_send_to
+                        );
+                        // ^^^ Changed to use the actual target server ID for the log
+
+                        // Start flood discovery (only if one isn’t already active)
                         let active_flood = self.active_flood_discoveries.values().any(|state| {
-                            state.initiator_id == self.id && state.start_time.elapsed() < std::time::Duration::from_secs(5)
+                            state.initiator_id == self.id && state.start_time.elapsed() < Duration::from_secs(5)
                         });
                         if !active_flood {
                             self.start_flood_discovery();
                         }
+
+                        // Queue the message to send after the path is discovered
+                        self.pending_messages_after_flood.push((id_to_send_to, command_string));
+                        // ^^^ Store the server’s NodeId (destination) instead of self.id
                         return;
                     }
                 };
@@ -1195,85 +1206,134 @@ impl MyClient {
         }
     }
 
-    fn best_path(&mut self, from: NodeId, to: NodeId) -> Option<Vec<NodeId>> {
+    fn best_path(&mut self, source: NodeId, target: NodeId) -> Option<Vec<NodeId>> {
+        use std::collections::{BinaryHeap, HashMap};
+        use std::cmp::Reverse;
+        use petgraph::visit::EdgeRef;
+        use std::sync::{Arc, Mutex};
 
-        println!("Client {} calculating path from {} to {}.", self.id, from, to);
+        // Edge case: invalid target
+        if target == 0 {
+            return None;
+        }
 
-        if let Some(shared) = &self.shared_senders {
-            if let Ok(map) = shared.lock() {
-                let mut to_remove = Vec::new();
-                for edge in self.network_graph.edge_references() {
-                    let a_id = self.network_graph[edge.source()].id;
-                    let b_id = self.network_graph[edge.target()].id;
-                    if !map.contains_key(&(a_id, b_id)) && !map.contains_key(&(b_id, a_id)) {
-                        to_remove.push((edge.source(), edge.target()));
+        // Return early if source and target are the same
+        if source == target {
+            return Some(vec![source]);
+        }
+
+        let shared_senders = self.shared_senders.clone();
+
+        // --- Sync net_graph with shared_senders ---
+        if let Some(shared) = &shared_senders {
+            let map_guard = match shared.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    eprintln!("⚠ Mutex for shared_senders was poisoned — recovering...");
+                    let recovered = poisoned.into_inner();
+                    self.shared_senders = Some(Arc::new(Mutex::new(recovered.clone())));
+                    match self.shared_senders.as_ref().unwrap().lock() {
+                        Ok(guard) => guard,
+                        Err(_) => {
+                            eprintln!("❌ Failed to recover shared_senders after poison");
+                            return None;
+                        }
                     }
                 }
-                for (src, dst) in to_remove {
-                    if let (Some(&source), Some(&dest)) = (self.node_id_to_index.get(&src), self.node_id_to_index.get(&dst)) {
-                        if let Some(edge_ab) = self.network_graph.find_edge(source, dest) {
-                            self.network_graph.remove_edge(edge_ab); //MODIFICA PER USARE REMOVE_LINK_FROM_GRAPH
-                            println!("Client {} removed stale edge {}->{} from graph", self.id, src, dst);
-                        }
-                        if let Some(edge_ba) = self.network_graph.find_edge(source, dest) {
-                            self.network_graph.remove_edge(edge_ba); //MODIFICA PER USARE REMOVE_LINK_FROM_GRAPH
-                            println!("Client {} removed stale edge {}->{} from graph", self.id, dst, src);
+            };
+
+            let mut to_remove = Vec::new();
+            for edge in self.network_graph.edge_references() {
+                let a_id = self.network_graph[edge.source()].id;
+                let b_id = self.network_graph[edge.target()].id;
+                if !map_guard.contains_key(&(a_id, b_id)) && !map_guard.contains_key(&(b_id, a_id)) {
+                    to_remove.push((edge.source(), edge.target()));
+                }
+            }
+
+            for (src, dst) in to_remove {
+                if let Some(edge_idx) = self.network_graph.find_edge(src, dst) {
+                    self.network_graph.remove_edge(edge_idx);
+                }
+            }
+        }
+
+        // --- Get node indices ---
+        let source_idx = *self.node_id_to_index.get(&source)?;
+        let target_idx = *self.node_id_to_index.get(&target)?;
+
+        let mut distances: HashMap<NodeIndex, u32> = self.network_graph.node_indices()
+            .map(|idx| (idx, u32::MAX))
+            .collect();
+        let mut predecessors: HashMap<NodeIndex, NodeIndex> = HashMap::new();
+        let mut heap = BinaryHeap::new();
+
+        distances.insert(source_idx, 0);
+        heap.push(Reverse((0, source_idx)));
+
+        while let Some(Reverse((current_dist, current_node))) = heap.pop() {
+            if current_dist > distances[&current_node] {
+                continue;
+            }
+
+            if current_node == target_idx {
+                break;
+            }
+
+            for edge in self.network_graph.edges(current_node) {
+                let neighbor_idx = edge.target();
+                let weight = *edge.weight() as u32;
+
+                let can_use_neighbor = if neighbor_idx == target_idx {
+                    true
+                } else if neighbor_idx == source_idx {
+                    false
+                } else {
+                    match self.network_graph.node_weight(neighbor_idx) {
+                        Some(NodeInfo { node_type: NodeType::Drone, .. }) => true,
+                        Some(_) => false,
+                        None => {
+                            warn!("❌ Node index {:?} has no type in graph", neighbor_idx);
+                            false
                         }
                     }
+                };
+
+                if !can_use_neighbor {
+                    continue;
                 }
-            } else {
-                eprintln!("Client {}: impossible to get lock for shared_senders in best_path", self.id);
-            }
-        }
-        
-        if from == self.id {
-            if let Some(cached_path) = self.route_cache.get(&to) {
-                println!("Client {}: found path from {} to {}: {:?}", self.id, from, to, cached_path);
-                return Some(cached_path.clone());
-            }
-        }
-        let start_node_idx = self.node_id_to_index.get(&from).copied();
-        let end_node_idx = self.node_id_to_index.get(&to).copied();
-        match (start_node_idx, end_node_idx) {
-            (Some(start_idx), Some(end_idx)) => {
-                let path_result = petgraph::algo::astar(
-                    &self.network_graph,
-                    start_idx,
-                    |n| n == end_idx,       //goal condition: is node n the target node?
-                    |edge| {
-                        let target_node_idx = edge.target();
-                        let target_node_info = self.network_graph.node_weight(target_node_idx).expect("Node should exist in graph");
-                        if (target_node_info.node_type == NodeType::Server && target_node_info.id != to) || (target_node_info.node_type == NodeType::Client) {
-                            usize::MAX / 2
-                        } else {
-                            *edge.weight()
-                        }
-                    },                      //edge cost: use the weight of the edge (usize)
-                    |_| 0                   //heuristic: use 0 for all nodes (makes A* equivalent to Dijkstra)
-                );
-                match path_result {
-                    Some((_cost, node_indices_path)) => {
-                        let node_ids_path: Vec<NodeId> = node_indices_path.iter().filter_map(|&idx| self.network_graph.node_weight(idx).map(|node_info| node_info.id)).collect();
-                        //println!("Client {} found path from {} to {}: {:?}", self.id, from, to, node_ids_path);
-                        if node_ids_path.is_empty() || node_ids_path.first().copied() != Some(from) || node_ids_path.last().copied() != Some(to) {
-                            eprintln!("Client {} computed an invalid path structure from {} to {}: {:?}", self.id, from, to, node_ids_path);
-                            None
-                        } else {
-                            Some(node_ids_path)
-                        }
-                    },
-                    None => {
-                        println!("Client {} could not find a path from {} to {}.", self.id, from, to);
-                        None
-                    }
+
+                let alt_dist = current_dist.saturating_add(weight);
+                if alt_dist < distances[&neighbor_idx] {
+                    distances.insert(neighbor_idx, alt_dist);
+                    predecessors.insert(neighbor_idx, current_node);
+                    heap.push(Reverse((alt_dist, neighbor_idx)));
                 }
-            },
-            _ => {
-                eprintln!("Client {} cannot calculate path: source ({}) or destination ({}) node not found in graph.", self.id, from, to);
-                None
             }
         }
+
+        if distances.get(&target_idx)? == &u32::MAX {
+            return None;
+        }
+
+        let mut path = Vec::new();
+        let mut current = target_idx;
+
+        loop {
+            let node_id = self.network_graph.node_weight(current)?.id;
+            path.push(node_id);
+
+            if current == source_idx {
+                break;
+            }
+
+            current = *predecessors.get(&current)?;
+        }
+
+        path.reverse();
+        Some(path)
     }
+
 
     fn increment_drop(&mut self, from: NodeId, to: NodeId) {
         println!("Client {} incrementing drop count for link {} -> {}.", self.id, from, to);
