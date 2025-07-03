@@ -86,14 +86,14 @@ impl NetworkGraph {
     }
 
     pub fn add_link(&mut self, a: NodeId, node_type_a: NodeType, b: NodeId, node_type_b: NodeType) {
-        info!("ADDING BIDERECTIONAL LINK to server network_graph from {} to {} ", a, b);
+        //info!("ADDING BIDERECTIONAL LINK to server network_graph from {} to {} ", a, b);
         let a_idx = self.add_node(a, node_type_a);
         let b_idx = self.add_node(b, node_type_b);
         self.graph.update_edge(a_idx, b_idx, 1);
         self.graph.update_edge(b_idx, a_idx, 1);
     }
     pub fn increment_drop(&mut self, a: NodeId, b: NodeId) {
-        info!("INCREMENTING LINK COST DUE TO DROP between {} <-----> {}", a, b);
+        //info!("INCREMENTING LINK COST DUE TO DROP between {} <-----> {}", a, b);
         if let (Some(&a_idx), Some(&b_idx)) = (self.node_indices.get(&a), self.node_indices.get(&b)) {
             if let Some(edge) = self.graph.find_edge(a_idx, b_idx) {
                 if let Some(weight) = self.graph.edge_weight_mut(edge) {
@@ -109,7 +109,6 @@ impl NetworkGraph {
         }
     }
     pub fn best_path(&mut self, source: NodeId, target: NodeId) -> Option<Vec<NodeId>> {
-
         let Some(&source_idx) = self.node_indices.get(&source) else {
             warn!("🚨 Source node {} not found in network graph", source);
             return None;
@@ -119,17 +118,13 @@ impl NetworkGraph {
             return None;
         };
 
-        let mut predecessors: HashMap<NodeIndex, NodeIndex> = HashMap::new();
-
         // Clean up invalid links based on shared_senders
         let mut edges_to_remove = vec![];
-
         if let Some(shared) = &self.shared_senders {
             if let Ok(shared_map) = shared.lock() {
                 for edge in self.graph.edge_references() {
                     let from = self.graph[edge.source()];
                     let to = self.graph[edge.target()];
-
                     if !shared_map.contains_key(&(from, to)) && !shared_map.contains_key(&(to, from)) {
                         warn!("⚠️ Edge {} <-> {} exists in graph but is missing from shared_senders", from, to);
                         edges_to_remove.push((from, to));
@@ -137,68 +132,99 @@ impl NetworkGraph {
                 }
             }
         }
-
-        // 🔧 Now that all borrows are dropped, mutate self
         for (a, b) in edges_to_remove {
             self.remove_link(a, b);
         }
 
+        // Custom Dijkstra implementation with drone-only intermediate node filtering
+        let mut distances: HashMap<NodeIndex, usize> = HashMap::new();
+        let mut predecessors: HashMap<NodeIndex, NodeIndex> = HashMap::new();
+        let mut heap = std::collections::BinaryHeap::new();
 
-        let _ = dijkstra(&self.graph, source_idx, Some(target_idx), |e| {
-            let from = e.source();
-            let to = e.target();
+        // Initialize with source
+        distances.insert(source_idx, 0);
+        heap.push(std::cmp::Reverse((0, source_idx)));
 
-            let to_node_id = self.graph[to];
-            let to_is_server = self.node_types.get(&to_node_id) == Some(&NodeType::Server);
-            let cost = if to_is_server && to_node_id != target {
-                usize::MAX / 2 // discourage using servers in the path --> assign an elevated cost
-            } else {
-                *e.weight()
-            };
+        while let Some(std::cmp::Reverse((current_distance, current_node))) = heap.pop() {
+            // Skip if we've already found a better path to this node
+            if let Some(&best_distance) = distances.get(&current_node) {
+                if current_distance > best_distance {
+                    continue;
+                }
+            }
 
-            // Track predecessors (for path reconstruction)
-            predecessors.entry(to).or_insert(from);
+            // If we reached the target, we can stop
+            if current_node == target_idx {
+                break;
+            }
 
-            cost
-        });
+            // Explore neighbors
+            for neighbor_edge in self.graph.edges(current_node) {
+                let neighbor_node = neighbor_edge.target();
+                let neighbor_id = self.graph[neighbor_node];
+                let edge_weight = *neighbor_edge.weight();
 
-        if !predecessors.contains_key(&target_idx) {
-            println!("❌ No path from {} to {}", source, target);
+                // Check if this neighbor can be used as an intermediate node
+                let can_use_neighbor = if neighbor_node == target_idx {
+                    // Always allow the target node
+                    true
+                } else if neighbor_node == source_idx {
+                    // Never go back to source (avoid cycles)
+                    false
+                } else {
+                    // For intermediate nodes, only allow drones
+                    match self.node_types.get(&neighbor_id) {
+                        Some(NodeType::Drone) => true,
+                        Some(_) => false, // Not a drone, skip
+                        None => {
+                            warn!("❌ Node {} has no recorded type", neighbor_id);
+                            false
+                        }
+                    }
+                };
+
+                if !can_use_neighbor {
+                    continue;
+                }
+
+                let new_distance = current_distance + edge_weight;
+                let should_update = distances.get(&neighbor_node)
+                    .map(|&existing_distance| new_distance < existing_distance)
+                    .unwrap_or(true);
+
+                if should_update {
+                    distances.insert(neighbor_node, new_distance);
+                    predecessors.insert(neighbor_node, current_node);
+                    heap.push(std::cmp::Reverse((new_distance, neighbor_node)));
+                }
+            }
+        }
+
+        // Check if we found a path to the target
+        if !distances.contains_key(&target_idx) {
+            warn!("❌ No valid path to {} — cannot retransmit dropped packet", target);
             return None;
         }
 
-        let mut path = Vec::new();
+        // Reconstruct path by backtracking
+        let mut path = vec![target_idx];
         let mut current = target_idx;
 
-        loop {
-            path.push(self.graph[current]); // ✅ safe
-            if current == source_idx {
-                break;
-            }
-            if let Some(&prev) = predecessors.get(&current) {
-                current = prev;
+        while current != source_idx {
+            if let Some(&predecessor) = predecessors.get(&current) {
+                path.push(predecessor);
+                current = predecessor;
             } else {
-                warn!("⚠ Incomplete path from {} to {} — no predecessor for {}", source, target, current.index());
+                warn!("⚠ Could not reconstruct full path from {} to {}", source, target);
                 return None;
             }
         }
 
-        /*
-        let mut path = vec![self.graph[target_idx]];
-        let mut current = target_idx;
-        while current != source_idx {
-            if let Some(&prev) = predecessors.get(&current) {
-                path.push(self.graph[prev]);
-                current = prev;
-            } else {
-                println!("⚠ Incomplete path from {} to {}", source, target);
-                return None;
-            }
-        }*/
-
         path.reverse();
-        info!("🧭🧭🧭🧭🧭🧭🧭🧭🧭 Best path from {} to {}: {:?}", source, target, path);
-        Some(path)
+        let node_path: Vec<NodeId> = path.iter().map(|&idx| self.graph[idx]).collect();
+
+        info!("🧭🧭🧭🧭🧭🧭🧭🧭🧭 Best path from {} to {}: {:?}", source, target, node_path);
+        Some(node_path)
     }
 
     pub fn remove_link(&mut self, a: NodeId, b: NodeId) {
@@ -467,25 +493,36 @@ impl server {
                 _ if stripped.starts_with("RemoveSender::") => {
                     let parts: Vec<&str> = stripped.split("::").collect();
                     if parts.len() == 3 {
-                        if let (Ok(drone_id), Ok(peer_id)) = (parts[1].parse::<NodeId>(), parts[2].parse::<NodeId>()) {
-                            if self.id != drone_id && self.id != peer_id {
-                                info!("🟡 Server {} is not involved in link between {} and {}", self.id, drone_id, peer_id);
-                                self.initiate_network_discovery();
-                            }
-
-                            let to_remove = if self.id == drone_id { peer_id } else { drone_id };
-                            if self.packet_sender.remove(&to_remove).is_some() {
-                                info!("⚙️⚙️⚙️⚙️ Removed sender to {} from packet_sender. ⚙️⚙️⚙️⚙️", to_remove);
+                        if let (Ok(a), Ok(b)) = (parts[1].parse::<NodeId>(), parts[2].parse::<NodeId>()) {
+                            // Only act if the server is involved
+                            if self.id == a || self.id == b {
+                                let peer = if self.id == a { b } else { a };
+                                // Remove sender to peer if we hold it
+                                if self.packet_sender.remove(&peer).is_some() {
+                                    info!("⚙️ Removed sender to {} from packet_sender", peer);
+                                } else {
+                                    warn!("⚠ No sender to {} found in packet_sender", peer);
+                                }
+                                // Optionally: clean up shared_senders (both directions)
+                                if let Some(shared) = &self.shared_senders {
+                                    if let Ok(mut map) = shared.lock() {
+                                        map.remove(&(self.id, peer));
+                                        map.remove(&(peer, self.id));
+                                        info!("🧹 Removed ({}, {}) and ({}, {}) from shared_senders", self.id, peer, peer, self.id);
+                                    }
+                                }
                             } else {
-                                warn!("⚠ No sender to {} found in packet_sender.", to_remove);
+                                info!("🟡 Server {} not involved in link between {} and {}", self.id, a, b);
                             }
-                            self.network_graph.remove_link(self.id, to_remove);
+                            // Always remove the link from the graph (even if not involved directly)
+                            self.network_graph.remove_link(a, b);
+                            // Refresh topology
                             self.initiate_network_discovery();
                         } else {
                             warn!("⚠ Could not parse node IDs in RemoveSender message: {:?}", parts);
                         }
                     } else {
-                        warn!("⚠ Malformed RemoveSender message. Expected format: RemoveSender::<drone_id>::<peer_id>");
+                        warn!("⚠ Malformed RemoveSender message. Expected format: RemoveSender::<a>::<b>");
                     }
                 }
 
@@ -609,60 +646,6 @@ impl server {
                     println!("👿👿👿👿👿👿PACKET SENDER OF SERVER {:?}", self.packet_sender);
                 }
 
-                /*
-                _ if stripped.starts_with("SpawnDrone::") => {
-                    let parts: Vec<&str> = stripped.split("::").collect();
-                    if parts.len() == 3 {
-                        if let Ok(drone_id) = parts[1].parse::<NodeId>() {
-                            let peers_result: Result<Vec<NodeId>, _> = serde_json::from_str(parts[2]);
-                            match peers_result {
-                                Ok(peer_list) => {
-                                    // Always update shared_senders
-                                    if let Some(shared) = &self.shared_senders {
-                                        if let Ok(mut map) = shared.lock() {
-                                            for &peer in &peer_list {
-                                                if let Some(sender) = self.packet_sender.get(&peer) {
-                                                    map.entry((drone_id, peer)).or_insert_with(|| sender.clone());
-                                                    map.entry((peer, drone_id)).or_insert_with(|| sender.clone());
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    if !peer_list.contains(&self.id) {
-                                        info!("Server {} not involved in SpawnDrone({}, {:?})", self.id, drone_id, peer_list);
-                                        continue;
-                                    }
-                                    self.network_graph.node_types.insert(drone_id, NodeType::Drone);
-
-                                    if let Some(shared) = &self.shared_senders {
-                                        if let Ok(map) = shared.lock() {
-                                            let key = (self.id, drone_id);
-                                            if let Some(sender_to_drone) = map.get(&key) {
-                                                self.packet_sender.insert(drone_id, sender_to_drone.clone());
-                                                info!("✅ Inserted new drone {} into packet_sender", drone_id);
-                                                let peer_type = self.network_graph.node_types.get(&self.id).copied().unwrap_or(NodeType::Server);
-                                                self.network_graph.add_link(self.id, peer_type, drone_id, NodeType::Drone);
-                                            } else {
-                                                warn!("❌❌❌ shared_senders has no entry for ({}, {}) ❌❌❌", self.id, drone_id);
-                                            }
-                                        };
-
-                                    }
-                                    self.initiate_network_discovery();
-                                }
-                                Err(e) => {
-                                    warn!("❌❌❌❌ Failed to parse peer list in SpawnDrone: {} ❌❌❌❌", e);
-                                }
-                            }
-                        } else {
-                            warn!("⚠ Could not parse drone ID in SpawnDrone message: {:?}", parts[1]);
-                        }
-                    } else {
-                        warn!("⚠ Malformed SpawnDrone message. Expected format: SpawnDrone::<drone_id>::<[peer1, peer2]>");
-                    }
-                    println!("👿👿👿👿👿👿PACKET SENDER OF SERVER {:?}",self.packet_sender);
-                }*/
                 _ if stripped.starts_with("Crash") => {
                     //addNODEID
                     let parts: Vec<&str> = stripped.split("::").collect();
@@ -1009,36 +992,45 @@ impl server {
                     error!("❌ Fragment with session {} and index {} not found in sent_fragments — cannot retransmit", session_id, fragment_index);
                 }
             },
+            NackType::ErrorInRouting(node_id) => {
+                info!("🧠 Handling ErrorInRouting({}) — checking shared_senders", node_id);
 
-            NackType::ErrorInRouting(crashed_node_id) => {
-                warn!("Server detected a crashed node {} due to ErrorInRouting.", crashed_node_id);
+                let hops = &routing_header.hops;
+                let from = hops.get(routing_header.hop_index.saturating_sub(1)).copied();
 
-                let node_type = self.network_graph.node_types.get(&crashed_node_id);
+                if let Some(shared) = &self.shared_senders {
+                    if let Ok(map) = shared.lock() {
+                        let involved = map.keys().any(|(a, b)| *a == node_id || *b == node_id);
 
-                match node_type {
-                    // ????? review protocol nack behaviour
-                    Some(NodeType::Server) => {
-                        warn!("Attempted to remove Server node {} — action skipped.", crashed_node_id);
+                        if let Some(from) = from {
+                            if !involved {
+                                warn!("💥 Node {} not found in shared_senders — assuming crash", node_id);
+                                self.network_graph.remove_node(node_id);
+                                self.packet_sender.remove(&node_id);
+                                self.log(format!("Node {} crashed (removed from graph)", node_id));
+                            } else {
+                                warn!("🧹 Link failure: removing link between {} and {} (node still alive)", from, node_id);
+                                self.network_graph.remove_link(from, node_id);
+                                if self.id == from {
+                                    self.packet_sender.remove(&node_id);
+                                } else if self.id == node_id {
+                                    self.packet_sender.remove(&from);
+                                }
+                                self.log(format!("Link removed between {} and {}", from, node_id));
+                            }
+                        } else {
+                            warn!("❓ Could not determine sender before node {} — hop_index too small or invalid", node_id);
+                        }
+                    } else {
+                        warn!("❌ Failed to lock shared_senders — skipping ErrorInRouting handling for {}", node_id);
                     }
-                    Some(NodeType::Client) => {
-                        warn!("Attempted to remove client node {} — action skipped.", crashed_node_id);
-                    }
-                    //the crashed node is a Drone
-                    Some(drone_type) => {
-                        warn!("Detected crashed {:?} node {} due to ErrorInRouting.", drone_type, crashed_node_id);
-                        // REMOVE the crashed node from the network graph
-                        self.network_graph.remove_node(crashed_node_id);
-                        // Remove from packet_sender
-                        self.packet_sender.remove(&crashed_node_id);
-
-                        info!("Updated graph after removing {:?}", crashed_node_id);
-                        self.network_graph.print_graph();
-                    }
-                    None => {
-                        warn!("Node type for {} not found — skipping removal.", crashed_node_id);
-                    }
+                } else {
+                    warn!("❌ shared_senders is None — cannot analyze ErrorInRouting({})", node_id);
                 }
-            },
+
+                self.network_graph.print_graph();
+            }
+
 
             _ => {
                 warn!("Received DestinationIsDrone/UnexpectedRecipient NACK type, sending flood request");
@@ -1195,10 +1187,11 @@ impl server {
                 self.network_graph.add_link(*a_id, *a_type, *b_id, *b_type);
             }
         }
+
         //println!("✅✅✅ Graph updated via FloodResponse");
         //self.network_graph.print_graph();
-    }
 
+    }
     fn send_chat_message(&mut self, session_id: u64, target_id: NodeId, msg: String) {
         let data = msg.as_bytes();
         let total_fragments = ((data.len() + 127) / 128) as u64;

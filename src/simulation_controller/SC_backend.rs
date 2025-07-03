@@ -319,18 +319,22 @@ impl SimulationController {
             }
         }
 
-        // ✅ Also check: all clients can still reach a server
-        for client_id in self.get_all_client_ids() {
-            if let Some(state) = self.get_node_state(client_id) {
-                if state.active {
-                    let reachable = self.bfs_reachable_servers(client_id, test_graph);
-                    if reachable.is_empty() {
-
-                        return false;
-                    }
-                }
-            }
+        if !self.all_clients_connected_to_servers(test_graph) {
+            println!("🚨 At least one client cannot reach a server");
+            return false;
         }
+
+        if !self.all_servers_connected_to_clients(test_graph) {
+            println!("🚨 At least one server cannot reach a client");
+            return false;
+        }
+
+
+        if !self.is_connected(test_graph) {
+            println!("🚨 Graph would become disconnected");
+            return false;
+        }
+
         true
     }
 
@@ -530,23 +534,113 @@ impl SimulationController {
         if graph.is_empty() {
             return true;
         }
-        let start_node = *graph.keys().next().unwrap();
+
+        // Find the first active node to start BFS from
+        let start_node = graph.keys()
+            .find(|&&node_id| {
+                self.get_node_state(node_id)
+                    .map_or(false, |state| state.active)
+            });
+
+        let Some(start_node) = start_node else {
+            return true; // No active nodes, consider connected
+        };
+
         let mut visited = HashSet::new();
-        let mut queue = vec![start_node];
+        let mut queue = vec![*start_node];
 
         while let Some(node) = queue.pop() {
             if visited.insert(node) {
                 if let Some(neighbors) = graph.get(&node) {
                     for &neighbor in neighbors {
+                        // Only visit active neighbors
                         if !visited.contains(&neighbor) {
-                            queue.push(neighbor);
+                            if let Some(state) = self.get_node_state(neighbor) {
+                                if state.active {
+                                    queue.push(neighbor);
+                                }
+                            }
                         }
                     }
                 }
             }
         }
-        visited.len() == graph.len()
+
+        // Count active nodes in the graph
+        let active_node_count = graph.keys()
+            .filter(|&&node_id| {
+                self.get_node_state(node_id)
+                    .map_or(false, |state| state.active)
+            })
+            .count();
+
+        visited.len() == active_node_count
     }
+
+    // Check if all active clients can reach at least one active server
+    pub fn all_clients_connected_to_servers(
+        &self,
+        graph: &HashMap<NodeId, HashSet<NodeId>>,
+    ) -> bool {
+        for node_id in graph.keys() {
+            if let Some(state) = self.get_node_state(*node_id) {
+                if matches!(state.node_type, NodeType::Client) && state.active {
+                    let reachable = self.bfs_reachable_servers(*node_id, graph);
+                    if reachable.is_empty() {
+                        println!("❌ Client {} cannot reach any server", node_id);
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+
+    // Optional: Check if all active servers can reach at least one client
+    pub fn all_servers_connected_to_clients(
+        &self,
+        graph: &HashMap<NodeId, HashSet<NodeId>>,
+    ) -> bool {
+        for node_id in graph.keys() {
+            if let Some(state) = self.get_node_state(*node_id) {
+                if matches!(state.node_type, NodeType::Server) && state.active {
+                    let mut visited = HashSet::new();
+                    let mut queue = VecDeque::from([*node_id]);
+
+                    while let Some(current) = queue.pop_front() {
+                        if visited.insert(current) {
+                            if let Some(curr_state) = self.get_node_state(current) {
+                                if curr_state.active && matches!(curr_state.node_type, NodeType::Client) {
+                                    break; // found one reachable client
+                                }
+                            }
+
+                            if let Some(neighs) = graph.get(&current) {
+                                for &n in neighs {
+                                    if let Some(neigh_state) = self.get_node_state(n) {
+                                        if neigh_state.active && !visited.contains(&n) {
+                                            queue.push_back(n);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if !visited.iter().any(|&id| {
+                        self.get_node_state(id)
+                            .map_or(false, |s| s.active && matches!(s.node_type, NodeType::Client))
+                    }) {
+                        println!("❌ Server {} cannot reach any client", node_id);
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
 
     // Set the packet drop rate for a drone
     pub fn set_packet_drop_rate(&mut self, drone_id: NodeId, rate: f32) -> Result<(), Box<dyn Error>> {
@@ -1012,4 +1106,10 @@ impl SimulationController {
 
 
 
+
+
+}
+struct NodeState {
+    node_type: NodeType,
+    active: bool,
 }
