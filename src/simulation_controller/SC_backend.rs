@@ -319,15 +319,11 @@ impl SimulationController {
             }
         }
 
-        if !self.all_clients_connected_to_servers(test_graph, Some(crashing_node)) {
-            println!("🚨 At least one client would lose connection to all servers");
+        if !self.all_clients_and_servers_mutually_reachable(&test_graph, Some(crashing_node)) {
+            println!("🚨 Crash would break client-server mutual reachability");
             return false;
         }
 
-        if !self.all_servers_connected_to_clients(test_graph, Some(crashing_node)) {
-            println!("🚨 At least one server would lose connection to all clients");
-            return false;
-        }
 
         if !self.is_connected(test_graph, Some(crashing_node)) {
             println!("🚨 Graph would become disconnected");
@@ -373,15 +369,11 @@ impl SimulationController {
             }
         }
 
-        if !self.all_clients_connected_to_servers(test_graph, None) {
-            println!("🚨 At least one client would lose connection to all servers");
+        if !self.all_clients_and_servers_mutually_reachable(&test_graph, None) {
+            println!("🚨 Crash would break client-server mutual reachability");
             return false;
         }
 
-        if !self.all_servers_connected_to_clients(test_graph, None) {
-            println!("🚨 At least one server would lose connection to all clients");
-            return false;
-        }
 
         if !self.is_connected(test_graph,None) {
             println!("🚨 Graph would become disconnected");
@@ -544,22 +536,21 @@ impl SimulationController {
         queue.push_back(start_id);
 
         while let Some(current) = queue.pop_front() {
-            if let Some(state) = self.get_node_state(current) {
-                if !state.active {
-                    continue;
-                }
+            // If the node is not in the test graph, skip it
+            if !graph.contains_key(&current) {
+                continue;
+            }
 
-                // ✅ If it's a server, mark it as reachable
-                if matches!(state.node_type, NodeType::Server) {
-                    reachable_servers.insert(current);
-                }
+            // If it's a server, mark it as reachable
+            if self.get_node_type(current) == Some(NodeType::Server) {
+                reachable_servers.insert(current);
+            }
 
-                if let Some(neighbors) = graph.get(&current) {
-                    for &neighbor in neighbors {
-                        if !visited.contains(&neighbor) {
-                            visited.insert(neighbor);
-                            queue.push_back(neighbor);
-                        }
+            if let Some(neighbors) = graph.get(&current) {
+                for &neighbor in neighbors {
+                    if !visited.contains(&neighbor) {
+                        visited.insert(neighbor);
+                        queue.push_back(neighbor);
                     }
                 }
             }
@@ -580,10 +571,7 @@ impl SimulationController {
         // Find the first valid node to start BFS from
         let start_node = graph.keys()
             .find(|&&node_id| {
-                Some(node_id) != excluded_node &&
-                    self.get_node_state(node_id)
-                        .map_or(false, |state| state.active)
-            });
+                Some(node_id) != excluded_node && graph.contains_key(&node_id) });
 
         let Some(start_node) = start_node else {
             return true;
@@ -596,15 +584,8 @@ impl SimulationController {
             if visited.insert(node) {
                 if let Some(neighbors) = graph.get(&node) {
                     for &neighbor in neighbors {
-                        if Some(neighbor) == excluded_node {
-                            continue;
-                        }
-                        if !visited.contains(&neighbor) {
-                            if let Some(state) = self.get_node_state(neighbor) {
-                                if state.active {
-                                    queue.push(neighbor);
-                                }
-                            }
+                        if Some(neighbor) != excluded_node && graph.contains_key(&neighbor) {
+                            queue.push(neighbor);
                         }
                     }
                 }
@@ -623,86 +604,108 @@ impl SimulationController {
         visited.len() == active_node_count
     }
 
-    // Check if all active clients can reach at least one active server
-    pub fn all_clients_connected_to_servers(
+    // Check reacheability between hosts
+    pub fn all_clients_and_servers_mutually_reachable(
         &self,
         graph: &HashMap<NodeId, HashSet<NodeId>>,
         excluded_node: Option<NodeId>,
     ) -> bool {
-        for node_id in graph.keys() {
-            if let Some(state) = self.get_node_state(*node_id) {
-                if matches!(state.node_type, NodeType::Client)
-                    && state.active
-                    && Some(*node_id) != excluded_node
-                {
-                    let reachable = self.bfs_reachable_servers(*node_id, graph);
-                    if reachable.is_empty() {
-                        println!("❌ Client {} cannot reach any server", node_id);
-                        return false;
-                    }
+
+        let clients: Vec<NodeId> = self.get_all_client_ids()
+            .into_iter()
+            .filter(|id| Some(*id) != excluded_node && graph.contains_key(id))
+            .collect();
+
+        let servers: Vec<NodeId> = self.get_all_server_ids()
+            .into_iter()
+            .filter(|id| Some(*id) != excluded_node && graph.contains_key(id))
+            .collect();
+
+        println!("💡💡💡💡💡💡💡 Checking connectivity for clients: {:?}", clients);
+        println!("💡💡💡💡💡💡💡 Checking connectivity for servers: {:?}", servers);
+
+
+        for &client in &clients {
+            for &server in &servers {
+                println!("🔍 Checking: Client {} → Server {}", client, server);
+
+                if !self.can_reach(graph, client, server, excluded_node) {
+                    println!("❌ Client {} cannot reach Server {}", client, server);
+                    return false;
+                }
+                println!("✅ Client {} can reach Server {}", client, server);
+
+            }
+        }
+
+        for &server in &servers {
+            for &client in &clients {
+                if !self.can_reach(graph, server, client, excluded_node) {
+                    println!("❌ Server {} cannot reach Client {}", server, client);
+                    return false;
                 }
             }
         }
+
         true
     }
 
-
-
-    // Optional: Check if all active servers can reach at least one client
-    pub fn all_servers_connected_to_clients(
+    fn can_reach(
         &self,
         graph: &HashMap<NodeId, HashSet<NodeId>>,
+        from: NodeId,
+        to: NodeId,
         excluded_node: Option<NodeId>,
     ) -> bool {
-        for node_id in graph.keys() {
-            if let Some(state) = self.get_node_state(*node_id) {
-                if matches!(state.node_type, NodeType::Server)
-                    && state.active
-                    && Some(*node_id) != excluded_node
-                {
-                    let mut visited = HashSet::new();
-                    let mut queue = VecDeque::from([*node_id]);
+        println!("⚠️ INSIDE CAN_REACH: {} → {}", from, to);
 
-                    while let Some(current) = queue.pop_front() {
-                        if visited.insert(current) {
-                            if let Some(curr_state) = self.get_node_state(current) {
-                                if curr_state.active
-                                    && matches!(curr_state.node_type, NodeType::Client)
-                                    && Some(current) != excluded_node
-                                {
-                                    break;
-                                }
-                            }
+        if from == to {
+            return true;
+        }
 
-                            if let Some(neighs) = graph.get(&current) {
-                                for &n in neighs {
-                                    if Some(n) == excluded_node {
-                                        continue;
-                                    }
-                                    if let Some(neigh_state) = self.get_node_state(n) {
-                                        if neigh_state.active && !visited.contains(&n) {
-                                            queue.push_back(n);
-                                        }
-                                    }
-                                }
-                            }
-                        }
+        if !graph.contains_key(&from) || !graph.contains_key(&to) {
+            println!("❌ One of the nodes is not in graph: from={} in_graph={} | to={} in_graph={}",
+                     from, graph.contains_key(&from), to, graph.contains_key(&to));
+            return false;
+        }
+
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+        queue.push_back(from);
+        visited.insert(from);
+
+        while let Some(current) = queue.pop_front() {
+            println!("➡️ Visiting node {}", current);
+
+            if current == to {
+                println!("✅ Found path from {} to {}", from, to);
+                return true;
+            }
+
+            if let Some(neighbors) = graph.get(&current) {
+                for &neighbor in neighbors {
+                    if Some(neighbor) == excluded_node || visited.contains(&neighbor) {
+                        continue;
                     }
 
-                    if !visited.iter().any(|&id| {
-                        self.get_node_state(id)
-                            .map_or(false, |s| {
-                                s.active && matches!(s.node_type, NodeType::Client) && Some(id) != excluded_node
-                            })
-                    }) {
-                        println!("❌ Server {} cannot reach any client", node_id);
-                        return false;
+                    let is_target = neighbor == to;
+                    let is_dronelike = self.get_node_type(neighbor) == Some(NodeType::Drone);
+
+                    if (is_dronelike || is_target) && graph.contains_key(&neighbor) {
+                        visited.insert(neighbor);
+                        queue.push_back(neighbor);
+                        println!("🔄 Queuing neighbor {}", neighbor);
+                    } else {
+                        println!("⛔ Skipping non-drone node {} (type: {:?})", neighbor, self.get_node_type(neighbor));
                     }
                 }
             }
         }
-        true
+
+        println!("🚫 NO PATH from {} to {}", from, to);
+        false
     }
+
 
 
 
