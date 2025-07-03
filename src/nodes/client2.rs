@@ -11,7 +11,7 @@ use wg_2024::packet::{Ack, FloodRequest, FloodResponse, Fragment, Nack, NodeType
 use wg_2024::packet::PacketType::MsgFragment;
 use wg_2024::drone::Drone;
 use crossbeam_channel::{select, select_biased, Receiver, Sender};
-use log::{info, warn};
+use log::{error, info, warn};
 use petgraph::graph::{Graph, NodeIndex, UnGraph};
 use petgraph::algo::dijkstra;
 use petgraph::data::Build;
@@ -374,48 +374,99 @@ impl MyClient {
         }
     }
 
+    fn wait_for_path(&mut self, src: NodeId, dst: NodeId, max_retries: usize) -> Option<Vec<NodeId>> {
+        for attempt in 0..max_retries {
+            if let Some(path) = self.best_path(src, dst) {
+                return Some(path);
+            }
 
-    fn send_packet(&mut self, input : String){
-        let bytes = input.trim_end();
-        let chunks: Vec<Vec<u8>> = bytes.as_bytes().chunks(128).map(|chunk| chunk.to_vec()).collect();//we break down the message in smaller chunks
-        for i in 0..chunks.len() {
-            let mut data:[u8;128] = [0;128];
-            for j in 0..chunks[i].len(){
-                data[j] = chunks[i][j];
-            };
-            let fragment:Fragment = Fragment { // we create the fragments based on the chunks
+            warn!(
+            "⚠ Attempt {}: No path from {} to {}. Flooding and retrying...",
+            attempt + 1,
+            src,
+            dst
+        );
+
+            self.send_flood_request(); // Send a FloodRequired
+            std::thread::sleep(std::time::Duration::from_millis(150)); // backoff between retries
+        }
+
+        None
+    }
+
+
+    pub fn send_packet(&mut self, input: String) {
+        let message = input.trim_end();
+        let chunks: Vec<&[u8]> = message.as_bytes().chunks(128).collect();
+        let total_fragments = chunks.len() as u64;
+
+        let target = (*CHATTING_STATUS.lock().unwrap()).2;
+
+        // Try to find path
+        let mut path = self.best_path(self.id, target);
+        if path.is_none() {
+            warn!("⚠ No best path from {} to {}. Triggering flood...", self.id, target);
+            self.send_flood_request();
+            std::thread::sleep(std::time::Duration::from_millis(100)); // Optional backoff
+            path = self.best_path(self.id, target);
+        }
+
+        let Some(hops) = self.wait_for_path(self.id, target, 10) else {
+            error!("❌ Still no path after 10 retries. Aborting message.");
+            return;
+        };
+
+        let session_id = SESSION_IDS.lock().unwrap().clone();
+
+        for (i, chunk) in chunks.iter().enumerate() {
+            let mut data = [0u8; 128];
+            data[..chunk.len()].copy_from_slice(chunk);
+
+            let fragment = Fragment {
                 fragment_index: i as u64,
-                total_n_fragments: chunks.len() as u64,
-                length: chunks[i].len() as u8,
+                total_n_fragments: total_fragments,
+                length: chunk.len() as u8,
                 data,
             };
 
-            let packet = Packet{
-                routing_header: SourceRoutingHeader{
-                    hop_index : 1, // the hop index is initialized to 1 to stay consistent with the logic of the drones
-                    hops : self.best_path(self.id , (*CHATTING_STATUS.lock().unwrap()).2).unwrap(),
+            let packet = Packet {
+                routing_header: SourceRoutingHeader {
+                    hop_index: 1,
+                    hops: hops.clone(),
                 },
-                session_id: SESSION_IDS.lock().unwrap().clone(),
+                session_id,
                 pack_type: MsgFragment(fragment.clone()),
             };
-            println!("♥♥ BEST PATH IS : {:?}",packet.routing_header.hops);
-            self.sent_messages.entry(packet.session_id).or_insert(Vec::new()).push(fragment.clone());
 
+            println!("♥♥ BEST PATH IS : {:?}", packet.routing_header.hops);
 
-            if let Some(next_hop) = packet.routing_header.hops.get(packet.routing_header.hop_index){ //we find the channel associated with the right drone using the RoutingHeader
-                if let Some(sender) = self.packet_send.get(&next_hop){
+            self.sent_messages.entry(session_id).or_insert_with(Vec::new).push(fragment);
+
+            if let Some(&next_hop) = packet.routing_header.hops.get(packet.routing_header.hop_index) {
+                if let Some(sender) = self.packet_send.get(&next_hop) {
                     match sender.try_send(packet.clone()) {
                         Ok(()) => {
-                            info!("Sending packet with message {:?} , path: {:?}" , data , packet.routing_header.hops);
+                            info!(
+                            "📤 Sent fragment {} of {} to {} (path: {:?})",
+                            i + 1,
+                            total_fragments,
+                            next_hop,
+                            packet.routing_header.hops
+                        );
                         }
-                        Err(e)=>{
-                            info!("Error sending packet: {:?}", e);
+                        Err(e) => {
+                            warn!("❌ Failed to send fragment {} to {}: {:?}", i + 1, next_hop, e);
                         }
                     }
+                } else {
+                    warn!("❌ No sender found for next hop {}", next_hop);
                 }
+            } else {
+                warn!("❌ No next hop at index {} in path {:?}", packet.routing_header.hop_index, packet.routing_header.hops);
             }
         }
-        self.increment_ids(&SESSION_IDS)
+
+        self.increment_ids(&SESSION_IDS);
     }
 
     fn send_flood_request(&self) {

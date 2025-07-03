@@ -933,27 +933,21 @@ impl SimulationController {
     }
 
     pub fn add_link(&mut self, a: NodeId, b: NodeId) -> Result<(), Box<dyn std::error::Error>> {
-        // 1. Validate that nodes exist
-        if self.get_node_type(a) == Some(NodeType::Drone) {
-            if !self.command_senders.lock().unwrap().contains_key(&a) {
-                println!("🚨 Missing command_sender for node {}", a);
-                return Err(format!("No command sender for node {}", a).into());
-            }}
-        if self.get_node_type(b) == Some(NodeType::Drone) {
-            if !self.command_senders.lock().unwrap().contains_key(&b) {
-                println!("🚨 Missing command_sender for node {}", b);
-                return Err(format!("No command sender for node {}", b).into());
-            }}
-        if !self.packet_senders.lock().unwrap().contains_key(&a) {
-            println!("🚨 Missing packet_sender map for node {}", a);
-            return Err(format!("No packet sender for node {}", a).into());
-        }
-        if !self.packet_senders.lock().unwrap().contains_key(&b) {
-            println!("🚨 Missing packet_sender map for node {}", b);
-            return Err(format!("No packet sender for node {}", b).into());
+        // === 1. Validate nodes exist and are initialized ===
+        for &node in &[a, b] {
+            if self.get_node_type(node) == Some(NodeType::Drone)
+                && !self.command_senders.lock().unwrap().contains_key(&node)
+            {
+                println!("🚨 Missing command_sender for node {}", node);
+                return Err(format!("No command sender for node {}", node).into());
+            }
+            if !self.packet_senders.lock().unwrap().contains_key(&node) {
+                println!("🚨 Missing packet_sender map for node {}", node);
+                return Err(format!("No packet sender for node {}", node).into());
+            }
         }
 
-        // 2. Constraint: Client should be connected to at most 2 drones
+        // === 2. Constraint: Clients must connect to at most 2 drones ===
         for &(client_id, drone_id) in &[(a, b), (b, a)] {
             if self.get_node_type(client_id) == Some(NodeType::Client)
                 && self.get_node_type(drone_id) == Some(NodeType::Drone)
@@ -965,71 +959,70 @@ impl SimulationController {
                     .count();
 
                 if drone_neighbors >= 2 {
-                    println!("🚨 client must be connected to at most 2 drones");
-                    return Err(format!("Client {} already has 2 drone connections", client_id).into());
+                    println!("🚨 Client {} already has 2 drone connections", client_id);
+                    return Err("Client connection constraint violated".into());
                 }
             }
         }
 
-        // 3. Clone packet senders (used to send packets to these nodes)
-        let (packet_to_a, packet_to_b) = {
-            let mut packet_senders = self.packet_senders.lock().unwrap();
+        // === 3. Create bidirectional channels ===
+        let (tx_ab, rx_ab) = crossbeam_channel::unbounded::<Packet>();
+        let (tx_ba, rx_ba) = crossbeam_channel::unbounded::<Packet>();
 
-            let sender_to_a = packet_senders.get(&b)
-                .and_then(|map| map.get(&a))
-                .cloned();
+        // === 4. Insert into packet_senders ===
+        {
+            let mut psenders = self.packet_senders.lock().unwrap();
+            psenders.entry(a).or_default().insert(b, tx_ab.clone());
+            psenders.entry(b).or_default().insert(a, tx_ba.clone());
+        }
 
-            let sender_to_b = packet_senders.get(&a)
-                .and_then(|map| map.get(&b))
-                .cloned();
+        // === 5. Spawn forwarding threads ===
+        if let Some(inbox_b) = self.inbox_senders.lock().unwrap().get(&b).cloned() {
+            std::thread::spawn(move || {
+                for pkt in rx_ab {
+                    if let Err(e) = inbox_b.send(pkt) {
+                        eprintln!("❌ Forwarding thread {} → {} failed: {}", a, b, e);
+                        break;
+                    }
+                }
+                println!("⚠️ Forwarding thread from {} to {} exited", a, b);
+            });
+        }
 
-            if sender_to_a.is_none() || sender_to_b.is_none() {
-                // 💥 Channel does not exist yet, create it
-                let (tx_a, rx_a) = unbounded::<Packet>();
-                let (tx_b, rx_b) = unbounded::<Packet>();
+        if let Some(inbox_a) = self.inbox_senders.lock().unwrap().get(&a).cloned() {
+            std::thread::spawn(move || {
+                for pkt in rx_ba {
+                    if let Err(e) = inbox_a.send(pkt) {
+                        eprintln!("❌ Forwarding thread {} → {} failed: {}", b, a, e);
+                        break;
+                    }
+                }
+                println!("⚠️ Forwarding thread from {} to {} exited", b, a);
+            });
+        }
 
-                // Insert for a -> b
-                packet_senders.entry(a).or_default().insert(b, tx_a.clone());
-                // Insert for b -> a
-                packet_senders.entry(b).or_default().insert(a, tx_b.clone());
-
-                // Also update packet_receivers if needed
-                self.packet_receivers.lock().unwrap().insert(a, rx_a);
-                self.packet_receivers.lock().unwrap().insert(b, rx_b);
-            }
-
-            // ✅ Now safe to unwrap because they are guaranteed to exist
-            let packet_to_a = packet_senders[&b][&a].clone();
-            let packet_to_b = packet_senders[&a][&b].clone();
-
-            (packet_to_a, packet_to_b)
-        }; // ← Lock is dropped here!
-
-
-        // 4. Send AddSender to each node
-        if self.get_node_type(a) == Some(NodeType::Drone) {
-            if let Some(command_to_a) = self.command_senders.lock().unwrap().get(&a) {
-                command_to_a.send(DroneCommand::AddSender(b, packet_to_b.clone()))
-                    .map_err(|e| format!("Failed to send AddSender to {}: {}", a, e))?;
+        // === 6. Send AddSender to drones ===
+        for (node, neighbor, sender) in vec![
+            (a, b, tx_ab.clone()),
+            (b, a, tx_ba.clone()),
+        ] {
+            if self.get_node_type(node) == Some(NodeType::Drone) {
+                if let Some(cmd_tx) = self.command_senders.lock().unwrap().get(&node) {
+                    cmd_tx
+                        .send(DroneCommand::AddSender(neighbor, sender))
+                        .map_err(|e| format!("Failed to send AddSender to {}: {}", node, e))?;
+                }
             }
         }
 
-        if self.get_node_type(b) == Some(NodeType::Drone) {
-            if let Some(command_to_b) = self.command_senders.lock().unwrap().get(&b) {
-                command_to_b.send(DroneCommand::AddSender(a, packet_to_a.clone()))
-                    .map_err(|e| format!("Failed to send AddSender to {}: {}", b, e))?;
-            }
-        }
 
-
-        // 5. Update the internal network graph
+        // === 7. Update network graph and config ===
         self.network_graph.entry(a).or_default().insert(b);
         self.network_graph.entry(b).or_default().insert(a);
 
-        let a_type = self.get_node_type(a);
-        let b_type = self.get_node_type(b);
-
         {
+            let a_type = self.get_node_type(a);
+            let b_type = self.get_node_type(b);
             let mut cfg = self.network_config.lock().unwrap();
 
             match (a_type, b_type) {
@@ -1053,34 +1046,19 @@ impl SimulationController {
                     cfg.append_drone_connection(b, a);
                     cfg.append_server_connection(a, b);
                 }
-                _ => {} // Client–Server or unsupported case
+                _ => {}
             }
         }
 
-
-        // 5.5) ✅ Insert into shared_senders
-
-        // Now safe to lock again since previous locks are dropped
-        {
-            let mut psenders = self.packet_senders.lock().unwrap();
-            println!("🤎🧸🍂 222");
-
-            // Update packet_senders map (though this might be redundant)
-            psenders.entry(a).or_insert_with(HashMap::new).insert(b, packet_to_a.clone());
-            psenders.entry(b).or_insert_with(HashMap::new).insert(a, packet_to_b.clone());
-        } // Drop packet_senders lock
-
-        // Update shared_senders
+        // === 8. Update shared_senders (if applicable) ===
         if let Ok(mut shared) = self.shared_senders.lock() {
-            shared.insert((a, b), packet_to_a);
-            shared.insert((b, a), packet_to_b);
+            shared.insert((a, b), tx_ab.clone());
+            shared.insert((b, a), tx_ba.clone());
             info!("🧪 Inserted ({}, {}) and ({}, {}) into shared_senders", a, b, b, a);
-        } else {
-            warn!("❌ Failed to lock shared_senders in add_link()");
         }
 
-        println!("🤎🧸🍂🤎🧸🍂🤎🧸🍂🤎🧸🍂Adding {} and {} detected",a,b);
-
+        // === 9. Notify GUI ===
+        println!("🤎🧸🍂 Successfully added link between {} and {}", a, b);
         broadcast_topology_change(
             &self.gui_input,
             &self.network_config,
