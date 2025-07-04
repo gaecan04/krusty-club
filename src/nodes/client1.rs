@@ -551,64 +551,66 @@ impl MyClient {
                 if tokens.len() >= 3 {
                     let media_name = media;
                     let base64_data = base64;
+
                     if media_name.to_string() == "ERROR" && base64_data.to_string() == "NotFound" {
                         println!("Client {} received MEDIA DOWNLOAD RESPONSE: Media not found.", self.id)
                     } else {
                         println!("Client {} received MEDIA DOWNLOAD RESPONSE for media '{}'.", self.id, media_name);
-                        //- - - - logic for showing the image - - - -
+
                         match STANDARD.decode(&base64_data) {
                             Ok(image_bytes) => {
-                                println!("Client {} successfully decoded base64 data for media '{}'.", self.id, media_name);
-                                //load_from_memory detects common image formats
                                 match load_from_memory(&image_bytes) {
                                     Ok(img) => {
                                         println!("Client {} successfully loaded image data for media '{}'.", self.id, media_name);
-                                        let mut temp_file_path = temp_dir();
-                                        //guessing the extension format
+
                                         let extension = match img.color() {
-                                            image::ColorType::Rgb8 => "png",
-                                            image::ColorType::Rgba8 => "png",
-                                            image::ColorType::L8 => "png",
-                                            image::ColorType::La8 => "png",
-                                            image::ColorType::Rgb16 => "png",
-                                            image::ColorType::Rgba16 => "png",
-                                            image::ColorType::L16 => "png",
-                                            image::ColorType::La16 => "png",
+                                            image::ColorType::Rgb8
+                                            | image::ColorType::Rgba8
+                                            | image::ColorType::L8
+                                            | image::ColorType::La8
+                                            | image::ColorType::Rgb16
+                                            | image::ColorType::Rgba16
+                                            | image::ColorType::L16
+                                            | image::ColorType::La16 => "png",
                                             _ => "bin",
                                         };
-                                        let cleaned_media_name = media_name.replace(|c : char| !c.is_ascii_alphanumeric() && c != ' ' && c != '-', "");
-                                        let filename = format!("media_{}.{}", cleaned_media_name, extension);
+
+                                        // Create a temp file with a proper extension
+                                        let mut temp_file_path = temp_dir();
+                                        let filename = format!("media_preview_{}.{}", self.id, extension);
                                         temp_file_path.push(filename);
-                                        match img.save(&temp_file_path) {
-                                            Ok(_) => {
-                                                let open_command = if cfg!(target_os = "windows") {
-                                                    "cmd"
-                                                } else if cfg!(target_os = "macos") {
-                                                    "open"
-                                                } else {
-                                                    "xdg-open"
-                                                };
 
-                                                let path_str = temp_file_path.to_string_lossy().into_owned();
-                                                let args = if cfg!(target_os = "windows") {
-                                                    vec!["/C", "start", "", path_str.as_str()] // "" prevents issues with filenames with spaces
-                                                } else {
-                                                    vec![path_str.as_str()]
-                                                };
+                                        // Save temporarily
+                                        if let Err(e) = img.save(&temp_file_path) {
+                                            eprintln!("Client {} failed to temporarily save image: {}", self.id, e);
+                                            return;
+                                        }
 
-                                                match Command::new(open_command).args(args.clone()).spawn() {
-                                                    Ok(_) => println!("🖼️🖼️🖼️Client {} successfully opened media '{}' with command '{} {:?}'.", self.id, media_name, open_command, args),
-                                                    Err(e) => eprintln!("Client {} failed to open media '{}' using command '{} {:?}': {}", self.id, media_name, open_command, args, e),
-                                                }
+                                        // Open with system viewer
+                                        let open_command = if cfg!(target_os = "windows") {
+                                            "cmd"
+                                        } else if cfg!(target_os = "macos") {
+                                            "open"
+                                        } else {
+                                            "xdg-open"
+                                        };
 
-                                            },
-                                            Err(e) => eprintln!("Client {} failed to save image data for media '{}' to file: {}", self.id, media_name, e),
+                                        let path_str = temp_file_path.to_string_lossy().into_owned();
+                                        let args = if cfg!(target_os = "windows") {
+                                            vec!["/C", "start", "", &path_str]
+                                        } else {
+                                            vec![path_str.as_str()]
+                                        };
+
+                                        match Command::new(open_command).args(args.clone()).spawn() {
+                                            Ok(_) => println!("🖼️ Opened media '{}' for client {}", media_name, self.id),
+                                            Err(e) => eprintln!("Failed to open image: {}", e),
                                         }
                                     },
-                                    Err(e) => eprintln!("Client {} failed to load image from bytes for media '{}': {}", self.id, media_name, e),
+                                    Err(e) => eprintln!("Client {} failed to load image from memory: {}", self.id, e),
                                 }
                             },
-                            Err(e) => eprintln!("Client {} failed to decode base64 data for media '{}': {}", self.id, media_name, e),
+                            Err(e) => eprintln!("Client {} failed to decode base64 data: {}", self.id, e),
                         }
                     }
                 }
