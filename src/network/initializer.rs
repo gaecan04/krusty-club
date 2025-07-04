@@ -399,6 +399,8 @@ pub trait DroneImplementation: Send + 'static {
 pub struct DroneWithId {
     pub id: NodeId,
     pub instance: Box<dyn DroneImplementation>,
+    pub group_name: Option<String>, // ← if this exists
+
 }
 
 
@@ -841,20 +843,20 @@ impl NetworkInitializer {
     }
 
 
-    fn initialize_drones(&mut self) {
+    pub fn initialize_drones(&mut self) {
+        for DroneWithId { id, group_name, mut instance } in self.drone_impls.drain(..) {
+            if let Some(group) = group_name {
+                println!("🛸 Drone {} uses {}", id, group);
+            } else {
+                println!("🛸 Drone {} uses fallback MyDrone", id);
+            }
 
-        for DroneWithId { id, mut instance } in self.drone_impls.drain(..) {
-
-            // Spawn a thread that just runs the drone's run() method
             thread::spawn(move || {
-                instance.run(); // <- Each group's own logic
+                instance.run();
             });
-            //println!("Spawned drone {}", id);
         }
-
-
-
     }
+
 
 
     fn initialize_clients(&mut self, gui_input: SharedGuiInput, log: Arc<Mutex<Vec<String>>>, host_receivers: &HashMap<NodeId, Receiver<Packet>>) {
@@ -1001,21 +1003,31 @@ impl NetworkInitializer {
             let command_recv = self.command_receivers.get(&id).expect("Missing command_receiver").clone();
             let event_send = self.event_sender.as_ref().expect("Missing event_sender").clone();
 
-            let drone_impl: Box<dyn DroneImplementation> = if num_impls == 0 {
-                Box::new(MyDrone::new(id, event_send, command_recv, packet_recv, packet_send, pdr))
+            let (drone_impl, group_name) = if num_impls == 0 {
+                (
+                    Box::new(MyDrone::new(id, event_send, command_recv, packet_recv, packet_send, pdr)) as Box<dyn DroneImplementation>,
+                    None,
+                )
             } else {
                 let impl_key = &group_keys[impl_index];
                 if let Some(create_fn) = group_implementations.get(impl_key) {
-                    create_fn(id, event_send, command_recv, packet_recv, packet_send, pdr)
+                    (
+                        create_fn(id, event_send, command_recv, packet_recv, packet_send, pdr),
+                        Some(impl_key.clone()),
+                    )
                 } else {
                     warn!("⚠️ Unknown group key, falling back to MyDrone");
-                    Box::new(MyDrone::new(id, event_send, command_recv, packet_recv, packet_send, pdr))
+                    (
+                        Box::new(MyDrone::new(id, event_send, command_recv, packet_recv, packet_send, pdr)) as Box<dyn DroneImplementation>,
+                        None,
+                    )
                 }
             };
 
             implementations.push(DroneWithId {
                 id,
                 instance: drone_impl,
+                group_name,
             });
 
             count += 1;

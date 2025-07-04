@@ -234,7 +234,7 @@ impl MyClient {
         }
         else {
             self.seen_flood_ids.insert((request.flood_id , request.initiator_id));
-            updated_request.path_trace.push((self.id , Client));
+           // updated_request.path_trace.push((self.id , Client));
             let sender_id = if updated_request.path_trace.len() > 1 {
                 Some(updated_request.path_trace[updated_request.path_trace.len() - 2].0)
             } else {
@@ -265,7 +265,7 @@ impl MyClient {
     }
 
     fn process_flood_response (&mut self, response: &FloodResponse) {
-        //info!("Client {:?} is processing a FloodResponse {:?}", self.id , response.path_trace);
+        info!("😂😂😂😂😂😂😂😂😂😂😂Client {:?} is processing a FloodResponse {:?}", self.id , response.path_trace);
         let mut graph_copy = self.net_graph.clone();
         let mut map_copy = self.node_map.clone();
         for i in 0 .. response.path_trace.len()-1{
