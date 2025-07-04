@@ -60,6 +60,8 @@ pub struct NetworkApp {
     shared_senders: Arc<Mutex<HashMap<(NodeId, NodeId), Sender<Packet>>>>,
     host_senders: HashMap<NodeId, Sender<Packet>>, // ✅ the sc-hosts hashmap
 
+    show_no_path_popup: Arc<Mutex<bool>>,
+
 }
 
 impl NetworkApp {
@@ -88,10 +90,19 @@ impl NetworkApp {
     }
 
     fn log(&self, message: impl ToString) {
+        let message_str = message.to_string();
+
+        if message_str.contains("Client could not calculate a best path after 3 tries") {
+            if let Ok(mut flag) = self.show_no_path_popup.lock() {
+                *flag = true;
+            }
+        }
+
         if let Ok(mut log) = self.simulation_log.lock() {
-            log.push(message.to_string());
+            log.push(message_str);
         }
     }
+
 
 
     // This function is kept for the UI but delegates to NetworkRenderer if possible
@@ -476,6 +487,23 @@ impl NetworkApp {
                     });
                 });
         }
+        if let Ok(mut flag) = self.show_no_path_popup.lock() {
+            if *flag {
+                egui::Window::new("❌ Path Not Found")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        ui.label("Client could not find a path after 3 tries.");
+                        ui.label("Check the network connectivity or re-run discovery.");
+                        if ui.button("OK").clicked() {
+                            *flag = false;
+                        }
+                    });
+            }
+        }
+
+
 
     }
 
@@ -698,6 +726,7 @@ impl Default for NetworkApp {
             show_shared_senders_popup:false,
             shared_senders: Arc::new(Mutex::new(HashMap::new())),
             host_senders: HashMap::new(), // ✅ the sc-hosts hashmap
+            show_no_path_popup: Arc::new(Mutex::new(false)),
 
         }
     }

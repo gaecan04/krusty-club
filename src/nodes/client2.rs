@@ -359,13 +359,38 @@ impl MyClient {
                         }
                     }
                 }
-            }
+            },
             NackType::ErrorInRouting(node_id) => {
-                // since the error in routing most likely implies that a drone has crashed we remove the drone and its edges from the network, if the drone hasn't crashed we just add it again during the flooding
-                let crash_index = self.node_map.remove(&node_id).unwrap().0;
-                self.remove_all_edges_with_node(crash_index);
-                self.send_flood_request();
-            }
+                let involved_in_any = {
+                    let shared_senders = self.shared_senders.as_ref().unwrap().lock().unwrap();
+                    shared_senders.keys().any(|(a, b)| *a == node_id || *b == node_id)
+                }; // <-- shared_senders dropped here
+
+                if involved_in_any {
+                    if let Some(pos) = packet.routing_header.hops.iter().position(|&n| n == node_id) {
+                        if pos > 0 {
+                            let prev_node = packet.routing_header.hops[pos - 1];
+
+                            if let (Some((from_index, _)), Some((to_index, _))) =
+                                (self.node_map.get(&prev_node), self.node_map.get(&node_id))
+                            {
+                                if let Some(edge) = self.net_graph.find_edge(*from_index, *to_index) {
+                                    self.net_graph.remove_edge(edge);
+                                }
+                            }
+                        }
+                    }
+
+                    self.send_flood_request();
+                } else {
+                    // No borrow of shared_senders here, so mutable self is fine
+                    if let Some((crash_index, _)) = self.node_map.remove(&node_id) {
+                        self.remove_all_edges_with_node(crash_index);
+                    }
+
+                    self.send_flood_request();
+                }
+            },
             _ => {
                 // since the other possible Nacks that can be received presume some malfunctioning in the flooding or the drones themselves
                 // we can't properly intervene on the graph, so we should try to flood as we see fit
@@ -411,8 +436,9 @@ impl MyClient {
             path = self.best_path(self.id, target);
         }
 
-        let Some(hops) = self.wait_for_path(self.id, target, 10) else {
-            error!("❌ Still no path after 10 retries. Aborting message.");
+        let Some(hops) = self.wait_for_path(self.id, target, 3) else {
+            error!("❌ Still no path after 3 retries. Aborting message.");
+            self.log("Client could not calculate a best path after 3 tries".to_string());
             return;
         };
 

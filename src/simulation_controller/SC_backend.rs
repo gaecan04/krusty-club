@@ -906,10 +906,29 @@ impl SimulationController {
                 return Err(format!("Connection node {} does not exist", conn_id).into());
             }
         }
-        // Check that the network will remain valid
-        // (This is a simplified check - you might need more validation)
+
+        // Enforce: Clients must connect to at most 2 drones
+        for &conn_id in connections {
+            if self.get_node_type(conn_id) == Some(NodeType::Client) {
+                // Count how many drones are already connected to this client
+                let neighbors = self.network_graph.get(&conn_id).cloned().unwrap_or_default();
+                let drone_neighbors = neighbors.iter()
+                    .filter(|id| self.get_node_type(**id) == Some(NodeType::Drone))
+                    .count();
+
+                if drone_neighbors >= 2 {
+                    println!("A client already has 2 drone connections. Cannot connect new drone");
+                    return Err(format!(
+                        "Client {} already has 2 drone connections. Cannot connect new drone {}.",
+                        conn_id, id
+                    ).into());
+                }
+            }
+        }
+
         Ok(true)
     }
+
 
 
     pub fn load_group_implementations() -> HashMap<String, GroupImplFactory> {
