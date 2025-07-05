@@ -45,7 +45,7 @@ krusty-club
 From terminal: 
 ``` rust
 $env:RUST_LOG = "info"
-cargo run --features "serialize,unlimited_buffer" -- "path to toml file"
-eg: cargo run --features "serialize,unlimited_buffer" -- topologies/butterfly.toml
+cargo run --features "serialize" -- "path to toml file"
+eg: cargo run --features "serialize" -- topologies/butterfly.toml
 ```
 You are invited to try the simulation with different topologies!
