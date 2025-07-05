@@ -234,7 +234,6 @@ impl MyClient {
         }
         else {
             self.seen_flood_ids.insert((request.flood_id , request.initiator_id));
-           // updated_request.path_trace.push((self.id , Client));
             let sender_id = if updated_request.path_trace.len() > 1 {
                 Some(updated_request.path_trace[updated_request.path_trace.len() - 2].0)
             } else {
@@ -264,14 +263,26 @@ impl MyClient {
         }
     }
 
-    fn process_flood_response (&mut self, response: &FloodResponse) {
-        info!("😂😂😂😂😂😂😂😂😂😂😂Client {:?} is processing a FloodResponse {:?}", self.id , response.path_trace);
-        let mut graph_copy = self.net_graph.clone();
-        let mut map_copy = self.node_map.clone();
-        for i in 0 .. response.path_trace.len()-1{
-            let node1 = self.add_node_no_duplicate(&mut graph_copy, &mut map_copy, response.path_trace[i].clone().0 , response.path_trace[i].1);
-            let node2 = self.add_node_no_duplicate(&mut graph_copy, &mut map_copy, response.path_trace[i+1].clone().0 , response.path_trace[i+1].1);
-            self.add_edge_no_duplicate(&mut self.net_graph.clone(), node1, node2, 1);
+    fn process_flood_response(&mut self, response: &FloodResponse) {
+        info!(
+        "Client {:?} is processing a FloodResponse {:?}",
+        self.id, response.path_trace
+    );
+
+        for i in 0..response.path_trace.len() - 1 {
+            let node1 = Self::add_node_no_duplicate(
+                &mut self.net_graph,
+                &mut self.node_map,
+                response.path_trace[i].0,
+                response.path_trace[i].1,
+            );
+            let node2 = Self::add_node_no_duplicate(
+                &mut self.net_graph,
+                &mut self.node_map,
+                response.path_trace[i + 1].0,
+                response.path_trace[i + 1].1,
+            );
+            Self::add_edge_no_duplicate(&mut self.net_graph, node1, node2, 1);
         }
     }
 
@@ -383,11 +394,7 @@ impl MyClient {
 
                     self.send_flood_request();
                 } else {
-                    // No borrow of shared_senders here, so mutable self is fine
-                    if let Some((crash_index, _)) = self.node_map.remove(&node_id) {
-                        self.remove_all_edges_with_node(crash_index);
-                    }
-
+                    self.safe_remove_node(node_id);
                     self.send_flood_request();
                 }
             },
@@ -438,7 +445,7 @@ impl MyClient {
 
         let Some(hops) = self.wait_for_path(self.id, target, 3) else {
             error!("❌ Still no path after 3 retries. Aborting message.");
-            self.log(format!("Client {} could not calculate a best path after 3 tries",self.id));
+            self.log("Client could not calculate a best path after 3 tries".to_string());
             return;
         };
 
@@ -609,7 +616,7 @@ impl MyClient {
         let chatting_status = match CHATTING_STATUS.lock() {
             Ok(guard) => *guard,
             Err(poisoned) => {
-                eprintln!("⚠️ Mutex poisoned! Recovering.");
+                eprintln!("⚠ Mutex poisoned! Recovering.");
                 *poisoned.into_inner()
             }
         };
@@ -635,21 +642,23 @@ impl MyClient {
                                         let peer_idx = if let Some(idx) = maybe_node_index {
                                             *idx
                                         } else {
-                                            let idx = self.add_node_no_duplicate(&mut (self.net_graph.clone()), &mut (self.node_map.clone()) , peer , NodeType::Drone);
+                                            let idx = Self::add_node_no_duplicate(&mut (self.net_graph.clone()), &mut (self.node_map.clone()) , peer , NodeType::Drone);
                                             //self.node_map.insert(peer, (idx, NodeType::Drone));
                                             idx
                                         };
-                                        self.add_edge_no_duplicate(&mut (self.net_graph.clone()), self_idx , peer_idx, 1);
+                                        Self::add_edge_no_duplicate(&mut (self.net_graph.clone()), self_idx , peer_idx, 1);
                                         println!("Client {} added link to {} via AddSender", self.id, peer);
+                                        self.send_flood_request();
+                                        info!("retunring from addsender");
+                                        return Ok("NO_CHAT_COMMAND".to_string());
                                     }
                                 }
-                                self.send_flood_request();
+
                             }
                         }
                     }
                 }
-                info!("retunring from addsender");
-                return Ok("NO_CHAT_COMMAND".to_string());
+
             }
 
             if let Some(parts) = action.strip_prefix("RemoveSender::") {
@@ -663,16 +672,17 @@ impl MyClient {
                                 if let Some(edge) = self.net_graph.find_edge(a_idx, b_idx).or_else(|| self.net_graph.find_edge(b_idx, a_idx)) {
                                     self.net_graph.remove_edge(edge);
                                     println!("Client {} removed link to {} via RemoveSender", self.id, peer);
+                                    self.send_flood_request();
+                                    info!("returning from remove sender");
+                                    return Ok("NO_CHAT_COMMAND".to_string());
                                 }
 
                             }
                         }
-                        self.send_flood_request();
 
                     }
                 }
-                info!("returning from remove sender");
-                return Ok("NO_CHAT_COMMAND".to_string());
+
             }
 
             if let Some(parts) = action.strip_prefix("SpawnDrone::") {
@@ -687,30 +697,34 @@ impl MyClient {
                                 println!("shared senders found");
                                 if let Ok(map) = shared.lock() {
                                     println!("map found");
-
                                     if map.contains_key(&(drone_id, self.id)) || map.contains_key(&(self.id, drone_id)) {
                                         // Proceed with insertion
-
-
                                         for ((from, to), sender) in map.iter() {
                                             if *from == self.id && *to == drone_id {
                                                 self.packet_send.insert(drone_id, sender.clone());
                                                 println!("Client {} added sender to drone {} (from shared_senders)", self.id, drone_id);
+                                                Self::add_node_no_duplicate(&mut (self.net_graph.clone()), &mut (self.node_map.clone()) , drone_id , NodeType::Drone);
+                                                //self.node_map.insert(drone_id, (idx, NodeType::Drone));
+                                                self.send_flood_request();
+                                                return Ok("NO_CHAT_COMMAND".to_string());
                                             }
-                                            if *to == self.id && *from == drone_id {
+                                            else if *to == self.id && *from == drone_id {
                                                 self.packet_send.insert(drone_id, sender.clone());
                                                 println!("Client {} added sender from drone {} (from shared_senders)", self.id, drone_id);
+                                                Self::add_node_no_duplicate(&mut (self.net_graph.clone()), &mut (self.node_map.clone()) , drone_id , NodeType::Drone);
+                                                //self.node_map.insert(drone_id, (idx, NodeType::Drone));
+                                                self.send_flood_request();
+                                                return Ok("NO_CHAT_COMMAND".to_string());
                                             }
-
-
-
                                         }
-                                        let idx = self.add_node_no_duplicate(&mut (self.net_graph.clone()), &mut (self.node_map.clone()) , drone_id , NodeType::Drone);
+                                        Self::add_node_no_duplicate(&mut (self.net_graph.clone()), &mut (self.node_map.clone()) , drone_id , NodeType::Drone);
                                         //self.node_map.insert(drone_id, (idx, NodeType::Drone));
+                                        self.send_flood_request();
+                                        return Ok("NO_CHAT_COMMAND".to_string());
                                     }
                                 }
                             }
-                            self.send_flood_request();
+
 
                         } else {
                             println!("Client {} failed to parse peer list in SpawnDrone: {}", self.id, components[1]);
@@ -722,7 +736,6 @@ impl MyClient {
                     println!("Client {} received malformed SpawnDrone message: {}", self.id, parts);
                 }
                 info!("returning from spawn drone");
-                return Ok("NO_CHAT_COMMAND".to_string());
             }
 
             if action.starts_with("Crash::") {
@@ -730,17 +743,12 @@ impl MyClient {
                 if parts.len() == 2 {
                     if let Ok(crashed_id) = parts[1].parse::<NodeId>() {
                         println!("Client {} received crash signal for node {}. Cleaning up and triggering rediscovery.", self.id, crashed_id);
-                        self.packet_send.remove(&crashed_id);
 
                         let maybe_node_index: Option<NodeIndex> = self.node_map.remove(&crashed_id).map(|(index, _)| index);
-                        if let Some(index) = maybe_node_index {
-                            self.net_graph.remove_node(index);
-                            self.remove_all_edges_with_node(index);
-                            println!("Client {} removed node {} from graph.", self.id, crashed_id);
-                        } else {
-                            println!("Client {} received crash for unknown node {}.", self.id, crashed_id);
-                        }
+                        self.safe_remove_node(crashed_id);
                         self.send_flood_request();
+                        return Ok("NO_CHAT_COMMAND".to_string());
+
                     } else {
                         println!("Client {} received invalid Crash ID: {}", self.id, parts[1]);
                     }
@@ -749,8 +757,8 @@ impl MyClient {
                 }
                 return Ok("NO_CHAT_COMMAND".to_string());
             }
-            info!("returning from crash");
-            self.send_flood_request();
+            //info!("returning from crash");
+            //self.send_flood_request();
             return Ok("NO_CHAT_COMMAND".to_string());
         }
         match tokens.as_slice() {
@@ -850,53 +858,58 @@ impl MyClient {
         }
     }
 
-    fn add_node_no_duplicate(&mut self, graph: &mut Graph<u8, u8, Undirected>, node_map: &mut HashMap<NodeId, (NodeIndex, NodeType)>, value: u8 , node_type: NodeType) -> NodeIndex {
-        if let Some(&idx) = node_map.get(&value) {
-            // Node with this value already exists
-            //info!("Node with ID: {:?} , is already present for {:?}" , value , self.id);
-            idx.0
-        } else {
-            // Create new node
-            //info!("Adding node: {:?} to {:?}" , value , self.id);
-            let idx = graph.add_node(value);
-            node_map.insert(value, (idx , node_type));
-            self.node_map = node_map.clone();
-            self.net_graph = graph.clone();
-            info!("NODES => {:?}" , self.node_map);
+    fn add_node_no_duplicate(
+        graph: &mut Graph<u8, u8, Undirected>,
+        node_map: &mut HashMap<NodeId, (NodeIndex, NodeType)>,
+        value: u8,
+        node_type: NodeType,
+    ) -> NodeIndex {
+        if let Some(&(idx, _)) = node_map.get(&value) {
             idx
-
+        } else {
+            let idx = graph.add_node(value);
+            node_map.insert(value, (idx, node_type));
+            idx
         }
     }
+
     fn add_edge_no_duplicate(
-        &mut self,
         graph: &mut Graph<u8, u8, Undirected>,
         a: NodeIndex,
         b: NodeIndex,
         weight: u8,
     ) -> bool {
-        // Ensure both nodes exist in the graph
-        let node_bound = graph.node_bound();
-        if a.index() < node_bound && b.index() < node_bound {
+        if graph.node_weight(a).is_some() && graph.node_weight(b).is_some() {
             if !graph.contains_edge(a, b) {
                 graph.add_edge(a, b, weight);
-                self.net_graph = graph.clone();
                 info!("Adding edge {:?} == {:?}", a, b);
                 true
             } else {
                 false
             }
         } else {
-            // Optionally: print a warning
             info!(
-                "Tried to add edge between invalid indices: a = {:?}, b = {:?}, graph.node_bound = {}",
-                a,
-                b,
-                node_bound
-            );
+            "Tried to add edge between invalid indices: a = {:?}, b = {:?}",
+            a, b
+        );
             false
         }
     }
 
+    fn safe_remove_node(&mut self, node_id: NodeId) {
+        if let Some((idx, _)) = self.node_map.remove(&node_id) {
+            // Remove all connected edges
+            let edges: Vec<_> = self.net_graph.edges(idx).map(|e| e.id()).collect();
+            for edge_id in edges {
+                self.net_graph.remove_edge(edge_id);
+            }
+
+            // Remove the node itself
+            self.net_graph.remove_node(idx);
+        }
+
+        self.packet_send.remove(&node_id);
+    }
 
     fn remove_all_edges_with_node(&mut self, crash_index: NodeIndex) {
         //let index:NodeIndex = (*self.node_map.get(&crash_id).unwrap()).0;
@@ -916,6 +929,7 @@ impl MyClient {
         for edge_id in edges_to_remove {
             self.net_graph.remove_edge(edge_id);
         }
+        self.net_graph.remove_node(crash_index);
     }
 
     fn best_path(&mut self, source: NodeId, target: NodeId) -> Option<Vec<NodeId>> {
@@ -993,7 +1007,6 @@ impl MyClient {
             if current_node == target_idx {
                 break;
             }
-
             for edge in self.net_graph.edges(current_node) {
                 let neighbor_idx = edge.target();
                 let weight = *edge.weight() as u32;
@@ -1003,13 +1016,12 @@ impl MyClient {
                     .find(|(_, &(idx, _))| idx == neighbor_idx)
                     .map(|(id, _)| *id)?;
 
-                let is_server = matches!(
-                self.node_map.get(&neighbor_id),
-                Some(&(_, NodeType::Server))
-            );
-
-                if is_server && neighbor_id != target {
-                    continue;
+                // Only allow Drone nodes as intermediate steps
+                if neighbor_id != target && neighbor_id != source {
+                    match self.node_map.get(&neighbor_id) {
+                        Some(&(_, NodeType::Drone)) => {}, // Valid
+                        _ => continue, // Skip non-Drone
+                    }
                 }
 
                 let alt_dist = current_dist.saturating_add(weight);
@@ -1019,6 +1031,7 @@ impl MyClient {
                     heap.push(Reverse((alt_dist, neighbor_idx)));
                 }
             }
+
         }
 
         // --- Reconstruct path ---
@@ -1086,7 +1099,7 @@ impl MyClient {
                 status.2 = server_id;
             }
             Err(poisoned) => {
-                eprintln!("⚠️ CHATTING_STATUS mutex was poisoned! Recovering and updating anyway.");
+                eprintln!("⚠ CHATTING_STATUS mutex was poisoned! Recovering and updating anyway.");
                 let mut status = poisoned.into_inner();
                 status.0 = chatting;
                 status.1 = peer_id;
@@ -1233,6 +1246,6 @@ impl MyClient {
                 .spawn()?;
         }
 
-        Ok(())
-        }
+       Ok(())
+       }
 }
