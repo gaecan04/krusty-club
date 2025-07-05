@@ -48,10 +48,8 @@ pub struct ChatUIState {
     pub history_client_id_input: String,
     pub history_target_id_input: String,
 
-
     pub media_files: Vec<(String, String)>, // (media_name, full_path)
     pub broadcast_files: Vec<(String, String)>, // (media_name, full_path)
-
 
     pub show_server_popup: Option<NodeId>,
     pub show_upload_media_list: bool,
@@ -66,6 +64,7 @@ pub struct ChatUIState {
 }
 
 impl ChatUIState {
+
     pub fn new(gui_input: SharedGuiInput) -> Self {
         ChatUIState {
             client_status: HashMap::new(),
@@ -476,9 +475,7 @@ impl ChatUIState {
                             if ui.button("End Chat").clicked() {
                                 let initiator = a;
                                 let peer = b;
-                                println!("👉👉👉👉👉HERRE");
                                 if let Some(server_id) = self.selected_server {
-                                    println!("👉👉👉👉👉INIT {} PEER {}",initiator,peer);
                                     push_gui_message(&self.gui_input, initiator, format!("[ChatFinish]::{peer}"));
                                     push_gui_message(&self.gui_input, peer, format!("[ChatFinish]::{initiator}"));
                                 }
@@ -541,7 +538,7 @@ impl ChatUIState {
                                             }
                                         }
                                         self.broadcast_result_time = Some(Instant::now());
-                                        self.show_broadcast_list = false; // Close popup
+                                        self.show_broadcast_list = false;
                                     }
                                 }
                             }
@@ -628,53 +625,7 @@ impl ChatUIState {
                     }
                 });
         }
-        /*
-                if let Some((initiator, peer)) = self.pending_chat_termination {
-                    // Show the chat termination popup regardless of the selected client
-                    egui::Window::new(format!("Confirm End Chat for Client #{}", peer))
-                        .collapsible(false)
-                        .show(ui.ctx(), |ui| {
-                            ui.label(format!("Client #{} wants to end the chat with Client #{}.", initiator, peer));
 
-                            let mut confirm_clicked = false;
-                            let mut cancel_clicked = false;
-
-                            ui.horizontal(|ui| {
-                                if ui.button("Confirm End").clicked() {
-                                    confirm_clicked = true;
-                                }
-                                if ui.button("Cancel").clicked() {
-                                    cancel_clicked = true;
-                                }
-                            });
-
-                            // Only allow responding if the peer client is selected
-                            if Some(peer) != self.selected_client {
-                                ui.label(RichText::new(format!("⚠ Click on Client #{} to respond to this request", peer)).color(Color32::YELLOW));
-                            } else if confirm_clicked {
-                                if let Some(server_id) = self.selected_server {
-                                    push_gui_message(&self.gui_input, initiator, format!("[ChatFinish]::{peer}"));
-                                    push_gui_message(&self.gui_input, peer, format!("[ChatFinish]::{initiator}"));
-
-                                }
-
-                                let key = (initiator.min(peer), initiator.max(peer));
-                                if self.chat_type_map.get(&key) == Some(&ChatType::Temporary) {
-                                    self.chat_messages.clear();
-                                }
-                                self.chat_type_map.remove(&key);
-
-                                self.client_status.insert(initiator, ClientStatus::Connected);
-                                self.client_status.insert(peer, ClientStatus::Connected);
-                                self.active_chat_pair = None;
-                                self.pending_chat_termination = None;
-                                self.pending_chat_request = None;
-                            } else if cancel_clicked {
-                                self.pending_chat_termination = None;
-                            }
-                        });
-                }
-        */
         ui.separator();
         if let Some((a, b)) = self.active_chat_pair {
             let options = [a, b];
@@ -751,6 +702,7 @@ impl ChatUIState {
     }
 }
 
+//🖼️🖼️🖼️loading media🖼️🖼️🖼️
 fn load_media_files() -> Vec<(String, String)> {
     let media_dir = "media"; // relative path
     let mut files = Vec::new();

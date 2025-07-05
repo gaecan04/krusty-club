@@ -438,7 +438,7 @@ impl MyClient {
 
         let Some(hops) = self.wait_for_path(self.id, target, 3) else {
             error!("❌ Still no path after 3 retries. Aborting message.");
-            self.log("Client could not calculate a best path after 3 tries".to_string());
+            self.log(format!("Client {} could not calculate a best path after 3 tries",self.id));
             return;
         };
 

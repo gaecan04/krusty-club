@@ -14,7 +14,7 @@ use simulation_controller::app::NetworkApp;
 use simulation_controller::SC_backend::SimulationController;
 use crate::network::TOML_parser;
 use crate::network::initializer::{DroneImplementation, MyDrone, NetworkInitializer, ParsedConfig};
-use crate::simulation_controller::gui_input_queue::{push_gui_message, new_gui_input_queue, SharedGuiInput};
+use crate::simulation_controller::gui_input_queue::{ new_gui_input_queue, SharedGuiInput};
 
 fn main() -> Result<(), Box<dyn Error>> {
     println!("🚀 Starting main()");
@@ -64,14 +64,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         Arc::new(Mutex::new(HashMap::new()));
 
 
-    /*let command_senders: Arc<Mutex<HashMap<NodeId, Sender<DroneCommand>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-
-    for id in config.drone.iter().map(|d| d.id) {
-        command_senders.lock().unwrap().insert(id, command_sender.clone());
-    }*/
-
-
     let initializer = Arc::new(Mutex::new(NetworkInitializer::new(
         &config_path,
         vec![],
@@ -114,12 +106,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         drone_factory.clone(),
         gui_input_queue.clone(),
         initializer.clone(),
-        packet_senders.clone(),    // ✅ shared
-        packet_receivers.clone(),  // ✅ shared
+        packet_senders.clone(),
+        packet_receivers.clone(),
         command_senders.clone(),
         host_senders.clone(),
         shared_senders.clone(),
-        inbox_senders.clone(), // ✅ Add here
+        inbox_senders.clone(),
 
     )));
 
@@ -167,7 +159,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 fn run_gui_application(
     event_sender: Sender<DroneEvent>,
-    //event_receiver: Receiver<DroneEvent>,
     command_sender: Sender<DroneCommand>,
     command_receiver: Receiver<DroneCommand>,
     config: Arc<Mutex<ParsedConfig>>,
@@ -177,10 +168,9 @@ fn run_gui_application(
     simulation_log: Arc<Mutex<Vec<String>>>,
     packet_senders: Arc<Mutex<HashMap<NodeId, HashMap<NodeId, Sender<Packet>>>>>,
     packet_receivers: Arc<Mutex<HashMap<NodeId, Receiver<Packet>>>>,
-    command_senders: Arc<Mutex<HashMap<NodeId, Sender<DroneCommand>>>>, // ✅ ADD THIS
-    // ✅ ADD THIS TOO
+    command_senders: Arc<Mutex<HashMap<NodeId, Sender<DroneCommand>>>>,
     shared_senders: Arc<Mutex<HashMap<(NodeId, NodeId), Sender<Packet>>>>,
-    host_senders: HashMap<NodeId, Sender<Packet>>, // ✅ sc->hosts
+    host_senders: HashMap<NodeId, Sender<Packet>>,
     inbox_senders: Arc<Mutex<HashMap<NodeId, Sender<Packet>>>>,
 
 ) -> Result<(), Box<dyn Error>> {
@@ -198,7 +188,6 @@ fn run_gui_application(
             Ok(Box::new(NetworkApp::new_with_network(
                 cc,
                 event_sender.clone(),
-                //event_receiver.clone(),
                 command_sender.clone(),
                 command_receiver.clone(),
                 config.clone(),
@@ -208,7 +197,7 @@ fn run_gui_application(
                 simulation_log.clone(),
                 packet_senders.clone(),
                 packet_receivers.clone(),
-                command_senders.clone(), // ✅ ADD THIS TOO
+                command_senders.clone(),
                 shared_senders.clone(),
                 host_senders.clone(),
                 inbox_senders.clone(),

@@ -7,7 +7,6 @@ use crate::network::initializer::{NetworkInitializer, ParsedConfig};
 use crate::simulation_controller::network_designer::NetworkRenderer;
 use std::thread;
 use crossbeam_channel::{ Receiver, Sender};
-use egui::debug_text::print;
 use petgraph::visit::Walker;
 use crate::simulation_controller::SC_backend::SimulationController;
 use wg_2024::controller::{DroneCommand, DroneEvent};
@@ -60,17 +59,14 @@ pub struct NetworkApp {
     shared_senders: Arc<Mutex<HashMap<(NodeId, NodeId), Sender<Packet>>>>,
     host_senders: HashMap<NodeId, Sender<Packet>>, // ✅ the sc-hosts hashmap
 
-    show_no_path_popup: Arc<Mutex<bool>>,
 
 }
 
 impl NetworkApp {
-    // Constructor to accept creation context
     pub fn new( _cc: &CreationContext) -> Self {
-        // You can access persistent state or other context info here if needed
         let mut app = Self::default();
 
-        // Scan the topologies directory to find available configuration files
+        // we have to put the toml file inside topologies folder
         if let Ok(entries) = std::fs::read_dir("topologies") {
             for entry in entries.flatten() {
                 if let Some(file_name) = entry.file_name().to_str() {
@@ -82,7 +78,6 @@ impl NetworkApp {
             }
         }
 
-        // Log available topologies
         app.log("Application started".to_string());
         app.log(format!("Found {} topology configurations", app.available_topologies.len()));
 
@@ -90,16 +85,9 @@ impl NetworkApp {
     }
 
     fn log(&self, message: impl ToString) {
-        let message_str = message.to_string();
-
-        if message_str.contains("Client could not calculate a best path after 3 tries") {
-            if let Ok(mut flag) = self.show_no_path_popup.lock() {
-                *flag = true;
-            }
-        }
 
         if let Ok(mut log) = self.simulation_log.lock() {
-            log.push(message_str);
+            log.push(message.to_string());
         }
     }
 
@@ -113,11 +101,6 @@ impl NetworkApp {
                 Ok(_) => {
                     self.log(format!("✅ Drone {} crashed successfully", drone_id));
 
-                    /*
-                     The Simulation Controller (SC) already updates the active flags internally.
-                     sync_with_simulation_controller() reads fresh states and updates the GUI.
-                     build_from_config() re-applies the correct star, chain, etc. layout after crash.
-                      */
                     if let Some(renderer) = &mut self.network_renderer {
                         renderer.sync_with_simulation_controller();
                         if let Some(cfg_arc) = &self.network_config {
@@ -133,7 +116,6 @@ impl NetworkApp {
         }
     }
 
-    // This function is kept for the UI but delegates to NetworkRenderer if possible
     fn set_packet_drop_rate(&mut self, drone_id: NodeId, rate: f32) {
         // 1) tell the SC
         if let Some(ctrl_arc) = &self.simulation_controller {
@@ -171,7 +153,6 @@ impl NetworkApp {
         if let Some(cfg_arc) = &self.network_config {
             let mut cfg = cfg_arc.lock().unwrap();
 
-            // 🛠️ Check AFTER asking SC to spawn
             if cfg.drone.iter().any(|d| d.id == id) {
                self.log(format!("⚠️ Warning: Drone {} already present in config, updating.", id));
             } else {
@@ -224,7 +205,7 @@ impl NetworkApp {
             ui.allocate_ui_at_rect(
                 egui::Rect::from_center_size(
                     egui::Pos2::new(available_width / 2.0, available_height / 2.0),
-                    egui::Vec2::new(300.0, 300.0), // dimensione del contenitore
+                    egui::Vec2::new(300.0, 300.0),
                 ),
                 |ui| {
                     ui.vertical_centered(|ui| {
@@ -238,7 +219,6 @@ impl NetworkApp {
                         );
                         ui.add_space(40.0);
 
-                        // Titolo grande
                         ui.label(
                             RichText::new("Drone Network Simulation")
                                 .color(Color32::DARK_BLUE)
@@ -248,7 +228,6 @@ impl NetworkApp {
 
                         ui.add_space(40.0);
 
-                        // Bottoni ingranditi e centrati
                         if ui
                             .add_sized([200.0, 40.0], egui::Button::new("▶ Start Simulation"))
                             .clicked()
@@ -272,7 +251,6 @@ impl NetworkApp {
 
 
     fn render_network_view(&mut self, ctx: &egui::Context) {
-        // Bottom panel for simulation log with increased height
         egui::TopBottomPanel::bottom("simulation_log")
             .resizable(true)
             .default_height(120.0)
@@ -282,7 +260,7 @@ impl NetworkApp {
                 egui::Frame::default()
                     .fill(Color32::from_gray(240))
                     .show(ui, |ui| {
-                        ui.set_min_width(ui.available_width()); // 🔧 This ensures full width
+                        ui.set_min_width(ui.available_width());
                         ui.heading("Simulation Log");
                         egui::ScrollArea::vertical().show(ui, |ui| {
                             let logs = self.simulation_log.lock().unwrap();
@@ -294,13 +272,10 @@ impl NetworkApp {
                     });
             });
 
-        // Central panel for network rendering
         egui::CentralPanel::default().show(ctx, |ui| {
-            // Frame for network view with border
             egui::Frame::default()
                 .stroke(egui::Stroke::new(1.0, Color32::GRAY))
                 .show(ui, |ui| {
-                    // Display current topology and zoom controls
                     ui.horizontal(|ui| {
                         if let Some(ref topology) = self.selected_topology {
                             ui.add_space(10.0);
@@ -326,7 +301,6 @@ impl NetworkApp {
                         }
                     });
 
-                    // Control panel for drone operations
                     ui.horizontal(|ui| {
 
                         ui.add_space(10.0);
@@ -347,14 +321,11 @@ impl NetworkApp {
                         }
                     });
 
-                    // Network view with zoom and pan
                     let (response, painter) = ui.allocate_painter(ui.available_size(), Sense::drag());
 
                     if self.pan_offset == Vec2::ZERO {
                         self.auto_fit_and_center_graph(response.rect);
                     }
-
-
 
                     painter.add(Shape::rect_stroke(
                         response.rect,
@@ -403,8 +374,7 @@ impl NetworkApp {
                 });
         }
 
-
-        // Spawn drone popup
+        //the spawn popup window
         if self.show_spawn_drone_popup {
             egui::Window::new("Spawn New Drone")
                 .collapsible(false)
@@ -419,7 +389,6 @@ impl NetworkApp {
                     ui.label("Connections (comma separated):");
                     ui.text_edit_singleline(&mut self.new_drone_connections_str);
 
-                    // available‐nodes foldout…
                     if let Some(renderer) = &self.network_renderer {
                         ui.collapsing("Available Nodes", |ui| {
                             ui.label(format!("Drone IDs: {:?}", renderer.get_drone_ids()));
@@ -461,7 +430,6 @@ impl NetworkApp {
                                 self.log("Cannot spawn: invalid connection IDs");
                             } else {
                                 // 3) spawn + rebuild
-                                //self.spawn_drone(self.new_drone_id, self.new_drone_pdr, connections.clone());
                                 self.show_spawn_drone_popup = false;
 
                                 // 3a) spawn in the simulation controller
@@ -487,21 +455,7 @@ impl NetworkApp {
                     });
                 });
         }
-        if let Ok(mut flag) = self.show_no_path_popup.lock() {
-            if *flag {
-                egui::Window::new("❌ Path Not Found")
-                    .collapsible(false)
-                    .resizable(false)
-                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                    .show(ctx, |ui| {
-                        ui.label("Client could not find a path after 3 tries.");
-                        ui.label("Check the network connectivity or re-run discovery.");
-                        if ui.button("OK").clicked() {
-                            *flag = false;
-                        }
-                    });
-            }
-        }
+
 
 
 
@@ -514,7 +468,6 @@ impl NetworkApp {
                 return;
             }
 
-            // Compute bounds of all nodes
             let mut min = Pos2::new(f32::INFINITY, f32::INFINITY);
             let mut max = Pos2::new(f32::NEG_INFINITY, f32::NEG_INFINITY);
 
@@ -527,20 +480,17 @@ impl NetworkApp {
             let graph_size = max - min;
             let canvas_size = canvas_rect.size();
 
-            // Padding factor (leave a margin)
             let padding = 0.8;
 
-            // Compute optimal zoom (scale)
             let zoom_x = canvas_size.x * padding / graph_size.x;
             let zoom_y = canvas_size.y * padding / graph_size.y;
-            let optimal_zoom = zoom_x.min(zoom_y).clamp(0.6, 3.0); // restrict zoom range
+            let optimal_zoom = zoom_x.min(zoom_y).clamp(0.6, 3.0);
 
             self.zoom_level = 1.0;
             if let Some(r) = &mut self.network_renderer {
                 r.scale = optimal_zoom;
             }
 
-            // Compute center offset
             let graph_center = Pos2::new((min.x + max.x) / 2.0, (min.y + max.y) / 2.0);
             let canvas_center = canvas_rect.center();
 
@@ -550,7 +500,6 @@ impl NetworkApp {
 
     fn render_chat_view(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            // ✅ TEMPORARY BOOTSTRAP
             if self.chat_ui.client_status.is_empty() || self.chat_ui.servers.is_empty() {
                 if let Some(ctrl) = &self.simulation_controller {
                     let ctrl = ctrl.lock().unwrap();
@@ -597,7 +546,6 @@ impl NetworkApp {
     pub fn new_with_network(
         cc: &eframe::CreationContext<'_>,
         event_sender: Sender<DroneEvent>,
-       // event_receiver: Receiver<DroneEvent>,
         command_sender: Sender<DroneCommand>,
         command_receiver: Receiver<DroneCommand>,
         config: Arc<Mutex<ParsedConfig>>,
@@ -607,9 +555,9 @@ impl NetworkApp {
         simulation_log: Arc<Mutex<Vec<String>>>,
         packet_senders: Arc<Mutex<HashMap<NodeId, HashMap<NodeId, Sender<Packet>>>>>,
         packet_receivers: Arc<Mutex<HashMap<NodeId, Receiver<Packet>>>>,
-        command_senders: Arc<Mutex<HashMap<NodeId, Sender<DroneCommand>>>>, // ✅ ADD THIS
+        command_senders: Arc<Mutex<HashMap<NodeId, Sender<DroneCommand>>>>,
         shared_senders: Arc<Mutex<HashMap<(NodeId, NodeId), Sender<Packet>>>>,
-        host_senders: HashMap<NodeId, Sender<Packet>>, // ✅ the sc-hosts hashmap
+        host_senders: HashMap<NodeId, Sender<Packet>>,
         inbox_senders: Arc<Mutex<HashMap<NodeId, Sender<Packet>>>>,
 
 
@@ -620,37 +568,21 @@ impl NetworkApp {
 
         app.controller_send = Some(event_sender.clone());
 
-        // ✅ Use the shared_senders passed from main
         let initializer = Arc::new(Mutex::new(
             NetworkInitializer::new(
                 config_path,
                 vec![],
                 simulation_log.clone(),
-                shared_senders.clone(), // ✅ shared senders passed into initializer
+                shared_senders.clone(),
             )
                 .expect("Failed to create initializer"),
         ));
 
-        // Step 1: Setup the channels
-
-        // Step 2: Wrap them in Arc<Mutex<...>>
-
-
-        // Step 3: Add them to the controller constructor
         let controller = SimulationController::new(config.clone(), event_sender.clone(), command_sender.clone(), drone_factory.clone(), gui_input.clone(), initializer.clone(), packet_senders.clone(), packet_receivers.clone(), command_senders.clone(), host_senders.clone(), shared_senders.clone(),inbox_senders.clone() );
 
         let controller = Arc::new(Mutex::new(controller));
         app.simulation_controller = Some(controller.clone());
 
-       /* let controller_clone = controller.clone();
-        let controller_thread = thread::spawn(move || {
-            while let Ok(event) = event_receiver.recv() {
-                let mut ctrl = controller_clone.lock().unwrap();
-                ctrl.process_event(event);
-            }
-        });
-
-        app.controller_thread = Some(controller_thread);*/
         app.simulation_log = simulation_log.clone();
 
         app.network_renderer = Some(NetworkRenderer::new_from_config(
@@ -725,8 +657,7 @@ impl Default for NetworkApp {
             packet_senders: HashMap::new(),
             show_shared_senders_popup:false,
             shared_senders: Arc::new(Mutex::new(HashMap::new())),
-            host_senders: HashMap::new(), // ✅ the sc-hosts hashmap
-            show_no_path_popup: Arc::new(Mutex::new(false)),
+            host_senders: HashMap::new(),
 
         }
     }

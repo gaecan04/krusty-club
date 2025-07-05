@@ -26,50 +26,47 @@ use wg_2024::network::NodeId;
 use crate::simulation_controller::SC_backend::SimulationController;
 use crate::simulation_controller::gui_input_queue::SharedGuiInput;
 
+use log::warn;
+
+
 #[cfg(feature = "serialize")]
-// Type aliases for clarity
 pub type DroneImpl = Box<dyn DroneImplementation>;
-// This should be defined somewhere in your code
 pub(crate) type GroupImplFactory = Box<dyn Fn(NodeId, Sender<DroneEvent>, Receiver<DroneCommand>,
     Receiver<Packet>, HashMap<NodeId, Sender<Packet>>, f32)
     -> Box<dyn DroneImplementation> + Send + 'static >;
 
 #[derive(Deserialize, Debug,Clone)]
 pub struct ParsedConfig {
-    pub drone: Vec<DroneConfig>, // Assume this contains information about each drone
+    pub drone: Vec<DroneConfig>,
     pub client: Vec<Client>,
     pub server: Vec<Server>,
 }
 
 #[derive(Deserialize,Debug,Clone)]
 pub struct DroneConfig {
-    pub id: NodeId,  // Example ID
-    pub pdr: f32, // Example PDR
+    pub id: NodeId,
+    pub pdr: f32,
     pub connected_node_ids: Vec<NodeId>,
 }
 
 
 impl ParsedConfig {
     pub fn add_drone(&mut self, id: NodeId) {
-        // Create a new drone configuration with default values
         let new_drone = DroneConfig {
             id,
-            pdr: 1.0,  // Default packet delivery rate
-            connected_node_ids: Vec::new(),  // No connections initially
+            pdr: 0.0,  // just a default pdr, it will be overwritten then
+            connected_node_ids: Vec::new(),
         };
 
-        // Add the new drone to the configuration
         self.drone.push(new_drone);
     }
 
-    // You might also want to add a method to set the connections for a drone
     pub fn set_drone_connections(&mut self, drone_id: NodeId, connections: Vec<NodeId>) {
         if let Some(drone) = self.drone.iter_mut().find(|d| d.id == drone_id) {
             drone.connected_node_ids = connections;
         }
     }
 
-    // And a method to set the PDR for a drone
     pub fn set_drone_pdr(&mut self, drone_id: NodeId, pdr: f32) {
         if let Some(drone) = self.drone.iter_mut().find(|d| d.id == drone_id) {
             drone.pdr = pdr;
@@ -77,17 +74,14 @@ impl ParsedConfig {
     }
 
     pub fn remove_drone_connections(&mut self, drone_id: NodeId) {
-        // First, remove this drone from all other drones' connection lists
         for drone in &mut self.drone {
             drone.connected_node_ids.retain(|&id| id != drone_id);
         }
 
-        // Also remove this drone from all clients' connection lists
         for client in &mut self.client {
             client.connected_drone_ids.retain(|&id| id != drone_id);
         }
 
-        // And remove this drone from all servers' connection lists
         for server in &mut self.server {
             server.connected_drone_ids.retain(|&id| id != drone_id);
         }
@@ -95,12 +89,10 @@ impl ParsedConfig {
 
     // Remove all connections to/from a specific client
     pub fn remove_client_connections(&mut self, client_id: NodeId) {
-        // Remove this client from all drones' connection lists
         for drone in &mut self.drone {
             drone.connected_node_ids.retain(|&id| id != client_id);
         }
 
-        // Also find the client and clear its connections
         if let Some(client) = self.client.iter_mut().find(|c| c.id == client_id) {
             client.connected_drone_ids.clear();
         }
@@ -108,12 +100,9 @@ impl ParsedConfig {
 
     // Remove all connections to/from a specific server
     pub fn remove_server_connections(&mut self, server_id: NodeId) {
-        // Remove this server from all drones' connection lists
         for drone in &mut self.drone {
             drone.connected_node_ids.retain(|&id| id != server_id);
         }
-
-        // Also find the server and clear its connections
         if let Some(server) = self.server.iter_mut().find(|s| s.id == server_id) {
             server.connected_drone_ids.clear();
         }
@@ -122,7 +111,6 @@ impl ParsedConfig {
 
     pub fn detect_topology(&self) -> Option<String> {
         use std::collections::{HashMap, HashSet};
-
 
         let drone_count = self.drone.len();
         if drone_count != 10 {
@@ -137,24 +125,18 @@ impl ParsedConfig {
 
         let drone_set: HashSet<NodeId> = drone_vec.iter().copied().collect();
 
-
-
-
         let connections: HashMap<_, HashSet<_>> = self.drone.iter()
             .map(|d| {
                 let filtered = d.connected_node_ids
                     .iter()
                     .cloned()
-                    .filter(|id| drone_set.contains(id)) // 👈 Only drones
+                    .filter(|id| drone_set.contains(id)) //topology is detected from drones connection only
                     .collect::<HashSet<_>>();
                 (d.id, filtered)
             })
             .collect();
 
-
-
-
-        // === STAR (Decagram) ===
+        // === STAR ===
         let is_star = {
             let mut ok = true;
             for (i, &id) in drone_vec.iter().enumerate() {
@@ -173,8 +155,6 @@ impl ParsedConfig {
             }
             ok
         };
-
-
 
         // === DOUBLE CHAIN ===
         let is_double_chain = {
@@ -197,14 +177,12 @@ impl ParsedConfig {
                     }
                 }
             }
-            // Each link counted twice
             let mutual_pairs = symmetric_links / 2;
 
-            deg2 == 4 && deg3 == 6 && mutual_pairs >= 13 // empirical check
+            deg2 == 4 && deg3 == 6 && mutual_pairs >= 13
         };
 
         // === BUTTERFLY ===
-
         let is_butterfly = {
             let mut degrees = Vec::new();
             let mut id_to_neighbors = HashMap::new();
@@ -246,7 +224,6 @@ impl ParsedConfig {
                     _ => {}
                 }
             }
-
             deg2 == 1 && deg4 == 2 && deg6 == 3 && deg3 == 4
         };
 
@@ -322,48 +299,12 @@ impl DroneImplementation for MyDrone {
     }
 }
 
-macro_rules! impl_drone_adapter {
-    ($name:ty) => {
-        impl DroneImplementation for $name {
-            fn run(&mut self) {
-                    <Self as wg_2024::drone::Drone>::run(self);
 
-                }
-
-
-        }
-    };
+// Trait for drone implementations
+pub trait DroneImplementation: Send + 'static {
+    fn run(&mut self);
 }
 
-// === Macro Calls for All 10 Drones ===
-impl_drone_adapter!(BagelBomber);
-impl_drone_adapter!(FungiDrone);
-impl_drone_adapter!(RustDrone);
-impl_drone_adapter!(RustafarianDrone);
-impl_drone_adapter!(RollingDrone);
-impl_drone_adapter!(LeDron_JamesDrone);
-impl_drone_adapter!(DrOnesDrone);
-impl_drone_adapter!(SkyLinkDrone);
-impl_drone_adapter!(RustasticDrone);
-impl_drone_adapter!(CppEnjoyersDrone);
-
-
-/*
-Group Krusty_club buys:
--Ledron James
--CppEnjoyers
--Dr ones
--Skylink
--Rustastics
--Bagel bomber
--Fungi
--Rust
--Rustafarian
--Rolling Drone
- */
-
-
-//So MyDrone is your fallback implementation, used only when a group’s implementation is missing or fails to register.
 impl wg_2024::drone::Drone for MyDrone {
     fn new(
         id: NodeId,
@@ -389,12 +330,56 @@ impl wg_2024::drone::Drone for MyDrone {
     }
 }
 
-// Trait for drone implementations
-pub trait DroneImplementation: Send + 'static {
-    fn run(&mut self);
+macro_rules! impl_drone_adapter {
+    ($name:ty) => {
+        impl DroneImplementation for $name {
+            fn run(&mut self) {
+                    <Self as wg_2024::drone::Drone>::run(self);
 
+                }
+
+
+        }
+    };
 }
 
+/*
+Group Krusty_club buys:
+-Ledron James
+-CppEnjoyers
+-Dr ones
+-Skylink
+-Rustastics
+-Bagel bomber
+-Fungi
+-Rust
+-Rustafarian
+-Rolling Drone
+ */
+
+use LeDron_James::Drone as LeDron_JamesDrone;
+use ap2024_unitn_cppenjoyers_drone::CppEnjoyersDrone;
+use dr_ones::Drone as DrOnesDrone;
+use skylink::SkyLinkDrone;
+use rustastic_drone::RustasticDrone;
+use bagel_bomber::BagelBomber;
+use fungi_drone::FungiDrone;
+
+use wg_2024_rust::drone::RustDrone;
+use rustafarian_drone::RustafarianDrone;
+use rolling_drone::RollingDrone;
+
+// === Macro Calls for All 10 Drones ===
+impl_drone_adapter!(BagelBomber);
+impl_drone_adapter!(FungiDrone);
+impl_drone_adapter!(RustDrone);
+impl_drone_adapter!(RustafarianDrone);
+impl_drone_adapter!(RollingDrone);
+impl_drone_adapter!(LeDron_JamesDrone);
+impl_drone_adapter!(DrOnesDrone);
+impl_drone_adapter!(SkyLinkDrone);
+impl_drone_adapter!(RustasticDrone);
+impl_drone_adapter!(CppEnjoyersDrone);
 
 pub struct DroneWithId {
     pub id: NodeId,
@@ -426,19 +411,8 @@ pub struct NetworkInitializer {
 }
 
 
-use LeDron_James::Drone as LeDron_JamesDrone; //ok
-use ap2024_unitn_cppenjoyers_drone::CppEnjoyersDrone; //ok
-use dr_ones::Drone as DrOnesDrone; //ok
-use skylink::SkyLinkDrone; //ok
-use rustastic_drone::RustasticDrone; //ok
-use bagel_bomber::BagelBomber; //ok
-use fungi_drone::FungiDrone;
-use log::warn;
-//ok
-use wg_2024_rust::drone::RustDrone; //ok
-use rustafarian_drone::RustafarianDrone; //ok
-use rolling_drone::RollingDrone;
-//ok
+
+
 
 impl NetworkInitializer {
     pub fn new(config_path: &str, drone_impls: Vec<DroneWithId>, simulation_log: Arc<Mutex<Vec<String>>>, shared_senders: Arc<Mutex<HashMap<(NodeId, NodeId), Sender<Packet>>>>) -> Result<Self, Box<dyn Error>> {
@@ -496,15 +470,11 @@ impl NetworkInitializer {
         // Spawn server threads
         self.initialize_servers(gui_input_queue.clone(),self.simulation_log.clone(),&host_receivers);
 
-        // Spawn simulation controller thread
-        // self.spawn_controller(); done in main!!!
-
         Ok(())
 
     }
 
     fn validate_config(&self) -> Result<(), Box<dyn Error>> {
-        // Check for duplicate node IDs
         let mut all_ids = HashSet::new();
 
         for drone in &self.config.drone {
@@ -518,7 +488,6 @@ impl NetworkInitializer {
                 return Err("Duplicate node ID found".into());
             }
 
-            // Check client constraints
             if client.connected_drone_ids.len() > 2 {
                 return Err("Client cannot connect to more than 2 drones".into());
             }
@@ -527,7 +496,6 @@ impl NetworkInitializer {
                 return Err("Client must connect to at least 1 drone".into());
             }
 
-            // Check for repetitions in connected_drone_ids
             let mut client_connections = HashSet::new();
             for &drone_id in &client.connected_drone_ids {
                 if !client_connections.insert(drone_id) {
@@ -535,7 +503,6 @@ impl NetworkInitializer {
                 }
             }
 
-            // Check that client is not connecting to itself
             if client.connected_drone_ids.contains(&client.id) {
                 return Err("Client cannot connect to itself".into());
             }
@@ -546,12 +513,10 @@ impl NetworkInitializer {
                 return Err("Duplicate node ID found".into());
             }
 
-            // Check server constraints
             if server.connected_drone_ids.len() < 2 {
                 return Err("Server must connect to at least 2 drones".into());
             }
 
-            // Check for repetitions in connected_drone_ids
             let mut server_connections = HashSet::new();
             for &drone_id in &server.connected_drone_ids {
                 if !server_connections.insert(drone_id) {
@@ -559,44 +524,33 @@ impl NetworkInitializer {
                 }
             }
 
-            // Check that server is not connecting to itself
             if server.connected_drone_ids.contains(&server.id) {
                 return Err("Server cannot connect to itself".into());
             }
         }
 
-        // Check bidirectional graph property
         self.check_bidirectional_connections()?;
-
-        // Check connected graph property
         self.check_connected_graph()?;
-
-        // Check that clients and servers are at the edges
         self.check_edges_property()?;
 
         Ok(())
     }
 
     fn check_bidirectional_connections(&self) -> Result<(), Box<dyn Error>> {
-        // Create a map of all nodes and their connections
         let mut node_connections: HashMap<NodeId, HashSet<NodeId>> = HashMap::new();
 
-        // Add drone connections
         for drone in &self.config.drone {
             let entry = node_connections.entry(drone.id).or_insert_with(HashSet::new);
             for &connected_id in &drone.connected_node_ids {
                 entry.insert(connected_id);
             }
         }
-
-        // Add client connections
         for client in &self.config.client {
             let entry = node_connections.entry(client.id).or_insert_with(HashSet::new);
             for &drone_id in &client.connected_drone_ids {
                 entry.insert(drone_id);
             }
             for &drone_id in &client.connected_drone_ids {
-                // Check bidirectional connection
                 if let Some(drone_connections) = node_connections.get(&drone_id) {
                     if !drone_connections.contains(&client.id) {
                         return Err(format!("Connection between client {} and drone {} is not bidirectional", client.id, drone_id).into());
@@ -607,15 +561,12 @@ impl NetworkInitializer {
             }
         }
 
-        // Add server connections
         for server in &self.config.server {
             let entry = node_connections.entry(server.id).or_insert_with(HashSet::new);
             for &drone_id in &server.connected_drone_ids {
                 entry.insert(drone_id);
             }
-            //2 loops to avoid the mut/immutable borrow simultaneous
             for &drone_id in &server.connected_drone_ids {
-                // Check bidirectional connection
                 if let Some(drone_connections) = node_connections.get(&drone_id) {
                     if !drone_connections.contains(&server.id) {
                         return Err(format!("Connection between server {} and drone {} is not bidirectional", server.id, drone_id).into());
@@ -630,10 +581,8 @@ impl NetworkInitializer {
     }
 
     fn check_connected_graph(&self) -> Result<(), Box<dyn Error>> {
-        // Build undirected adjacency list
         let mut adj_list: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
 
-        // Add drone connections
         for drone in &self.config.drone {
             adj_list.entry(drone.id).or_default().extend(&drone.connected_node_ids);
             for &neighbor in &drone.connected_node_ids {
@@ -641,7 +590,6 @@ impl NetworkInitializer {
             }
         }
 
-        // Add client connections
         for client in &self.config.client {
             adj_list.entry(client.id).or_default().extend(&client.connected_drone_ids);
             for &neighbor in &client.connected_drone_ids {
@@ -649,7 +597,6 @@ impl NetworkInitializer {
             }
         }
 
-        // Add server connections
         for server in &self.config.server {
             adj_list.entry(server.id).or_default().extend(&server.connected_drone_ids);
             for &neighbor in &server.connected_drone_ids {
@@ -657,7 +604,6 @@ impl NetworkInitializer {
             }
         }
 
-        // BFS to check connectivity
         if adj_list.is_empty() {
             return Ok(());
         }
@@ -686,16 +632,13 @@ impl NetworkInitializer {
     }
 
     fn check_edges_property(&self) -> Result<(), Box<dyn Error>> {
-        // Build a graph without clients and servers
         let mut drone_adj_list: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
 
-        // Extract drone-to-drone connections
         for drone in &self.config.drone {
             let drone_connections: Vec<NodeId> = drone
                 .connected_node_ids
                 .iter()
                 .filter(|&&id| {
-                    // Check if id belongs to a drone (not a client or server)
                     self.config.drone.iter().any(|d| d.id == id)
                 })
                 .cloned()
@@ -704,7 +647,6 @@ impl NetworkInitializer {
             drone_adj_list.insert(drone.id, drone_connections);
         }
 
-        // Check if the drone-only graph is connected using BFS
         if drone_adj_list.is_empty() {
             return Ok(());
         }
@@ -725,7 +667,6 @@ impl NetworkInitializer {
             }
         }
 
-        // Check if all drones were visited
         if visited.len() != drone_adj_list.len() {
             return Err("Drone-only graph is not connected (clients and servers must be at edges)".into());
         }
@@ -737,11 +678,6 @@ impl NetworkInitializer {
         &mut self,
         inbox_senders: Arc<Mutex<HashMap<NodeId, Sender<Packet>>>>
     ) -> (HashMap<NodeId, Receiver<Packet>>, HashMap<NodeId, HashMap<NodeId, Sender<Packet>>>, Receiver<DroneEvent>) {
-        if let Some(ref arc) = self.shared_senders {
-            println!("👋👋👋👋👋👋 INIT SHAREDSENDERS i: {:p}", Arc::as_ptr(arc));
-        } else {
-            println!("❌ shared_senders is None");
-        }
 
         let all_node_ids: Vec<NodeId> = self
             .config
@@ -771,7 +707,7 @@ impl NetworkInitializer {
 
 
         let mut packet_senders_map = HashMap::new();
-        let mut shared_senders_map = HashMap::new(); // 🔧 NEW fully-keyed map: (src, dst) -> Sender
+        let mut shared_senders_map = HashMap::new();
 
         for &id in &all_node_ids {
             let mut neighbor_senders = HashMap::new();
@@ -790,7 +726,6 @@ impl NetworkInitializer {
                 if let Some(sender_to_neighbor) = senders.get(&neighbor) {
                     neighbor_senders.insert(neighbor, sender_to_neighbor.clone());
 
-                    // 🔁 Insert directional mapping: (src, dst) = (id, neighbor)
                     shared_senders_map.insert((id, neighbor), sender_to_neighbor.clone());
                 }
             }
@@ -814,15 +749,11 @@ impl NetworkInitializer {
         *self.command_senders.lock().unwrap() = command_senders_map;
         self.event_sender = Some(event_tx);
 
-        println!("🔒🏻❤️‍🔥⚜ Trying to lock packet_senders in setup");
-        // ✅ Update shared fields
         *self.packet_senders.lock().unwrap() = packet_senders_map.clone();
-        println!("🔒🏻❤️‍🔥⚜ after lock packet_senders in setup");
 
         *self.packet_receivers.lock().unwrap() = receivers.clone();
 
 
-        // ✅ Replace the flat shared_senders with the (src, dst) form
         if let Some(shared) = &self.shared_senders {
             let mut flat = shared.lock().unwrap();
             flat.clear();
@@ -831,14 +762,6 @@ impl NetworkInitializer {
             }
         }
 
-        //printing the shared maps
-        if let Some(shared) = &self.shared_senders {
-            let flat = shared.lock().unwrap();
-            println!("🫵🏻🫀🫴🏼💎🫵🏻🫀🫴🏼💎 Shared Senders Table:");
-            for ((src, dst), _) in flat.iter() {
-                println!("  ({src}, {dst})");
-            }
-        }
         (receivers, packet_senders_map , event_rx)
     }
 
@@ -887,20 +810,17 @@ impl NetworkInitializer {
                 if client_id % 2 == 0 {
                     // client2
                     thread::spawn(move || {
-                        //println!("client2 spawned");
+                        println!("client2 spawned");
                         let mut cl2 = client2::MyClient::new(client_id, client_rx, senders, None,Some(shortcut_rx));
                         cl2.shared_senders= Some(shared_senders.clone());
                         cl2.attach_log(log_clone);
                         cl2.run(gui_clone);
-                        /*let mut cl1 = client1::MyClient::new(client_id, client_rx, senders, HashMap::new(), None, HashSet::new(), None,Some(shortcut_rx));
-                        cl1.shared_senders= Some(shared_senders.clone());
-                        cl1.attach_log(log_clone);
-                        cl1.run(gui_clone);*/
+
                     });
                 } else {
                     // client1
                     thread::spawn(move || {
-                        //println!("client1 spawned");
+                        println!("client1 spawned");
                         let mut cl1 = client1::MyClient::new(client_id, client_rx, senders, HashMap::new(), None, HashSet::new(), None,Some(shortcut_rx));
                         cl1.shared_senders= Some(shared_senders.clone());
                         cl1.attach_log(log_clone);
@@ -909,17 +829,16 @@ impl NetworkInitializer {
                 }
             } else {
                 if i % 2 == 0 {
-                    // client2 for even-indexed clients
                     thread::spawn(move || {
+                        println!("client2 spawned");
                         let mut cl2 = client2::MyClient::new(client_id, client_rx, senders, None,Some(shortcut_rx));
                         cl2.shared_senders= Some(shared_senders.clone());
                         cl2.attach_log(log_clone);
                         cl2.run(gui_clone);
                     });
                 } else {
-                    // client1 for odd-indexed clients
                     thread::spawn(move || {
-                        //println!("client1 spawned");
+                        println!("client1 spawned");
                         let mut cl1 = client1::MyClient::new(client_id, client_rx, senders, HashMap::new(), None, HashSet::new(), None,Some(shortcut_rx));
                         cl1.shared_senders= Some(shared_senders.clone());
                         cl1.attach_log(log_clone);
@@ -935,7 +854,6 @@ impl NetworkInitializer {
             let log_clone=log.clone();
             let server_id = server.id;
 
-            // Get the full sender map for this server (set up in setup_channels)
             let senders = self
                 .packet_senders
                 .lock().unwrap().get(&server_id)
@@ -947,7 +865,6 @@ impl NetworkInitializer {
                 .lock().unwrap().get(&server_id)
                 .expect("setup_channels must have created this")
                 .clone();
-            println!("👋👋NetworkApp log addr: {:p}", Arc::as_ptr(&log_clone));
 
             let gui_clone = gui_input.clone();
             let shared_senders = Arc::clone(self.shared_senders.as_ref().unwrap());
@@ -968,14 +885,12 @@ impl NetworkInitializer {
     pub fn create_drone_implementations(&self) -> Vec<DroneWithId> {
         let mut implementations: Vec<DroneWithId> = Vec::new();
 
-        // Load group implementations
         let group_implementations = Self::load_group_implementations();
         let num_impls = group_implementations.len();
 
         let drone_configs = self.config.drone.clone();
         let num_drones = drone_configs.len();
 
-        // Even distribution of drone implementations across groups
         let mut impl_counts = vec![num_drones / num_impls; num_impls];
         for i in 0..(num_drones % num_impls) {
             impl_counts[i] += 1;
@@ -996,9 +911,7 @@ impl NetworkInitializer {
             let pdr = drone_config.pdr;
 
             let packet_recv = self.packet_receivers.lock().unwrap().get(&id).unwrap().clone();
-            println!("🔒🏻❤️‍🔥⚜ Trying to lock packet_senders in create drone impl");
             let packet_send = self.packet_senders.lock().unwrap().get(&id).unwrap().clone();
-            println!("🔒🏻❤️‍🔥⚜ released lock packet_senders in create drone impl");
 
             let command_recv = self.command_receivers.get(&id).expect("Missing command_receiver").clone();
             let event_send = self.event_sender.as_ref().expect("Missing event_sender").clone();
@@ -1037,11 +950,9 @@ impl NetworkInitializer {
     }
 
 
-    // Method to load group implementations
     fn load_group_implementations() -> HashMap<String, GroupImplFactory> {
         let mut group_implementations = HashMap::new();
 
-        // Group A implementation using Krusty_Club
         group_implementations.insert(
             "group_1".to_string(),
             Box::new(|id: NodeId, sim_contr_send: Sender<DroneEvent>, sim_contr_recv: Receiver<DroneCommand>,
@@ -1058,7 +969,6 @@ impl NetworkInitializer {
             }) as GroupImplFactory
         );
 
-        // Same pattern for other implementations
         group_implementations.insert(
             "group_2".to_string(),
             Box::new(|id, sim_contr_send, sim_contr_recv, packet_recv, packet_send, pdr|
@@ -1205,8 +1115,4 @@ impl NetworkInitializer {
 }
 
 
-/*
 
-for copy purposes
-
- */

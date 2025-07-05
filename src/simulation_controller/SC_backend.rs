@@ -43,6 +43,11 @@ pub struct SimulationController {
     inbox_senders:Arc<Mutex<HashMap<NodeId, Sender<Packet>>>>
 }
 
+struct NodeState {
+    node_type: NodeType,
+    active: bool,
+}
+
 impl SimulationController {
     pub fn new(
         network_config: Arc<Mutex<ParsedConfig>>,
@@ -82,13 +87,20 @@ impl SimulationController {
         controller
     }
 
-
+    pub fn start_background_thread(controller: Arc<Mutex<Self>>, event_receiver: Receiver<DroneEvent>) {
+        let controller_clone = controller.clone(); // No need to double-Arc
+        std::thread::spawn(move || {
+            while let Ok(event) = event_receiver.recv() {
+                let mut ctrl = controller_clone.lock().unwrap();
+                ctrl.process_event(event);
+            }
+        });
+    }
 
     // Initialize network graph from config
     fn initialize_network_graph(&mut self) {
         let config = self.network_config.lock().unwrap();
 
-        // Add drone connections
         for drone in &config.drone {
             let mut neighbors = HashSet::new();
             for &neighbor_id in &drone.connected_node_ids {
@@ -97,13 +109,11 @@ impl SimulationController {
             self.network_graph.insert(drone.id, neighbors);
         }
 
-        // Add client connections
         for client in &config.client {
             let mut neighbors = HashSet::new();
             for &drone_id in &client.connected_drone_ids {
                 neighbors.insert(drone_id);
 
-                // Add bidirectional connection
                 self.network_graph.entry(drone_id)
                     .or_insert_with(HashSet::new)
                     .insert(client.id);
@@ -111,13 +121,11 @@ impl SimulationController {
             self.network_graph.insert(client.id, neighbors);
         }
 
-        // Add server connections
         for server in &config.server {
             let mut neighbors = HashSet::new();
             for &drone_id in &server.connected_drone_ids {
                 neighbors.insert(drone_id);
 
-                // Add bidirectional connection
                 self.network_graph.entry(drone_id)
                     .or_insert_with(HashSet::new)
                     .insert(server.id);
@@ -125,22 +133,6 @@ impl SimulationController {
             self.network_graph.insert(server.id, neighbors);
         }
     }
-
-    // Register a command sender for a node
-
-
-    pub fn start_background_thread(controller: Arc<Mutex<Self>>, event_receiver: Receiver<DroneEvent>) {
-        let controller_clone = controller.clone(); // No need to double-Arc
-        std::thread::spawn(move || {
-            println!("😎✨🖇️💗⚡ background thread started");
-            while let Ok(event) = event_receiver.recv() {
-                let mut ctrl = controller_clone.lock().unwrap();
-                ctrl.process_event(event);
-            }
-        });
-    }
-
-    // Process a drone event
     pub(crate) fn process_event(&mut self, event: DroneEvent) {
         match event {
             DroneEvent::PacketSent(packet) => {
@@ -150,13 +142,12 @@ impl SimulationController {
                 if hop_index > 0 && hop_index < hops.len() {
                     let sender = hops[hop_index - 1];
                     let receiver = hops[hop_index];
-                    println!("Packet sent from {} to {}", sender, receiver);
+                    println!("📨Packet sent from {} to {}", sender, receiver);
                 } else if hop_index == 0 && !hops.is_empty() {
-                    // This means the sender is the first hop, and the receiver is the next hop if present
                     let sender = hops[0];
                     let receiver = hops.get(1).copied();
                     match receiver {
-                        Some(r) => println!("Packet sent from {} to {}", sender, r),
+                        Some(r) => println!("📨Packet sent from {} to {}", sender, r),
                         None => println!("Packet sent from {} but no receiver (single-hop)", sender),
                     }
                 }
@@ -168,12 +159,12 @@ impl SimulationController {
                 if hop_index > 0 && hop_index < hops.len() {
                     let sender = hops[hop_index - 1];
                     let receiver = hops[hop_index];
-                    println!("Packet dropped from {} to {}", sender, receiver);
+                    println!("🩸Packet dropped from {} to {}", sender, receiver);
                 } else if hop_index == 0 && !hops.is_empty() {
                     let sender = hops[0];
                     let receiver = hops.get(1).copied();
                     match receiver {
-                        Some(r) => println!("Packet dropped from {} to {}", sender, r),
+                        Some(r) => println!("🩸Packet dropped from {} to {}", sender, r),
                         None => println!("Packet dropped from {} but no receiver (single-hop)", sender),
                     }
                 }
@@ -197,7 +188,7 @@ impl SimulationController {
         }
     }
 
-    // Command to make a drone crash
+    // 🛠️🛠️🛠️ Drone Command Functions🛠️🛠️🛠️
     pub fn crash_drone(&mut self, drone_id: NodeId) -> Result<(), Box<dyn Error>> {
         // 1. Check node exists and is active
         if let Some(state) = self.get_node_state(drone_id) {
@@ -208,16 +199,12 @@ impl SimulationController {
             return Err(format!("Drone {} not found", drone_id).into());
         }
 
-        // 2. Clone the graph and simulate the crash
         let mut test_graph = self.network_graph.clone();
         test_graph.remove(&drone_id);
 
         if !self.is_crash_allowed(&test_graph, drone_id) {
             return Err("Crashing this drone would violate network constraints".into());
         }
-
-
-        println!("🧪🧪🧪 Checking command_senders before crash: {:?}", self.command_senders.lock().unwrap().keys());
 
         // ✅ ONLY NOW perform the crash
 
@@ -253,17 +240,14 @@ impl SimulationController {
         {
             let mut cfg = self.network_config.lock().unwrap();
 
-            // Remove drone from other drones' neighbor lists
             for drone in &mut cfg.drone {
                 drone.connected_node_ids.retain(|&id| id != drone_id);
             }
 
-            // Remove drone from client neighbor lists
             for client in &mut cfg.client {
                 client.connected_drone_ids.retain(|&id| id != drone_id);
             }
 
-            // Remove drone from server neighbor lists
             for server in &mut cfg.server {
                 server.connected_drone_ids.retain(|&id| id != drone_id);
             }
@@ -300,92 +284,6 @@ impl SimulationController {
         Ok(())
     }
 
-
-    fn is_crash_allowed(&self, test_graph: &HashMap<NodeId, HashSet<NodeId>>, crashing_node: NodeId) -> bool {
-        for server_id in self.get_all_server_ids() {
-            let neighbors = test_graph.get(&server_id);
-            let drone_neighbors = neighbors.map_or(0, |n| {
-                n.iter()
-                    .filter(|id| {
-                        self.get_node_type(**id)
-                            .map_or(false, |t| t == NodeType::Drone && test_graph.contains_key(*id))
-                    })
-                    .count()
-            });
-
-            if drone_neighbors < 2 {
-                println!("🚨 Server {} must be connected to at least 2 drones", server_id);
-                return false;
-            }
-        }
-
-        if !self.all_clients_and_servers_mutually_reachable(&test_graph, Some(crashing_node)) {
-            println!("🚨 Crash would break client-server mutual reachability");
-            return false;
-        }
-
-
-        if !self.is_connected(test_graph, Some(crashing_node)) {
-            println!("🚨 Graph would become disconnected");
-            return false;
-        }
-
-
-        true
-    }
-
-    pub fn is_removal_allowed(&self, node_a: NodeId, node_b: NodeId) -> bool {
-        // Clone the current network graph
-        let mut test_graph = self.network_graph.clone();
-
-        // Simulate removal of the bidirectional link
-        if let Some(neighbors) = test_graph.get_mut(&node_a) {
-            neighbors.remove(&node_b);
-        }
-        if let Some(neighbors) = test_graph.get_mut(&node_b) {
-            neighbors.remove(&node_a);
-        }
-
-        // Reuse existing logic!
-        self.is_topology_valid(&test_graph)
-    }
-
-    fn is_topology_valid(&self, test_graph: &HashMap<NodeId, HashSet<NodeId>>) -> bool {
-        // Server must remain connected to at least 2 drones
-        for server_id in self.get_all_server_ids() {
-            let neighbors = test_graph.get(&server_id);
-            let drone_neighbors = neighbors.map_or(0, |n| {
-                n.iter()
-                    .filter(|id| {
-                        self.get_node_type(**id)
-                            .map_or(false, |t| t == NodeType::Drone && test_graph.contains_key(*id))
-                    })
-                    .count()
-            });
-
-            if drone_neighbors < 2 {
-                println!("🚨 Server {} must be connected to at least 2 drones", server_id);
-                return false;
-            }
-        }
-
-        if !self.all_clients_and_servers_mutually_reachable(&test_graph, None) {
-            println!("🚨 Crash would break client-server mutual reachability");
-            return false;
-        }
-
-
-        if !self.is_connected(test_graph,None) {
-            println!("🚨 Graph would become disconnected");
-            return false;
-        }
-
-        true
-    }
-
-
-
-    // Add this method to your SimulationController
     pub fn remove_link(&mut self, a: NodeId, b: NodeId) -> Result<(), Box<dyn std::error::Error>> {
         // 1. Check if link exists
         if let Some(neighbors) = self.network_graph.get(&a) {
@@ -395,12 +293,10 @@ impl SimulationController {
         } else {
             return Err(format!("Node {} not found in network graph", a).into());
         }
-
         // 2. Check if removal is allowed (doesn't violate constraints)
         if !self.is_removal_allowed(a, b) {
             return Err("Removing this link would violate network constraints".into());
         }
-
         // 3. Send RemoveSender commands to both nodes if drones
         if self.get_node_type(a) == Some(NodeType::Drone) {
             if let Some(sender) = self.command_senders.lock().unwrap().get(&a) {
@@ -412,8 +308,6 @@ impl SimulationController {
                 sender.send(DroneCommand::RemoveSender(a))?;
             }
         }
-
-
         // 4. Update the network graph
         if let Some(neighbors) = self.network_graph.get_mut(&a) {
             neighbors.remove(&b);
@@ -421,12 +315,9 @@ impl SimulationController {
         if let Some(neighbors) = self.network_graph.get_mut(&b) {
             neighbors.remove(&a);
         }
-
         // 5. Update the config
         {
             let mut cfg = self.network_config.lock().unwrap();
-
-            // Update drone connections
             for drone in &mut cfg.drone {
                 if drone.id == a {
                     drone.connected_node_ids.retain(|&id| id != b);
@@ -435,8 +326,6 @@ impl SimulationController {
                     drone.connected_node_ids.retain(|&id| id != a);
                 }
             }
-
-            // Update client connections
             for client in &mut cfg.client {
                 if client.id == a {
                     client.connected_drone_ids.retain(|&id| id != b);
@@ -445,8 +334,6 @@ impl SimulationController {
                     client.connected_drone_ids.retain(|&id| id != a);
                 }
             }
-
-            // Update server connections
             for server in &mut cfg.server {
                 if server.id == a {
                     server.connected_drone_ids.retain(|&id| id != b);
@@ -465,272 +352,152 @@ impl SimulationController {
                 info!("🧹 Removed ({}, {}) from shared_senders", b, a);
             }
         }
-
-
-
-
         // 6. Broadcast topology change
         broadcast_topology_change(
             &self.gui_input,
             &self.network_config,
             &format!("[FloodRequired]::RemoveSender::{}::{}", a, b),
         );
-
-
         println!("✅ Successfully removed link between {} and {}", a, b);
         Ok(())
     }
 
-
-    fn get_node_type(&self, id: NodeId) -> Option<NodeType> {
-        let cfg = self.config.lock().unwrap();
-        if cfg.drone.iter().any(|d| d.id == id) {
-            Some(NodeType::Drone)
-        } else if cfg.client.iter().any(|c| c.id == id) {
-            Some(NodeType::Client)
-        } else if cfg.server.iter().any(|s| s.id == id) {
-            Some(NodeType::Server)
-        } else {
-            None
+    pub fn add_link(&mut self, a: NodeId, b: NodeId) -> Result<(), Box<dyn std::error::Error>> {
+        //  1. Validate nodes exist and are initialized ===
+        for &node in &[a, b] {
+            if self.get_node_type(node) == Some(NodeType::Drone)
+                && !self.command_senders.lock().unwrap().contains_key(&node)
+            {
+                println!("🚨 Missing command_sender for node {}", node);
+                return Err(format!("No command sender for node {}", node).into());
+            }
+            if !self.packet_senders.lock().unwrap().contains_key(&node) {
+                println!("🚨 Missing packet_sender map for node {}", node);
+                return Err(format!("No packet sender for node {}", node).into());
+            }
         }
-    }
 
-    pub fn get_all_drone_ids(&self) -> Vec<NodeId> {
-        self.config
-            .lock()
-            .unwrap()
-            .drone
-            .iter()
-            .map(|d| d.id)
-            .collect()
-    }
-    pub fn get_all_client_ids(&self) -> Vec<NodeId> {
-        self.config
-            .lock()
-            .unwrap()
-            .client
-            .iter()
-            .map(|c| c.id)
-            .collect()
-    }
-    pub fn get_all_server_ids(&self) -> Vec<NodeId> {
-        self.config
-            .lock()
-            .unwrap()
-            .server
-            .iter()
-            .map(|s| s.id)
-            .collect()
-    }
+        //  2. Constraint: Clients must connect to at most 2 drones ===
+        for &(client_id, drone_id) in &[(a, b), (b, a)] {
+            if self.get_node_type(client_id) == Some(NodeType::Client)
+                && self.get_node_type(drone_id) == Some(NodeType::Drone)
+            {
+                let neighbors = self.network_graph.get(&client_id).cloned().unwrap_or_default();
+                let drone_neighbors = neighbors
+                    .iter()
+                    .filter(|id| self.get_node_type(**id) == Some(NodeType::Drone))
+                    .count();
 
-    pub fn bfs_reachable_servers(
-        &self,
-        start_id: NodeId,
-        graph: &HashMap<NodeId, HashSet<NodeId>>,
-    ) -> HashSet<NodeId> {
-        let mut visited = HashSet::new();
-        let mut queue = VecDeque::new();
-        let mut reachable_servers = HashSet::new();
-
-        visited.insert(start_id);
-        queue.push_back(start_id);
-
-        while let Some(current) = queue.pop_front() {
-            // If the node is not in the test graph, skip it
-            if !graph.contains_key(&current) {
-                continue;
+                if drone_neighbors >= 2 {
+                    println!("🚨 Client {} already has 2 drone connections", client_id);
+                    return Err("Client connection constraint violated".into());
+                }
             }
+        }
 
-            // If it's a server, mark it as reachable
-            if self.get_node_type(current) == Some(NodeType::Server) {
-                reachable_servers.insert(current);
-            }
+        // 3. Create bidirectional channels ===
+        let (tx_ab, rx_ab) = crossbeam_channel::unbounded::<Packet>();
+        let (tx_ba, rx_ba) = crossbeam_channel::unbounded::<Packet>();
 
-            if let Some(neighbors) = graph.get(&current) {
-                for &neighbor in neighbors {
-                    if !visited.contains(&neighbor) {
-                        visited.insert(neighbor);
-                        queue.push_back(neighbor);
+        // 4. Insert into packet_senders ===
+        {
+            let mut psenders = self.packet_senders.lock().unwrap();
+            psenders.entry(a).or_default().insert(b, tx_ab.clone());
+            psenders.entry(b).or_default().insert(a, tx_ba.clone());
+        }
+
+        //  5. Spawn forwarding threads ===
+        if let Some(inbox_b) = self.inbox_senders.lock().unwrap().get(&b).cloned() {
+            std::thread::spawn(move || {
+                for pkt in rx_ab {
+                    if let Err(e) = inbox_b.send(pkt) {
+                        eprintln!("❌ Forwarding thread {} → {} failed: {}", a, b, e);
+                        break;
                     }
                 }
-            }
-        }
-        reachable_servers
-    }
-
-    // Check if a graph is connected using BFS
-    fn is_connected(
-        &self,
-        graph: &HashMap<NodeId, HashSet<NodeId>>,
-        excluded_node: Option<NodeId>,
-    ) -> bool {
-        if graph.is_empty() {
-            return true;
+                println!("⚠️ Forwarding thread from {} to {} exited", a, b);
+            });
         }
 
-        // Find the first valid node to start BFS from
-        let start_node = graph.keys()
-            .find(|&&node_id| {
-                Some(node_id) != excluded_node && graph.contains_key(&node_id) });
-
-        let Some(start_node) = start_node else {
-            return true;
-        };
-
-        let mut visited = HashSet::new();
-        let mut queue = vec![*start_node];
-
-        while let Some(node) = queue.pop() {
-            if visited.insert(node) {
-                if let Some(neighbors) = graph.get(&node) {
-                    for &neighbor in neighbors {
-                        if Some(neighbor) != excluded_node && graph.contains_key(&neighbor) {
-                            queue.push(neighbor);
-                        }
+        if let Some(inbox_a) = self.inbox_senders.lock().unwrap().get(&a).cloned() {
+            std::thread::spawn(move || {
+                for pkt in rx_ba {
+                    if let Err(e) = inbox_a.send(pkt) {
+                        eprintln!("❌ Forwarding thread {} → {} failed: {}", b, a, e);
+                        break;
                     }
                 }
-            }
+                println!("⚠️ Forwarding thread from {} to {} exited", b, a);
+            });
         }
 
-        // Count active nodes, excluding the one being crashed
-        let active_node_count = graph.keys()
-            .filter(|&&node_id| {
-                Some(node_id) != excluded_node &&
-                    self.get_node_state(node_id)
-                        .map_or(false, |state| state.active)
-            })
-            .count();
-
-        visited.len() == active_node_count
-    }
-
-    // Check reacheability between hosts
-    pub fn all_clients_and_servers_mutually_reachable(
-        &self,
-        graph: &HashMap<NodeId, HashSet<NodeId>>,
-        excluded_node: Option<NodeId>,
-    ) -> bool {
-
-        let clients: Vec<NodeId> = self.get_all_client_ids()
-            .into_iter()
-            .filter(|id| Some(*id) != excluded_node && graph.contains_key(id))
-            .collect();
-
-        let servers: Vec<NodeId> = self.get_all_server_ids()
-            .into_iter()
-            .filter(|id| Some(*id) != excluded_node && graph.contains_key(id))
-            .collect();
-
-        println!("💡💡💡💡💡💡💡 Checking connectivity for clients: {:?}", clients);
-        println!("💡💡💡💡💡💡💡 Checking connectivity for servers: {:?}", servers);
-
-
-        for &client in &clients {
-            for &server in &servers {
-                println!("🔍 Checking: Client {} → Server {}", client, server);
-
-                if !self.can_reach(graph, client, server, excluded_node) {
-                    println!("❌ Client {} cannot reach Server {}", client, server);
-                    return false;
-                }
-                println!("✅ Client {} can reach Server {}", client, server);
-
-            }
-        }
-
-        for &server in &servers {
-            for &client in &clients {
-                if !self.can_reach(graph, server, client, excluded_node) {
-                    println!("❌ Server {} cannot reach Client {}", server, client);
-                    return false;
+        //  6. Send AddSender to drones ===
+        for (node, neighbor, sender) in vec![
+            (a, b, tx_ab.clone()),
+            (b, a, tx_ba.clone()),
+        ] {
+            if self.get_node_type(node) == Some(NodeType::Drone) {
+                if let Some(cmd_tx) = self.command_senders.lock().unwrap().get(&node) {
+                    cmd_tx
+                        .send(DroneCommand::AddSender(neighbor, sender))
+                        .map_err(|e| format!("Failed to send AddSender to {}: {}", node, e))?;
                 }
             }
         }
 
-        true
-    }
 
-    fn can_reach(
-        &self,
-        graph: &HashMap<NodeId, HashSet<NodeId>>,
-        from: NodeId,
-        to: NodeId,
-        excluded_node: Option<NodeId>,
-    ) -> bool {
-        println!("⚠️ INSIDE CAN_REACH: {} → {}", from, to);
+        //  7. Update network graph and config ===
+        self.network_graph.entry(a).or_default().insert(b);
+        self.network_graph.entry(b).or_default().insert(a);
 
-        if from == to {
-            return true;
-        }
+        {
+            let a_type = self.get_node_type(a);
+            let b_type = self.get_node_type(b);
+            let mut cfg = self.network_config.lock().unwrap();
 
-        if !graph.contains_key(&from) || !graph.contains_key(&to) {
-            println!("❌ One of the nodes is not in graph: from={} in_graph={} | to={} in_graph={}",
-                     from, graph.contains_key(&from), to, graph.contains_key(&to));
-            return false;
-        }
-
-        let mut visited = HashSet::new();
-        let mut queue = VecDeque::new();
-        queue.push_back(from);
-        visited.insert(from);
-
-        while let Some(current) = queue.pop_front() {
-            println!("➡️ Visiting node {}", current);
-
-            if current == to {
-                println!("✅ Found path from {} to {}", from, to);
-                return true;
-            }
-
-            if let Some(neighbors) = graph.get(&current) {
-                for &neighbor in neighbors {
-                    if Some(neighbor) == excluded_node || visited.contains(&neighbor) {
-                        continue;
-                    }
-
-                    let is_target = neighbor == to;
-                    let is_dronelike = self.get_node_type(neighbor) == Some(NodeType::Drone);
-
-                    if (is_dronelike || is_target) && graph.contains_key(&neighbor) {
-                        visited.insert(neighbor);
-                        queue.push_back(neighbor);
-                        println!("🔄 Queuing neighbor {}", neighbor);
-                    } else {
-                        println!("⛔ Skipping non-drone node {} (type: {:?})", neighbor, self.get_node_type(neighbor));
-                    }
+            match (a_type, b_type) {
+                (Some(NodeType::Drone), Some(NodeType::Drone)) => {
+                    cfg.append_drone_connection(a, b);
+                    cfg.append_drone_connection(b, a);
                 }
+                (Some(NodeType::Drone), Some(NodeType::Client)) => {
+                    cfg.append_drone_connection(a, b);
+                    cfg.append_client_connection(b, a);
+                }
+                (Some(NodeType::Client), Some(NodeType::Drone)) => {
+                    cfg.append_drone_connection(b, a);
+                    cfg.append_client_connection(a, b);
+                }
+                (Some(NodeType::Drone), Some(NodeType::Server)) => {
+                    cfg.append_drone_connection(a, b);
+                    cfg.append_server_connection(b, a);
+                }
+                (Some(NodeType::Server), Some(NodeType::Drone)) => {
+                    cfg.append_drone_connection(b, a);
+                    cfg.append_server_connection(a, b);
+                }
+                _ => {}
             }
         }
 
-        println!("🚫 NO PATH from {} to {}", from, to);
-        false
-    }
-
-
-
-
-    // Set the packet drop rate for a drone
-    pub fn set_packet_drop_rate(&mut self, drone_id: NodeId, rate: f32) -> Result<(), Box<dyn Error>> {
-        if let Some(sender) = self.command_senders.lock().unwrap().get(&drone_id) {
-            broadcast_topology_change(&self.gui_input,&self.network_config,&"[FloodRequired]::newpdr".to_string());
-
-            sender.send(DroneCommand::SetPacketDropRate(rate))
-                .map_err(|_| "Failed to send SetPacketDropRate command".into())
-
-
-
-        } else {
-            Err("Drone not found".into())
+        //  8. Update shared_senders (if applicable) ===
+        if let Ok(mut shared) = self.shared_senders.lock() {
+            shared.insert((a, b), tx_ab.clone());
+            shared.insert((b, a), tx_ba.clone());
+            info!("🧪 Inserted ({}, {}) and ({}, {}) into shared_senders", a, b, b, a);
         }
-    }
 
-    // Spawn a new drone in the network
-    pub fn spawn_drone(
-        &mut self,
-        id: NodeId,
-        pdr: f32,
-        connections: Vec<NodeId>,
-    ) -> Result<(), Box<dyn Error>> {
+        //  9. Notify GUI ===
+        println!("🤎🧸🍂 Successfully added link between {} and {}", a, b);
+        broadcast_topology_change(
+            &self.gui_input,
+            &self.network_config,
+            &format!("[FloodRequired]::AddSender::{}::{}", a, b),
+        );
+
+        Ok(())
+    }
+    pub fn spawn_drone(&mut self, id: NodeId, pdr: f32, connections: Vec<NodeId>, ) -> Result<(), Box<dyn Error>> {
         // 1) Validate
         if !self.validate_new_drone(id, &connections)? {
             return Err("New drone configuration violates network constraints".into());
@@ -809,9 +576,6 @@ impl SimulationController {
             }
         }
 
-        println!("😂😂😂😂 inbox senders : {:?}",self.inbox_senders.lock().unwrap());
-
-
         // 8) Build send map for the new drone
         let packet_send_map = {
             let psenders = self.packet_senders.lock().unwrap();
@@ -886,14 +650,272 @@ impl SimulationController {
 
         Ok(())
     }
-
-
     pub fn add_connection(&mut self, a: NodeId, b: NodeId) {
         self.network_graph.entry(a).or_default().insert(b);
         self.network_graph.entry(b).or_default().insert(a);
     }
 
-    // Validate that adding a new drone won't violate network constraints
+    pub fn load_group_implementations() -> HashMap<String, GroupImplFactory> {
+        let mut group_implementations = HashMap::new();
+
+        group_implementations.insert(
+            "group_1".to_string(),
+            Box::new(|id, sim_contr_send, sim_contr_recv, packet_recv, packet_send, pdr| {
+                Box::new(RustasticDrone::new(
+                    id,
+                    sim_contr_send,
+                    sim_contr_recv,
+                    packet_recv,
+                    packet_send,
+                    pdr,
+                )) as Box<dyn DroneImplementation>
+            }) as GroupImplFactory,
+        );
+
+
+        group_implementations
+    }
+
+    pub fn set_packet_drop_rate(&mut self, drone_id: NodeId, rate: f32) -> Result<(), Box<dyn Error>> {
+        if let Some(sender) = self.command_senders.lock().unwrap().get(&drone_id) {
+            broadcast_topology_change(&self.gui_input,&self.network_config,&"[FloodRequired]::newpdr".to_string());
+
+            sender.send(DroneCommand::SetPacketDropRate(rate))
+                .map_err(|_| "Failed to send SetPacketDropRate command".into())
+
+
+
+        } else {
+            Err("Drone not found".into())
+        }
+    }
+
+
+    //✅✅✅controls before applying the DroneCommand✅✅✅
+    fn is_crash_allowed(&self, test_graph: &HashMap<NodeId, HashSet<NodeId>>, crashing_node: NodeId) -> bool {
+        for server_id in self.get_all_server_ids() {
+            let neighbors = test_graph.get(&server_id);
+            let drone_neighbors = neighbors.map_or(0, |n| {
+                n.iter()
+                    .filter(|id| {
+                        self.get_node_type(**id)
+                            .map_or(false, |t| t == NodeType::Drone && test_graph.contains_key(*id))
+                    })
+                    .count()
+            });
+
+            if drone_neighbors < 2 {
+                println!("🚨 Server {} must be connected to at least 2 drones", server_id);
+                return false;
+            }
+        }
+
+        if !self.all_clients_and_servers_mutually_reachable(&test_graph, Some(crashing_node)) {
+            println!("🚨 Crash would break client-server mutual reachability");
+            return false;
+        }
+
+
+        if !self.is_connected(test_graph, Some(crashing_node)) {
+            println!("🚨 Graph would become disconnected");
+            return false;
+        }
+
+        true
+    }
+
+    pub fn is_removal_allowed(&self, node_a: NodeId, node_b: NodeId) -> bool {
+        let mut test_graph = self.network_graph.clone();
+
+        if let Some(neighbors) = test_graph.get_mut(&node_a) {
+            neighbors.remove(&node_b);
+        }
+        if let Some(neighbors) = test_graph.get_mut(&node_b) {
+            neighbors.remove(&node_a);
+        }
+
+        self.is_topology_valid(&test_graph)
+    }
+
+    fn is_topology_valid(&self, test_graph: &HashMap<NodeId, HashSet<NodeId>>) -> bool {
+        for server_id in self.get_all_server_ids() {
+            let neighbors = test_graph.get(&server_id);
+            let drone_neighbors = neighbors.map_or(0, |n| {
+                n.iter()
+                    .filter(|id| {
+                        self.get_node_type(**id)
+                            .map_or(false, |t| t == NodeType::Drone && test_graph.contains_key(*id))
+                    })
+                    .count()
+            });
+
+            if drone_neighbors < 2 {
+                println!("🚨 Server {} must be connected to at least 2 drones", server_id);
+                return false;
+            }
+        }
+
+        if !self.all_clients_and_servers_mutually_reachable(&test_graph, None) {
+            println!("🚨 Crash would break client-server mutual reachability");
+            return false;
+        }
+
+
+        if !self.is_connected(test_graph,None) {
+            println!("🚨 Graph would become disconnected");
+            return false;
+        }
+
+        true
+    }
+
+    pub fn bfs_reachable_servers(&self, start_id: NodeId, graph: &HashMap<NodeId, HashSet<NodeId>>, ) -> HashSet<NodeId> {
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+        let mut reachable_servers = HashSet::new();
+
+        visited.insert(start_id);
+        queue.push_back(start_id);
+
+        while let Some(current) = queue.pop_front() {
+            if !graph.contains_key(&current) {
+                continue;
+            }
+            if self.get_node_type(current) == Some(NodeType::Server) {
+                reachable_servers.insert(current);
+            }
+
+            if let Some(neighbors) = graph.get(&current) {
+                for &neighbor in neighbors {
+                    if !visited.contains(&neighbor) {
+                        visited.insert(neighbor);
+                        queue.push_back(neighbor);
+                    }
+                }
+            }
+        }
+        reachable_servers
+    }
+
+    fn is_connected(&self, graph: &HashMap<NodeId, HashSet<NodeId>>, excluded_node: Option<NodeId>, ) -> bool {
+        if graph.is_empty() {
+            return true;
+        }
+
+        let start_node = graph.keys()
+            .find(|&&node_id| {
+                Some(node_id) != excluded_node && graph.contains_key(&node_id) });
+
+        let Some(start_node) = start_node else {
+            return true;
+        };
+
+        let mut visited = HashSet::new();
+        let mut queue = vec![*start_node];
+
+        while let Some(node) = queue.pop() {
+            if visited.insert(node) {
+                if let Some(neighbors) = graph.get(&node) {
+                    for &neighbor in neighbors {
+                        if Some(neighbor) != excluded_node && graph.contains_key(&neighbor) {
+                            queue.push(neighbor);
+                        }
+                    }
+                }
+            }
+        }
+
+        let active_node_count = graph.keys()
+            .filter(|&&node_id| {
+                Some(node_id) != excluded_node &&
+                    self.get_node_state(node_id)
+                        .map_or(false, |state| state.active)
+            })
+            .count();
+
+        visited.len() == active_node_count
+    }
+
+    pub fn all_clients_and_servers_mutually_reachable(&self, graph: &HashMap<NodeId, HashSet<NodeId>>, excluded_node: Option<NodeId>, ) -> bool {
+
+        let clients: Vec<NodeId> = self.get_all_client_ids()
+            .into_iter()
+            .filter(|id| Some(*id) != excluded_node && graph.contains_key(id))
+            .collect();
+
+        let servers: Vec<NodeId> = self.get_all_server_ids()
+            .into_iter()
+            .filter(|id| Some(*id) != excluded_node && graph.contains_key(id))
+            .collect();
+
+        for &client in &clients {
+            for &server in &servers {
+                println!("🔍 Checking: Client {} → Server {}", client, server);
+
+                if !self.can_reach(graph, client, server, excluded_node) {
+                    println!("❌ Client {} cannot reach Server {}", client, server);
+                    return false;
+                }
+                println!("✅ Client {} can reach Server {}", client, server);
+
+            }
+        }
+
+        for &server in &servers {
+            for &client in &clients {
+                if !self.can_reach(graph, server, client, excluded_node) {
+                    println!("❌ Server {} cannot reach Client {}", server, client);
+                    return false;
+                }
+            }
+        }
+
+        true
+    }
+
+    fn can_reach(&self, graph: &HashMap<NodeId, HashSet<NodeId>>, from: NodeId, to: NodeId, excluded_node: Option<NodeId>, ) -> bool {
+
+        if from == to {
+            return true;
+        }
+
+        if !graph.contains_key(&from) || !graph.contains_key(&to) {
+            println!("❌ One of the nodes is not in graph: from={} in_graph={} | to={} in_graph={}",
+                     from, graph.contains_key(&from), to, graph.contains_key(&to));
+            return false;
+        }
+
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+        queue.push_back(from);
+        visited.insert(from);
+
+        while let Some(current) = queue.pop_front() {
+
+            if current == to {
+                return true;
+            }
+
+            if let Some(neighbors) = graph.get(&current) {
+                for &neighbor in neighbors {
+                    if Some(neighbor) == excluded_node || visited.contains(&neighbor) {
+                        continue;
+                    }
+
+                    let is_target = neighbor == to;
+                    let is_dronelike = self.get_node_type(neighbor) == Some(NodeType::Drone);
+
+                    if (is_dronelike || is_target) && graph.contains_key(&neighbor) {
+                        visited.insert(neighbor);
+                        queue.push_back(neighbor);
+                    }
+                }
+            }
+        }
+        println!("🚫 NO PATH from {} to {}", from, to);
+        false
+    }
+
     fn validate_new_drone(&self, id: NodeId, connections: &[NodeId]) -> Result<bool, Box<dyn Error>> {
         // Check for duplicate ID
         if self.network_graph.contains_key(&id) {
@@ -917,7 +939,7 @@ impl SimulationController {
                     .count();
 
                 if drone_neighbors >= 2 {
-                    println!("A client already has 2 drone connections. Cannot connect new drone");
+                    println!("🚨A client already has 2 drone connections. Cannot connect new drone");
                     return Err(format!(
                         "Client {} already has 2 drone connections. Cannot connect new drone {}.",
                         conn_id, id
@@ -931,178 +953,46 @@ impl SimulationController {
 
 
 
-    pub fn load_group_implementations() -> HashMap<String, GroupImplFactory> {
-        let mut group_implementations = HashMap::new();
-
-        group_implementations.insert(
-            "group_1".to_string(),
-            Box::new(|id, sim_contr_send, sim_contr_recv, packet_recv, packet_send, pdr| {
-                Box::new(RustasticDrone::new(
-                    id,
-                    sim_contr_send,
-                    sim_contr_recv,
-                    packet_recv,
-                    packet_send,
-                    pdr,
-                )) as Box<dyn DroneImplementation>
-            }) as GroupImplFactory, // ✅ this is now correct
-        );
-
-
-        // Optional: add more groups here if needed
-
-        group_implementations
+    //🧭🧭🧭all the getters🧭🧭🧭
+    fn get_node_type(&self, id: NodeId) -> Option<NodeType> {
+        let cfg = self.config.lock().unwrap();
+        if cfg.drone.iter().any(|d| d.id == id) {
+            Some(NodeType::Drone)
+        } else if cfg.client.iter().any(|c| c.id == id) {
+            Some(NodeType::Client)
+        } else if cfg.server.iter().any(|s| s.id == id) {
+            Some(NodeType::Server)
+        } else {
+            None
+        }
     }
-
-    pub fn add_link(&mut self, a: NodeId, b: NodeId) -> Result<(), Box<dyn std::error::Error>> {
-        // === 1. Validate nodes exist and are initialized ===
-        for &node in &[a, b] {
-            if self.get_node_type(node) == Some(NodeType::Drone)
-                && !self.command_senders.lock().unwrap().contains_key(&node)
-            {
-                println!("🚨 Missing command_sender for node {}", node);
-                return Err(format!("No command sender for node {}", node).into());
-            }
-            if !self.packet_senders.lock().unwrap().contains_key(&node) {
-                println!("🚨 Missing packet_sender map for node {}", node);
-                return Err(format!("No packet sender for node {}", node).into());
-            }
-        }
-
-        // === 2. Constraint: Clients must connect to at most 2 drones ===
-        for &(client_id, drone_id) in &[(a, b), (b, a)] {
-            if self.get_node_type(client_id) == Some(NodeType::Client)
-                && self.get_node_type(drone_id) == Some(NodeType::Drone)
-            {
-                let neighbors = self.network_graph.get(&client_id).cloned().unwrap_or_default();
-                let drone_neighbors = neighbors
-                    .iter()
-                    .filter(|id| self.get_node_type(**id) == Some(NodeType::Drone))
-                    .count();
-
-                if drone_neighbors >= 2 {
-                    println!("🚨 Client {} already has 2 drone connections", client_id);
-                    return Err("Client connection constraint violated".into());
-                }
-            }
-        }
-
-        // === 3. Create bidirectional channels ===
-        let (tx_ab, rx_ab) = crossbeam_channel::unbounded::<Packet>();
-        let (tx_ba, rx_ba) = crossbeam_channel::unbounded::<Packet>();
-
-        // === 4. Insert into packet_senders ===
-        {
-            let mut psenders = self.packet_senders.lock().unwrap();
-            psenders.entry(a).or_default().insert(b, tx_ab.clone());
-            psenders.entry(b).or_default().insert(a, tx_ba.clone());
-        }
-
-        // === 5. Spawn forwarding threads ===
-        if let Some(inbox_b) = self.inbox_senders.lock().unwrap().get(&b).cloned() {
-            std::thread::spawn(move || {
-                for pkt in rx_ab {
-                    if let Err(e) = inbox_b.send(pkt) {
-                        eprintln!("❌ Forwarding thread {} → {} failed: {}", a, b, e);
-                        break;
-                    }
-                }
-                println!("⚠️ Forwarding thread from {} to {} exited", a, b);
-            });
-        }
-
-        if let Some(inbox_a) = self.inbox_senders.lock().unwrap().get(&a).cloned() {
-            std::thread::spawn(move || {
-                for pkt in rx_ba {
-                    if let Err(e) = inbox_a.send(pkt) {
-                        eprintln!("❌ Forwarding thread {} → {} failed: {}", b, a, e);
-                        break;
-                    }
-                }
-                println!("⚠️ Forwarding thread from {} to {} exited", b, a);
-            });
-        }
-
-        // === 6. Send AddSender to drones ===
-        for (node, neighbor, sender) in vec![
-            (a, b, tx_ab.clone()),
-            (b, a, tx_ba.clone()),
-        ] {
-            if self.get_node_type(node) == Some(NodeType::Drone) {
-                if let Some(cmd_tx) = self.command_senders.lock().unwrap().get(&node) {
-                    cmd_tx
-                        .send(DroneCommand::AddSender(neighbor, sender))
-                        .map_err(|e| format!("Failed to send AddSender to {}: {}", node, e))?;
-                }
-            }
-        }
-
-
-        // === 7. Update network graph and config ===
-        self.network_graph.entry(a).or_default().insert(b);
-        self.network_graph.entry(b).or_default().insert(a);
-
-        {
-            let a_type = self.get_node_type(a);
-            let b_type = self.get_node_type(b);
-            let mut cfg = self.network_config.lock().unwrap();
-
-            match (a_type, b_type) {
-                (Some(NodeType::Drone), Some(NodeType::Drone)) => {
-                    cfg.append_drone_connection(a, b);
-                    cfg.append_drone_connection(b, a);
-                }
-                (Some(NodeType::Drone), Some(NodeType::Client)) => {
-                    cfg.append_drone_connection(a, b);
-                    cfg.append_client_connection(b, a);
-                }
-                (Some(NodeType::Client), Some(NodeType::Drone)) => {
-                    cfg.append_drone_connection(b, a);
-                    cfg.append_client_connection(a, b);
-                }
-                (Some(NodeType::Drone), Some(NodeType::Server)) => {
-                    cfg.append_drone_connection(a, b);
-                    cfg.append_server_connection(b, a);
-                }
-                (Some(NodeType::Server), Some(NodeType::Drone)) => {
-                    cfg.append_drone_connection(b, a);
-                    cfg.append_server_connection(a, b);
-                }
-                _ => {}
-            }
-        }
-
-        // === 8. Update shared_senders (if applicable) ===
-        if let Ok(mut shared) = self.shared_senders.lock() {
-            shared.insert((a, b), tx_ab.clone());
-            shared.insert((b, a), tx_ba.clone());
-            info!("🧪 Inserted ({}, {}) and ({}, {}) into shared_senders", a, b, b, a);
-        }
-
-        // === 9. Notify GUI ===
-        println!("🤎🧸🍂 Successfully added link between {} and {}", a, b);
-        broadcast_topology_change(
-            &self.gui_input,
-            &self.network_config,
-            &format!("[FloodRequired]::AddSender::{}::{}", a, b),
-        );
-
-        Ok(())
+    pub fn get_all_drone_ids(&self) -> Vec<NodeId> {
+        self.config
+            .lock()
+            .unwrap()
+            .drone
+            .iter()
+            .map(|d| d.id)
+            .collect()
     }
-
-    /* pub fn refresh_channels(&mut self) {
-         let (new_receivers, new_senders) = self.initializer.lock().unwrap().setup_channels();
-         // Step 2: Copy into the controller’s fields
-         self.packet_receivers = Arc::new(Mutex::new(new_receivers));
-         self.packet_senders = Arc::new(Mutex::new(new_senders));
-
-
-         for (id, neighbors) in self.packet_senders.lock().unwrap().iter() {
-             println!("Node {} has {} neighbors", id, neighbors.len());
-         }
-     }*/
-
-
+    pub fn get_all_client_ids(&self) -> Vec<NodeId> {
+        self.config
+            .lock()
+            .unwrap()
+            .client
+            .iter()
+            .map(|c| c.id)
+            .collect()
+    }
+    pub fn get_all_server_ids(&self) -> Vec<NodeId> {
+        self.config
+            .lock()
+            .unwrap()
+            .server
+            .iter()
+            .map(|s| s.id)
+            .collect()
+    }
     pub fn get_node_state(&self, node_id: NodeId) -> Option<Node> {
         let config = self.network_config.lock().unwrap();
 
@@ -1115,7 +1005,7 @@ impl SimulationController {
                     node_type: NodeType::Drone,
                     pdr: drone.pdr,
                     active: self.network_graph.contains_key(&node_id),
-                    position: default_position, // fallback
+                    position: default_position,
                     manual_position:false,
                 });
             }
@@ -1149,15 +1039,12 @@ impl SimulationController {
 
         None
     }
-
     pub fn get_packet_sender(&self, from: NodeId, to: NodeId) -> Option<Sender<Packet>> {
         self.packet_senders.lock().unwrap().get(&from)?.get(&to).cloned()
     }
-
     pub fn register_command_sender(&mut self, node_id: NodeId, sender: Sender<DroneCommand>) {
         self.command_senders.lock().unwrap().insert(node_id, sender);
     }
-
     pub fn register_packet_sender(&mut self, from: NodeId, to: NodeId, sender: Sender<Packet>) {
         self.packet_senders
             .lock().unwrap().entry(from)
@@ -1168,12 +1055,4 @@ impl SimulationController {
         self.packet_senders.lock().unwrap().keys().cloned().collect()
     }
 
-
-
-
-
-}
-struct NodeState {
-    node_type: NodeType,
-    active: bool,
 }

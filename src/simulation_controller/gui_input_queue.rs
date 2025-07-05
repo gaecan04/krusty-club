@@ -19,7 +19,6 @@ pub fn push_gui_message(queue: &SharedGuiInput, from: NodeId, msg: String) {
     }
 }
 
-
 pub fn broadcast_topology_change(
     gui_input: &SharedGuiInput,
     config: &Arc<Mutex<ParsedConfig>>,
