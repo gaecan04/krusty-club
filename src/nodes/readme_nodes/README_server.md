@@ -134,29 +134,27 @@ This method is responsible for:
 Parses command-based messages:
 - `[Login]::server_id` : registers client_id into server.registered_clients and sends a  format!("[LoginAck]::session_id") as a response to client
   Example login from console: <br>
-  ![img.png](img.png)
-  ![img_1.png](img_1.png)
+  ![img.png](imgs_terminal_server%2Fimg.png)
+  ![img_1.png](imgs_terminal_server%2Fimg_1.png)
   <br>
-- `[ClientListRequest]`: sends a  format!("[ClientListResponse]::{}",clients)
-  Example from console:
-  ![img_2.png](img_2.png)
-  <br>
+  - `[ClientListRequest]`: sends a  format!("[ClientListResponse]::{}",clients)
+    Example from console:
+  ![img_2.png](imgs_terminal_server%2Fimg_2.png)
+- <br>
 - `[ChatRequest]::target_id`: triggers a  format!("[ChatStart]::{}",success) message to client
 
 - `[MessageTo]::target_id::msg`: sends to target_id  format!("[MessageFrom]::{}::{}", client_id, msg). It then update self.chat_history inserting at the end of the queue the msg to the client1 - client2 entry.
 
-- `[HistoryRequest]::src_id::tgt_id`: when clients wants to see chronology sends  format!("[HistoryResponse]::{}", response) <br>
-Output from client: 
-  ![img_6.png](img_6.png)
-
+  - `[HistoryRequest]::src_id::tgt_id`: when clients wants to see chronology sends  format!("[HistoryResponse]::{}", response) <br>
+  Output from client: 
+  ![img_6.png](imgs_terminal_server%2Fimg_6.png)
 - `[ChatHistoryUpdate]::src_server::serialized_entry`: used to take updates of chat histories from other servers 🚨🚨🚨🚨
-  ![img_3.png](img_3.png)
-![img_4.png](img_4.png)
-
+   ![img_3.png](imgs_terminal_server%2Fimg_3.png)
+   ![img_4.png](imgs_terminal_server%2Fimg_4.png)
 - `[MediaUpload]::media_name::base64`: insert in media_storage a media --> sends format!("[MediaUploadAck]::{}", media_name)
 - `[MediaListRequest]`: sends format("[MediaListResponse]::{}", list)  where list contains all medias available on server.
-  ![img_7.png](img_7.png)
-
+   ![img_7.png](imgs_terminal_server%2Fimg_7.png)
+- 
 - `[MediaDownloadRequest]::media_name`:  sends format!("[MediaDownloadResponse]::{}::{}", media_name, base64_data)
 
 - `[MediaBroadcast]::media_name::base64_data`: sends to all clients in self.registered_clients a format!("[MediaDownloadResponse]::{}::{}", media_name, base64_data),
@@ -165,7 +163,7 @@ Output from client:
 - `[ChatFinish]::target_client`: when a ChatFinish is received the server takes the chronology between target_client e client.id and sends to every server in the topology a format!("[ChatHistoryUpdate]::{}::{}", self.id, serialized), where serialized is the complete chat history between the pair of clients.
 
 - `[Logout]`: removes from registered_clients hashmap the client.id 👀👀👀👀
-![img_8.png](img_8.png)
+   ![img_8.png](imgs_terminal_server%2Fimg_8.png)
 
 ---
 ### `send_chat_message(session_id, target_id, msg)`
@@ -189,7 +187,7 @@ Messages that are too large to fit in a single packet are fragmented into 128-by
 ### `handle_nack(session_id, nack, packet, header)`
 - For `NackType::Dropped`: increase graph weight calling self.network_graph.increment_drop( from, to) and resend the packet using new best path ⌚⌚⌚⌚.
   Example from console log:
-  ![img_9.png](img_9.png)
+  ![img_9.png](imgs_terminal_server%2Fimg_9.png)
 - For `NackType::ErrorInRouting`: remove crashed drone by calling self.network_graph.remove_node(crashed_node_id) if the drone was crashed,
 - otherwise it removes the link in the network_graph and in the server's packet_sender if it is involved in the Nacked link.
 - For other types: send new `FloodRequest`.
