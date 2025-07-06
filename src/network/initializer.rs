@@ -119,7 +119,7 @@ impl ParsedConfig {
 
         let drone_vec: Vec<NodeId> = {
             let mut v = self.drone.iter().map(|d| d.id).collect::<Vec<_>>();
-            v.sort(); // IDs 1..10
+            v.sort();
             v
         };
 
@@ -130,7 +130,7 @@ impl ParsedConfig {
                 let filtered = d.connected_node_ids
                     .iter()
                     .cloned()
-                    .filter(|id| drone_set.contains(id)) //topology is detected from drones connection only
+                    .filter(|id| drone_set.contains(id))
                     .collect::<HashSet<_>>();
                 (d.id, filtered)
             })
@@ -397,10 +397,10 @@ pub struct NetworkInitializer {
     pub(crate) packet_receivers: Arc<Mutex<HashMap<NodeId, Receiver<Packet>>>>,
 
     pub(crate) command_senders: Arc<Mutex<HashMap<NodeId, Sender<DroneCommand>>>>,
-    pub(crate) command_receivers: HashMap<NodeId, Receiver<DroneCommand>>, // ✅ Add this
+    pub(crate) command_receivers: HashMap<NodeId, Receiver<DroneCommand>>,
 
     pub(crate) controller_event_receiver: Option<Receiver<DroneEvent>>,
-    pub(crate) event_sender: Option<Sender<DroneEvent>>, // ✅ Also added previously
+    pub(crate) event_sender: Option<Sender<DroneEvent>>,
 
     controller_tx: Sender<DroneEvent>,
     controller_rx: Receiver<DroneCommand>,
@@ -456,7 +456,7 @@ impl NetworkInitializer {
         self.simulation_controller = Some(ctrl);
     }
 
-    pub fn initialize(&mut self, gui_input_queue: SharedGuiInput, host_receivers: HashMap<NodeId, Receiver<Packet>>, // NEW!
+    pub fn initialize(&mut self, gui_input_queue: SharedGuiInput, host_receivers: HashMap<NodeId, Receiver<Packet>>,
     ) -> Result<(), Box<dyn Error>> {
        // Validate the network configuration
         self.validate_config()?;
