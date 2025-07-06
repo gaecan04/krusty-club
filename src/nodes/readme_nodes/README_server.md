@@ -18,7 +18,7 @@ pub struct NetworkGraph {
 }
 ```
 ***Purpose:*** <br>
-Represents the network as a bidirectional graph where nodes are clients, drones, or servers. The graph will be used for the computation 
+Represents the network as a bidirectional graph where nodes are clients, drones, or servers. The graph will be used for the computation
 of the best path between nodes.
 ### Methods:
 - `new()`: Initialize an empty graph.
@@ -28,13 +28,13 @@ of the best path between nodes.
 - `remove_link(NodeId, NodeId)`: Remove an edge in the graphs but preserving nodes' integrity, used when we do a "RemoveSender" change in topology.
 - `increment_drop(a, b)`: Increases weight of edge after drop --> this is how the path gets penalized, promoting rerouting with "cheaper" links.
 - `best_path(src, tgt)`: his method computes the shortest valid path from a given source node to a target node in the current dynamic network graph.
-    It is used by the server or any node to route messages using source routing, ensuring the path only includes operational and allowed links.
-    Features: 
-    1. Dynamic path validation: Before computing the path, the function removes any edges that are no longer valid by checking the shared_senders map. 
-        This ensures packets won't be routed through links that no longer exist or are broken due to a drone crash or link removal.
-    2. Dijkstra's algorithm with constraint: intermediate nodes must be drones, with clients and server allowed only as start or end nodes 
+  It is used by the server or any node to route messages using source routing, ensuring the path only includes operational and allowed links.
+  Features:
+    1. Dynamic path validation: Before computing the path, the function removes any edges that are no longer valid by checking the shared_senders map.
+       This ensures packets won't be routed through links that no longer exist or are broken due to a drone crash or link removal.
+    2. Dijkstra's algorithm with constraint: intermediate nodes must be drones, with clients and server allowed only as start or end nodes
     3. Cycle prevention: Source node is never allowed to be an intermediate node --> avoiding loops.
-    4. Detailed error handling 
+    4. Detailed error handling
 - `set_node_type(id, type)`: Associate node ID with a type, allowing the system to differentiate routing behavior (e.g., avoiding servers when relaying messages).
 - `get_node_type(id)`: Retrieve the node type.
 - `print_graph()`: Log current graph state with edge weights --> used testing phase.
@@ -81,24 +81,27 @@ First thing done: analyze the network. --> self.initiate_network_discovery()
     - `FloodResponse` → calls self.handle_flood_response(...)
 - Takes packets passed by the simulation controller if there are problems with the incoming packets routing.<br>
   Note that the shortcut_receiver can only pass : Ack, Nack, FloodResponse packets. <br>
-All of them are treated with the logic od when they are received normally form the network. 
+  All of them are treated with the logic od when they are received normally form the network.
 - `process_gui_messages(...)`: this function takes the message passed by the GUI and strips it.<br>
-There are 2 main cases: 
-  1. ``` rust 
-     "[MediaBroadcast]::"
-     ```
-     For which the server performs a Broadcast of the media passed to all the clients registered in the server.
-  2. ``` rust 
-     "[FloodRequired]::"
-     ```
-     This is the message which alarms the server that there were some changes in the topology of the network. <br>
-  There are 4 sub-cases : <br>
-     ``` rust 
-     "[FloodRequired]::RemoveSender::{NodeId}::{NodeId}" --> removes sender channels between these 2 nodes
-     "[FloodRequired]::AddSender::{NodeId}::{NodeId}" --> adds sender channels between these 2 nodes
-     "[FloodRequired]::SpawnDrone::{NodeId}::{SpawnedDroneIdneighbors}" --> adds the connections to the newly spawned drone
-     "[FloodRequired]::Crash::{NodeId}" --> detects the crashed node and removes it 
-       ```
+  There are 2 main cases:
+
+       
+      "[MediaBroadcast]::"
+      
+  
+- For which the server performs a Broadcast of the media passed to all the clients registered in the server.
+    
+        
+      "[FloodRequired]::"
+       
+- This is the message which alarms the server that there were some changes in the topology of the network. <br>
+       There are 4 sub-cases : <br>
+       
+       "[FloodRequired]::RemoveSender::{NodeId}::{NodeId}" --> removes sender channels between these 2 nodes
+       "[FloodRequired]::AddSender::{NodeId}::{NodeId}" --> adds sender channels between these 2 nodes
+       "[FloodRequired]::SpawnDrone::{NodeId}::{SpawnedDroneIdneighbors}" --> adds the connections to the newly spawned drone
+       "[FloodRequired]::Crash::{NodeId}" --> detects the crashed node and removes it 
+
 ---
 ### Connection thread on Log Gui:
 #### `fn attach_log()`
@@ -138,6 +141,9 @@ Parses command-based messages:
   ![img_1.png](imgs_terminal_server%2Fimg_1.png)
   <br>
 - `[ClientListRequest]`: sends a  format!("[ClientListResponse]::{}",clients)
+  Example from console:
+  ![img_2.png](imgs_terminal_server%2Fimg_2.png)
+  <br>
     Example from console:
   ![img_2.png](imgs_terminal_server%2Fimg_2.png)
  <br>
@@ -146,14 +152,20 @@ Parses command-based messages:
   
 - `[ChatRequest]::target_id` : triggers a  format!("[ChatStart]::{}",success) message to client
 
+- `[ChatRequest]::target_id` : triggers a  format!("[ChatStart]::{}",success) message to client
+
+- `[HistoryRequest]::src_id::tgt_id`: when clients wants to see chronology sends  format!("[HistoryResponse]::{}", response) <br>
+  Output from client:
 - `[HistoryRequest]::src_id::tgt_id`: when clients wants to see chronology sends  format!("[HistoryResponse]::{}", response) <br>
   Output from client: 
   ![img_6.png](imgs_terminal_server%2Fimg_6.png)
 - `[ChatHistoryUpdate]::src_server::serialized_entry`: used to take updates of chat histories from other servers 🚨🚨🚨🚨
-   ![img_3.png](imgs_terminal_server%2Fimg_3.png)
-   ![img_4.png](imgs_terminal_server%2Fimg_4.png)
+  ![img_3.png](imgs_terminal_server%2Fimg_3.png)
+  ![img_4.png](imgs_terminal_server%2Fimg_4.png)
 - `[MediaUpload]::media_name::base64`: insert in media_storage a media --> sends format!("[MediaUploadAck]::{}", media_name)
 - `[MediaListRequest]`: sends format("[MediaListResponse]::{}", list)  where list contains all medias available on server.
+  ![img_7.png](imgs_terminal_server%2Fimg_7.png)
+
    ![img_7.png](imgs_terminal_server%2Fimg_7.png)
  
 - `[MediaDownloadRequest]::media_name`:  sends format!("[MediaDownloadResponse]::{}::{}", media_name, base64_data)
@@ -164,7 +176,7 @@ Parses command-based messages:
 - `[ChatFinish]::target_client`: when a ChatFinish is received the server takes the chronology between target_client e client.id and sends to every server in the topology a format!("[ChatHistoryUpdate]::{}::{}", self.id, serialized), where serialized is the complete chat history between the pair of clients.
 
 - `[Logout]`: removes from registered_clients hashmap the client.id 👀👀👀👀
-   ![img_8.png](imgs_terminal_server%2Fimg_8.png)
+  ![img_8.png](imgs_terminal_server%2Fimg_8.png)
 
 ---
 ### `send_chat_message(session_id, target_id, msg)`
@@ -206,6 +218,5 @@ Messages that are too large to fit in a single packet are fragmented into 128-by
 
 ### `handle_flood_response(session_id, flood_response, header)`
 - Integrates new links into `network_graph` by calling the `self.add_link(...)` function.
-
 
 
