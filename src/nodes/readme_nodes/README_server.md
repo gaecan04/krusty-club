@@ -87,7 +87,7 @@ First thing done: analyze the network. --> self.initiate_network_discovery()
 
       1. ```  
       "[FloodRequired]::"
-     ```
+      ```
   
 - For which the server performs a Broadcast of the media passed to all the clients registered in the server.
     
