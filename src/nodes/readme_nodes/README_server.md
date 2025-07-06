@@ -141,9 +141,10 @@ Parses command-based messages:
     Example from console:
   ![img_2.png](imgs_terminal_server%2Fimg_2.png)
  <br>
-- `[ChatRequest]::target_id` : triggers a  format!("[ChatStart]::{}",success) message to client
 
 - `[MessageTo]::target_id::msg`: sends to target_id  format!("[MessageFrom]::{}::{}", client_id, msg). It then update self.chat_history inserting at the end of the queue the msg to the client1 - client2 entry.
+  
+- `[ChatRequest]::target_id` : triggers a  format!("[ChatStart]::{}",success) message to client
 
 - `[HistoryRequest]::src_id::tgt_id`: when clients wants to see chronology sends  format!("[HistoryResponse]::{}", response) <br>
   Output from client: 
