@@ -91,9 +91,9 @@ First thing done: analyze the network. --> self.initiate_network_discovery()
   
 - For which the server performs a Broadcast of the media passed to all the clients registered in the server.
     
-     2. ```  
-     "[FloodRequired]::"
-     ```
+      2. ```  
+      "[FloodRequired]::"
+       ```
 - This is the message which alarms the server that there were some changes in the topology of the network. <br>
        There are 4 sub-cases : <br>
        ``` rust 
