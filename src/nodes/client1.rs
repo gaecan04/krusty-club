@@ -625,6 +625,11 @@ impl MyClient {
                     warn!("Client {} received LOGIN ACK with invalid session ID: {}", self.id, session_id);
                 }
             },
+            ["[MediaBroadcastAck]", media_name, "Broadcasted"] => {
+                info!("Client {} received MEDIA BROADCAST ACK for media '{}' (broadcasted successfully)", self.id, media_name);
+                self.log(format!("Client {} received MEDIA BROADCAST ACK for media '{}' (broadcasted successfully)", self.id, media_name));
+            },
+
             [type_tag, ..] => {
                 warn!("Client {} received unrecognized high-level message type: {}", self.id, type_tag);
             },
