@@ -138,24 +138,42 @@ Parses command-based messages:
   ![img_1.png](imgs_terminal_server%2Fimg_1.png)
   <br>
 - `[ClientListRequest]`: sends a  format!("[ClientListResponse]::{}",clients)
+<<<<<<< HEAD
   Example from console:
   ![img_2.png](imgs_terminal_server%2Fimg_2.png)
   <br>
+=======
+    Example from console:
+  ![img_2.png](imgs_terminal_server%2Fimg_2.png)
+ <br>
+>>>>>>> 192e398fe6c75c362cff451149b0754c5b3ca0bc
 
 - `[MessageTo]::target_id::msg`: sends to target_id  format!("[MessageFrom]::{}::{}", client_id, msg). It then update self.chat_history inserting at the end of the queue the msg to the client1 - client2 entry.
+  
+- `[ChatRequest]::target_id` : triggers a  format!("[ChatStart]::{}",success) message to client
 
+<<<<<<< HEAD
 - `[ChatRequest]::target_id` : triggers a  format!("[ChatStart]::{}",success) message to client
 
 - `[HistoryRequest]::src_id::tgt_id`: when clients wants to see chronology sends  format!("[HistoryResponse]::{}", response) <br>
   Output from client:
+=======
+- `[HistoryRequest]::src_id::tgt_id`: when clients wants to see chronology sends  format!("[HistoryResponse]::{}", response) <br>
+  Output from client: 
+>>>>>>> 192e398fe6c75c362cff451149b0754c5b3ca0bc
   ![img_6.png](imgs_terminal_server%2Fimg_6.png)
 - `[ChatHistoryUpdate]::src_server::serialized_entry`: used to take updates of chat histories from other servers 🚨🚨🚨🚨
   ![img_3.png](imgs_terminal_server%2Fimg_3.png)
   ![img_4.png](imgs_terminal_server%2Fimg_4.png)
 - `[MediaUpload]::media_name::base64`: insert in media_storage a media --> sends format!("[MediaUploadAck]::{}", media_name)
 - `[MediaListRequest]`: sends format("[MediaListResponse]::{}", list)  where list contains all medias available on server.
+<<<<<<< HEAD
   ![img_7.png](imgs_terminal_server%2Fimg_7.png)
 
+=======
+   ![img_7.png](imgs_terminal_server%2Fimg_7.png)
+ 
+>>>>>>> 192e398fe6c75c362cff451149b0754c5b3ca0bc
 - `[MediaDownloadRequest]::media_name`:  sends format!("[MediaDownloadResponse]::{}::{}", media_name, base64_data)
 
 - `[MediaBroadcast]::media_name::base64_data`: sends to all clients in self.registered_clients a format!("[MediaDownloadResponse]::{}::{}", media_name, base64_data),
