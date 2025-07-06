@@ -127,13 +127,13 @@ impl MyClient {
                 recv(self.packet_recv) -> packet => {
                     info!("Checking for received packet by client {} ...", self.id);
                     if let Ok(packet) = packet {
-                        info!("❤ ❤ ❤  Packet received by client {} : {:?}", self.id, packet);
+                       println!("❤ ❤ ❤  Packet received by client {} : {:?}", self.id, packet);
                         self.process_packet(packet);
                     }
                 },
                 recv(self.shortcut_receiver.as_ref().unwrap()) -> packet => {
                     if let Ok(packet) = packet {
-                        info!("Client {} received shortcut packet: {:?}", self.id, packet);
+                       println!("Client {} received shortcut packet: {:?}", self.id, packet);
                         self.process_packet(packet);
                     }
                 }
@@ -168,7 +168,7 @@ impl MyClient {
 
 
         for flood_id in floods_to_finalize {
-            info!("Client {} finalizing flood discovery for ID {} due to timeout",
+            println!("Client {} finalizing flood discovery for ID {} due to timeout",
                      self.id, flood_id);
             self.finalize_flood_discovery_topology(flood_id);
         }
@@ -247,7 +247,7 @@ impl MyClient {
 
                     // If the pending command was a logout, update client state
                     if pending_cmd.starts_with("[Logout]") {
-                        info!("🚪 🚪 🚪  Client {} logout completed after flood. Disconnected from server {}",
+                        println!("🚪 🚪 🚪  Client {} logout completed after flood. Disconnected from server {}",
                                  self.id, dest);
                         self.connected_server_id = None;
                     }
@@ -263,7 +263,7 @@ impl MyClient {
 
     fn finalize_flood_discovery_topology(&mut self, flood_id: u64) {
         if let Some(discovery_state) = self.active_flood_discoveries.remove(&flood_id) {
-            info!("Client {} processing {} collected responses for flood ID {}", self.id, discovery_state.received_responses.len(), flood_id);
+            println!("Client {} processing {} collected responses for flood ID {}", self.id, discovery_state.received_responses.len(), flood_id);
             for response in discovery_state.received_responses {
                 self.create_topology(&response);
             }
@@ -280,10 +280,10 @@ impl MyClient {
                 self.process_flood_request(&request, packet.routing_header.clone());
             },
             PacketType::FloodResponse(response) => {
-                info!("Client {} received FloodResponse for flood_id {}", self.id, response.flood_id);
+                println!("Client {} received FloodResponse for flood_id {}", self.id, response.flood_id);
                 if let Some(discovery_state) = self.active_flood_discoveries.get_mut(&response.flood_id) {
                     discovery_state.received_responses.push(response.clone());
-                    info!("Client {} collected {} responses for flood ID {}", self.id, discovery_state.received_responses.len(), response.flood_id);
+                    println!("Client {} collected {} responses for flood ID {}", self.id, discovery_state.received_responses.len(), response.flood_id);
                 } else {
                     warn!("Client {} received FloodResponse for unknown or inactive flood ID {}. Processing path anyway", self.id, response.flood_id);
                     self.create_topology(&response);
@@ -294,12 +294,12 @@ impl MyClient {
                 self.reassemble_packet(&fragment, &mut packet);
             },
             PacketType::Ack(ack) => {
-                info!("Client {} received ACK for session {}, fragment {}", self.id, packet.session_id, ack.fragment_index);
+                println!("Client {} received ACK for session {}, fragment {}", self.id, packet.session_id, ack.fragment_index);
                 if let Some(sent_msg_info) = self.sent_messages.get_mut(&packet.session_id) {
                     sent_msg_info.received_ack_indices.insert(ack.fragment_index);
                     info!("Client {} marked fragment {} of session {} as ACKed", self.id, ack.fragment_index, packet.session_id);
                     if sent_msg_info.received_ack_indices.len() == sent_msg_info.fragments.len() {
-                        info!("✅ ✅ ✅  Client {} received all ACKs for session {}. Message considered successfully sent", self.id, packet.session_id);
+                        println!("✅ ✅ ✅  Client {} received all ACKs for session {}. Message considered successfully sent", self.id, packet.session_id);
                         //self.sent_messages.remove(&packet.session_id);
                     }
                 } else {
@@ -367,7 +367,7 @@ impl MyClient {
             self.seen_flood_ids.insert(flood_identifier);
             let mut updated_request = request.clone();
             updated_request.path_trace.push((self.id, NodeType::Client));
-            info!("Client {} processed FloodRequest {}. Path trace now: {:?}", self.id, request.flood_id, updated_request.path_trace);
+            println!("Client {} processed FloodRequest {}. Path trace now: {:?}", self.id, request.flood_id, updated_request.path_trace);
             for (neighbor_id, sender_channel) in self.packet_send.clone() {
                 if sender_id.is_none() || neighbor_id != sender_id.unwrap() {
                     let packet_to_forward = Packet {
@@ -410,9 +410,6 @@ impl MyClient {
             },
             session_id: new_flood_id,
         };
-
-        info!("♥ ♥ ♥  client {} has senders towards this drones: {:?}", self.id, self.packet_send);
-
 
         info!("🌊 🌊 🌊  Client {} sending FloodRequest {} to all neighbors", self.id, new_flood_id);
         //4.sending flood_request to all neighbors
@@ -685,11 +682,9 @@ impl MyClient {
                     if let Some(true) = crashed {
                         self.remove_node_from_graph(*problem_node_id);
                         self.packet_send.remove(problem_node_id);
-                        self.log(format!("Node {} crashed (removed from graph)", problem_node_id));
                     } else {
                         self.packet_send.remove(problem_node_id);
                         self.remove_link_from_graph(from, *problem_node_id);
-                        self.log(format!("Link removed between {} and {}", from, problem_node_id));
                     }
                 }
 
@@ -1140,7 +1135,7 @@ impl MyClient {
                     hops: route.clone(),
                     hop_index: 1,
                 };
-                info!("♥♥♥♥ BEST PATH IS : {:?}",routing_header.hops);
+                info!("🚕🚕🚕🚕🚕 BEST PATH IS : {:?}",routing_header.hops);
                 let message_data_bytes = high_level_message_content.into_bytes();
                 const FRAGMENT_SIZE: usize = 128;
                 let total_fragments = (message_data_bytes.len() + FRAGMENT_SIZE - 1) / FRAGMENT_SIZE;

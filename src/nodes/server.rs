@@ -14,11 +14,8 @@ use std::collections::VecDeque;
 use std::fs;
 use std::io::Cursor;
 use std::sync::{Arc, Mutex};
-//use base64::Engine;
-//use base64::engine::general_purpose::STANDARD;
 use crate::simulation_controller::gui_input_queue::SharedGuiInput;
 use crossbeam_channel::select;
-//use image::ImageReader;
 use rand::random;
 
 #[derive(Clone, Debug)]
@@ -359,7 +356,7 @@ impl server {
                      recv(self.packet_receiver) -> packet_result => {
                         match packet_result {
                             Ok(mut packet) => {
-                                info!("Server {} received packet :{:?}", self.id, packet);
+                               println!("Server {} received packet :{:?}", self.id, packet);
                                 match &packet.pack_type {
                                     PacketType::MsgFragment(fragment) => {
                                         info!("SERVER RECEIVED MESSAGE FRAGMENT");
@@ -378,7 +375,7 @@ impl server {
                                         self.handle_flood_request(packet.session_id, flood_request, packet.routing_header);
                                     }
                                     PacketType::FloodResponse(flood_response) => {
-                                        info!("server {} received FloodResponse {:?}", self.id, flood_response.path_trace);
+                                       println!("server {} received FloodResponse {:?}", self.id, flood_response.path_trace);
                                         self.handle_flood_response(packet.session_id, flood_response, packet.routing_header);
                                     }
                                     _ => {
@@ -684,7 +681,7 @@ impl server {
         info!("Handling complete message");
         match tokens.as_slice() {
             ["[Login]", server_id_str] => {
-                info!(" --------------------------- 🔔🔔🔔 Received login 🔔🔔🔔 -----------------------------");
+                info!(" -------------- 🔔🔔🔔 Received login 🔔🔔🔔 ---------------");
                 if server_id_str.parse::<NodeId>() == Ok(self.id) {
                     if !self.registered_clients.contains(&client_id) {
                         self.registered_clients.push(client_id);
@@ -1092,7 +1089,7 @@ impl server {
     }
 
     fn handle_flood_response(&mut self, session_id: u64, flood_response: &FloodResponse, routing_header: SourceRoutingHeader) {
-        info!("Received FloodResponse for flood_id {} in session {}", flood_response.flood_id, session_id);
+        println!("Received FloodResponse for flood_id {} in session {}", flood_response.flood_id, session_id);
         // let nodes: Vec<NodeId> = flood_response.path_trace.iter().map(|(id, _)| *id).collect();
         let path = &flood_response.path_trace;
         for pair in path.windows(2) {

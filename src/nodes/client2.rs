@@ -574,7 +574,7 @@ impl MyClient {
         let chatting_status = match CHATTING_STATUS.lock() {
             Ok(guard) => *guard,
             Err(poisoned) => {
-                eprintln!("⚠️ Mutex poisoned! Recovering.");
+                eprintln!("⚠ Mutex poisoned! Recovering.");
                 *poisoned.into_inner()
             }
         };
@@ -693,6 +693,7 @@ impl MyClient {
                 if parts.len() == 2 {
                     if let Ok(crashed_id) = parts[1].parse::<NodeId>() {
                         println!("Client {} received crash signal for node {}. Cleaning up and triggering rediscovery.", self.id, crashed_id);
+                        self.node_map.remove(&crashed_id).map(|(index, _)| index);
                         self.safe_remove_node(crashed_id);
                         self.send_flood_request();
                         return Ok("NO_CHAT_COMMAND".to_string());
@@ -1004,7 +1005,7 @@ impl MyClient {
                 status.2 = server_id;
             }
             Err(poisoned) => {
-                eprintln!("⚠️ CHATTING_STATUS mutex was poisoned! Recovering and updating anyway.");
+                eprintln!("⚠ CHATTING_STATUS mutex was poisoned! Recovering and updating anyway.");
                 let mut status = poisoned.into_inner();
                 status.0 = chatting;
                 status.1 = peer_id;
@@ -1147,6 +1148,6 @@ impl MyClient {
                 .spawn()?;
         }
 
-        Ok(())
-    }
+       Ok(())
+        }
 }
