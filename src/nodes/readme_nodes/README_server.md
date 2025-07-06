@@ -137,15 +137,15 @@ Parses command-based messages:
   ![img.png](imgs_terminal_server%2Fimg.png)
   ![img_1.png](imgs_terminal_server%2Fimg_1.png)
   <br>
-  - `[ClientListRequest]`: sends a  format!("[ClientListResponse]::{}",clients)
+- `[ClientListRequest]`: sends a  format!("[ClientListResponse]::{}",clients)
     Example from console:
   ![img_2.png](imgs_terminal_server%2Fimg_2.png)
-- <br>
+ <br>
 - `[ChatRequest]::target_id`: triggers a  format!("[ChatStart]::{}",success) message to client
 
 - `[MessageTo]::target_id::msg`: sends to target_id  format!("[MessageFrom]::{}::{}", client_id, msg). It then update self.chat_history inserting at the end of the queue the msg to the client1 - client2 entry.
 
-  - `[HistoryRequest]::src_id::tgt_id`: when clients wants to see chronology sends  format!("[HistoryResponse]::{}", response) <br>
+- `[HistoryRequest]::src_id::tgt_id`: when clients wants to see chronology sends  format!("[HistoryResponse]::{}", response) <br>
   Output from client: 
   ![img_6.png](imgs_terminal_server%2Fimg_6.png)
 - `[ChatHistoryUpdate]::src_server::serialized_entry`: used to take updates of chat histories from other servers 🚨🚨🚨🚨
