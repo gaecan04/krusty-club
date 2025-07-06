@@ -9,16 +9,13 @@ use wg_2024::packet::{Ack, FloodRequest, FloodResponse, Fragment, Nack, NackType
 use wg_2024::network::{NodeId, SourceRoutingHeader};
 use log::{info, error, warn, debug};
 use petgraph::graph::{DiGraph, NodeIndex};
-use petgraph::visit::EdgeRef;
+use petgraph::visit::{EdgeRef, NodeIndexable};
 use std::collections::VecDeque;
 use std::fs;
 use std::io::Cursor;
 use std::sync::{Arc, Mutex};
-//use base64::Engine;
-//use base64::engine::general_purpose::STANDARD;
 use crate::simulation_controller::gui_input_queue::SharedGuiInput;
 use crossbeam_channel::select;
-//use image::ImageReader;
 use rand::random;
 
 #[derive(Clone, Debug)]
@@ -26,15 +23,18 @@ pub struct NetworkGraph {
     graph: DiGraph<NodeId, usize>,
     node_indices: HashMap<NodeId, NodeIndex>,
     node_types: HashMap<NodeId, NodeType>,
+    shared_senders: Option<Arc<Mutex<HashMap<(NodeId, NodeId), Sender<Packet>>>>>,
 
 }
 
 impl NetworkGraph {
-    pub fn new() -> Self {
+    pub fn new(shared_senders: Option<Arc<Mutex<HashMap<(NodeId, NodeId), Sender<Packet>>>>>) -> Self {
+
         Self {
             graph: DiGraph::new(),
             node_indices: HashMap::new(),
             node_types: HashMap::new(),
+            shared_senders,
         }
     }
     pub fn set_node_type(&mut self, node_id: NodeId, node_type: NodeType) { //method to set NodeType
@@ -44,19 +44,26 @@ impl NetworkGraph {
         self.node_types.get(&node_id)
     }
     pub fn add_node(&mut self, id: NodeId, node_type: NodeType) -> NodeIndex {
-        if let Some(&index) = self.node_indices.get(&id) {
-            self.node_types.insert(id, node_type); // this is to update the hashmap with nodetype associated to nodeId
-            index
-        } else {
-            let index = self.graph.add_node(id);
-            self.node_indices.insert(id, index);
-            self.node_types.insert(id, node_type);
-            index
+        if let Some(&node_index) = self.node_indices.get(&id) {
+            if node_index.index() < self.graph.node_bound() && self.graph.node_weight(node_index).is_some() {
+                // Node index is still valid
+                self.node_types.insert(id, node_type);
+                return node_index;
+            } else {
+                warn!("⚠️ Stale NodeIndex detected for node {} — re-adding", id);
+            }
         }
+
+        let index = self.graph.add_node(id);
+        self.node_indices.insert(id, index);
+        self.node_types.insert(id, node_type);
+        index
     }
+
     pub fn remove_node(&mut self, node_id: NodeId) {
         if let Some(node_index) = self.node_indices.remove(&node_id) {
             self.graph.remove_node(node_index);
+            info!("REMOVED NODE:  {} from network_graph", node_id);
             self.node_types.remove(&node_id);
         } else {
             warn!("Tried to remove non-existing node {}", node_id);
@@ -64,12 +71,14 @@ impl NetworkGraph {
     }
 
     pub fn add_link(&mut self, a: NodeId, node_type_a: NodeType, b: NodeId, node_type_b: NodeType) {
+        //info!("ADDING BIDERECTIONAL LINK to server network_graph from {} to {} ", a, b);
         let a_idx = self.add_node(a, node_type_a);
         let b_idx = self.add_node(b, node_type_b);
         self.graph.update_edge(a_idx, b_idx, 1);
         self.graph.update_edge(b_idx, a_idx, 1);
     }
     pub fn increment_drop(&mut self, a: NodeId, b: NodeId) {
+        //info!("INCREMENTING LINK COST DUE TO DROP between {} <-----> {}", a, b);
         if let (Some(&a_idx), Some(&b_idx)) = (self.node_indices.get(&a), self.node_indices.get(&b)) {
             if let Some(edge) = self.graph.find_edge(a_idx, b_idx) {
                 if let Some(weight) = self.graph.edge_weight_mut(edge) {
@@ -84,55 +93,131 @@ impl NetworkGraph {
             }
         }
     }
-    pub fn best_path(&self, source: NodeId, target: NodeId) -> Option<Vec<NodeId>> {
+    pub fn best_path(&mut self, source: NodeId, target: NodeId) -> Option<Vec<NodeId>> {
+        let Some(&source_idx) = self.node_indices.get(&source) else {
+            warn!("🚨 Source node {} not found in network graph", source);
+            return None;
+        };
+        let Some(&target_idx) = self.node_indices.get(&target) else {
+            warn!("🚨 Target node {} not found in network graph", target);
+            return None;
+        };
 
-        let source_idx = *self.node_indices.get(&source)?;
-        let target_idx = *self.node_indices.get(&target)?;
+        let mut edges_to_remove = vec![];
+        if let Some(shared) = &self.shared_senders {
+            if let Ok(shared_map) = shared.lock() {
+                for edge in self.graph.edge_references() {
+                    let from = self.graph[edge.source()];
+                    let to = self.graph[edge.target()];
+                    if !shared_map.contains_key(&(from, to)) && !shared_map.contains_key(&(to, from)) {
+                        warn!("Edge {} <-> {} exists in graph but is missing from shared_senders", from, to);
+                        edges_to_remove.push((from, to));
+                    }
+                }
+            }
+        }
+        for (a, b) in edges_to_remove {
+            self.remove_link(a, b);
+        }
 
+        let mut distances: HashMap<NodeIndex, usize> = HashMap::new();
         let mut predecessors: HashMap<NodeIndex, NodeIndex> = HashMap::new();
-        let _ = dijkstra(&self.graph, source_idx, Some(target_idx), |e| {
-            let from = e.source();
-            let to = e.target();
+        let mut heap = std::collections::BinaryHeap::new();
 
-            let to_node_id = self.graph[to];
-            let to_is_server = self.node_types.get(&to_node_id) == Some(&NodeType::Server);
-            let cost = if to_is_server && to_node_id != target {
-                usize::MAX / 2 // discourage using servers in the path --> assign an elevated cost
-            } else {
-                *e.weight()
-            };
+        distances.insert(source_idx, 0);
+        heap.push(std::cmp::Reverse((0, source_idx)));
 
-            // Track predecessors (for path reconstruction)
-            predecessors.entry(to).or_insert(from);
+        while let Some(std::cmp::Reverse((current_distance, current_node))) = heap.pop() {
+            // Skip if we've already found a better path to this node
+            if let Some(&best_distance) = distances.get(&current_node) {
+                if current_distance > best_distance {
+                    continue;
+                }
+            }
+            // If we reached the target, we can stop
+            if current_node == target_idx {
+                break;
+            }
+            // Explore neighbors
+            for neighbor_edge in self.graph.edges(current_node) {
+                let neighbor_node = neighbor_edge.target();
+                let neighbor_id = self.graph[neighbor_node];
+                let edge_weight = *neighbor_edge.weight();
+                // Check if this neighbor can be used as an intermediate node
+                let can_use_neighbor = if neighbor_node == target_idx {
+                    // Always allow the target node
+                    true
+                } else if neighbor_node == source_idx {
+                    // Never go back to source (avoid cycles)
+                    false
+                } else {
+                    // For intermediate nodes, only allow drones
+                    match self.node_types.get(&neighbor_id) {
+                        Some(NodeType::Drone) => true,
+                        Some(_) => false,
+                        None => {
+                            warn!("❌❌❌ Node {} has unknown type", neighbor_id);
+                            false
+                        }
+                    }
+                };
+                if !can_use_neighbor {
+                    continue;
+                }
+                let new_distance = current_distance + edge_weight;
+                let should_update = distances.get(&neighbor_node)
+                    .map(|&existing_distance| new_distance < existing_distance)
+                    .unwrap_or(true);
 
-            cost
-        });
-
-        if !predecessors.contains_key(&target_idx) {
-            println!("❌ No path from {} to {}", source, target);
+                if should_update {
+                    distances.insert(neighbor_node, new_distance);
+                    predecessors.insert(neighbor_node, current_node);
+                    heap.push(std::cmp::Reverse((new_distance, neighbor_node)));
+                }
+            }
+        }
+        if !distances.contains_key(&target_idx) {
+            warn!("❌❌❌ No valid path to {} — cannot retransmit dropped packet", target);
             return None;
         }
 
-        let mut path = vec![self.graph[target_idx]];
+        let mut path = vec![target_idx];
         let mut current = target_idx;
+
         while current != source_idx {
-            if let Some(&prev) = predecessors.get(&current) {
-                path.push(self.graph[prev]);
-                current = prev;
+            if let Some(&predecessor) = predecessors.get(&current) {
+                path.push(predecessor);
+                current = predecessor;
             } else {
-                println!("⚠ Incomplete path from {} to {}", source, target);
+                warn!("⚠ Could not reconstruct full path from {} to {}", source, target);
                 return None;
             }
         }
-
         path.reverse();
-        info!("🧭🧭🧭🧭🧭🧭🧭🧭🧭 Best path from {} to {}: {:?}", source, target, path);
-        Some(path)
+        let node_path: Vec<NodeId> = path.iter().map(|&idx| self.graph[idx]).collect();
+
+        info!("🧭🧭🧭🧭🧭🧭🧭🧭🧭 Best path from {} to {}: {:?}", source, target, node_path);
+        Some(node_path)
     }
 
-    pub fn print_graph(&self) {
-        println!("Current network graph:");
+    pub fn remove_link(&mut self, a: NodeId, b: NodeId) {
+        if let (Some(&a_idx), Some(&b_idx)) = (self.node_indices.get(&a), self.node_indices.get(&b)) {
+            if let Some(edge_ab) = self.graph.find_edge(a_idx, b_idx) {
+                self.graph.remove_edge(edge_ab);
+                info!("🧹 Removed edge from {} to {}", a, b);
+            }
+            if let Some(edge_ba) = self.graph.find_edge(b_idx, a_idx) {
+                self.graph.remove_edge(edge_ba);
+                info!("🧹 Removed edge from {} to {}", b, a);
+            }
+        } else {
+            warn!("⚠ Cannot remove link — node(s) not found: {} or {}", a, b);
+        }
+    }
 
+
+    pub fn print_graph(&self) {
+        println!("✅✅✅✅ CURRENT NETWORK GRAPH: ✅✅✅✅");
         for edge in self.graph.edge_references() {
             let source = self.graph[edge.source()];
             let target = self.graph[edge.target()];
@@ -152,19 +237,22 @@ impl NetworkGraph {
 const MAX_CHAT_HISTORY: usize = 50; //50 messagges max for the chronology
 #[derive(Debug, Clone)]
 pub struct server {
-    pub id: u8, // Server ID
-    pub received_fragments: HashMap<(u64, NodeId), Vec<Option<[u8; 128]>>>, // Maps (session_id, src_id) to fragment data
-    pub fragment_lengths: HashMap<(u64, NodeId), u8>, // Maps (session_id, src_id) to length of the last fragment
-    pub packet_sender: HashMap<NodeId, Sender<Packet>>, // Hashmap containing each sender channel to the neighbors (channels to send packets to clients)
-    pub packet_receiver: Receiver<Packet>, // Channel to receive packets from clients/drones
+    pub id: u8,
+    pub received_fragments: HashMap<(u64, NodeId), Vec<Option<[u8; 128]>>>,
+    pub fragment_lengths: HashMap<(u64, NodeId), u8>,
+    pub packet_sender: HashMap<NodeId, Sender<Packet>>,
+    pub packet_receiver: Receiver<Packet>,
 
-    seen_floods:HashSet<(u64, NodeId)>,
+    seen_floods: HashSet<(u64, NodeId)>,
     registered_clients: Vec<NodeId>,
     network_graph: NetworkGraph,
-    sent_fragments: HashMap<(u64,u64), (Fragment, NodeId)>,
-    chat_history: HashMap<(NodeId,NodeId), VecDeque<String>>,
-    media_storage: HashMap<String, (NodeId,String)>, // media name --> (uploader_id, associated base64 encoding as String)
+    sent_fragments: HashMap<(u64, u64), (Fragment, NodeId)>,
+    chat_history: HashMap<(NodeId, NodeId), VecDeque<String>>,
+    media_storage: HashMap<String, (NodeId, String)>,
     simulation_log: Arc<Mutex<Vec<String>>>,
+    pub shared_senders: Option<Arc<Mutex<HashMap<(NodeId, NodeId), Sender<Packet>>>>>,
+    shortcut_receiver: Option<Receiver<Packet>>,
+
 }
 
 impl server {
@@ -178,26 +266,30 @@ impl server {
             log.push(message.to_string());
         }
     }
-    pub(crate) fn new(id: u8, packet_sender: HashMap<NodeId,Sender<Packet>>, packet_receiver: Receiver<Packet>) -> Self {
-        // Log server creation
+    pub(crate) fn new(id: u8, packet_sender: HashMap<NodeId,Sender<Packet>>, packet_receiver: Receiver<Packet>, shared_senders: Option<Arc<Mutex<HashMap<(NodeId,NodeId), Sender<Packet>>>>>,shortcut_receiver: Option<Receiver<Packet>>,) -> Self {
         info!("Server {} created.", id);
+        let net_graph = NetworkGraph::new(shared_senders.clone());
 
         Self {
             id,
             received_fragments: HashMap::new(),
             fragment_lengths: HashMap::new(),
-            packet_sender: packet_sender,
+            packet_sender,
             packet_receiver,
             seen_floods: HashSet::new(),
             registered_clients: Vec::new(),
-            network_graph: NetworkGraph::new(),
+            network_graph: net_graph,
             sent_fragments: Default::default(),
-            chat_history:HashMap::new(),
+            chat_history: HashMap::new(),
             media_storage: HashMap::new(),
             simulation_log: Arc::new(Mutex::new(Vec::new())),
+            shared_senders,
+            shortcut_receiver,
+
         }
     }
-    fn initiate_network_discovery(&self) {
+    fn initiate_network_discovery(&mut self) {
+
         let flood_id = random::<u64>(); //random flood id
         info!("Network discovery initialized.");
         let flood_request = FloodRequest {
@@ -206,27 +298,34 @@ impl server {
             path_trace: vec![(self.id, NodeType::Server)],
         };
 
-        let routing_header = SourceRoutingHeader::empty_route(); // ignored by drones for FloodRequest
+        let routing_header = SourceRoutingHeader::empty_route();
 
         let packet = Packet::new_flood_request(routing_header, flood_id, flood_request);
-        info!("♥♥♥♥♥♥♥ server has senders towards this drones: {:?}", self.packet_sender);
+        println!("📻📻📻 server has senders towards this drones: {:?} 📻📻📻", self.packet_sender);
         //let mut sent_to = HashSet::new();
         for (&neighbor_id, sender) in &self.packet_sender {
-            if let Err(e) = sender.send(packet.clone()) {
-                info!("Server {}: Failed to send FloodRequest to neighbor {}: {}", self.id, neighbor_id, e);
+            if self.network_graph.node_types.contains_key(&neighbor_id) {
+                if let Err(e) = sender.send(packet.clone()) {
+                    warn!("Failed to send FloodRequest to {}: {}", neighbor_id, e);
+                }
             } else {
-                info!(" 🌊 🌊 🌊 Server {}: Sent FloodRequest to neighbor {} 🌊 🌊 🌊", self.id, neighbor_id);
+                warn!("⚠ Skipping sender to {} — no longer in graph", neighbor_id);
             }
         }
     }
+
     /// Run the server to process incoming packets and handle fragment assembly
     pub fn run(&mut self, gui_buffer_input: SharedGuiInput) {
 
         let tick = crossbeam_channel::tick(std::time::Duration::from_secs(1));
         info!("Server {} started running.", self.id);
         self.log("SERVER STARTED");
-        println!("👋👋👋👋👋👋Server log addr i: {:p}", Arc::as_ptr(&self.simulation_log));
-
+        // println!("👋👋👋👋👋👋Server log addr i: {:p}", Arc::as_ptr(&self.simulation_log));
+        if let Some(ref arc) = self.shared_senders {
+            println!("👋👋👋👋👋👋 Server SHAREDSENDERS i: {:p}", Arc::as_ptr(arc));
+        } else {
+            println!("❌ shared_senders is None");
+        }
         let mut discovery_started=false;
         //self.initiate_network_discovery();
 
@@ -234,7 +333,7 @@ impl server {
         info!("server {} network graph is {:?}", self.id, self.network_graph);
         loop {
             select! {
-                // ⏱ Every second: pop one GUI message
+                // Every second pop one GUI message
                     recv(tick) -> _ => {
                         if discovery_started==false {
                             discovery_started=true;
@@ -242,88 +341,22 @@ impl server {
                             info!("✅ Server {} initiated network discovery", self.id);
                         }
                         //self.network_graph.print_graph();
+                        // Initial processing of any pending GUI messages
                         if let Ok(mut buffer) = gui_buffer_input.lock() {
-                            buffer.entry(self.id as NodeId).or_insert_with(Vec::new);
-
                             if let Some(messages) = buffer.get_mut(&(self.id as NodeId)) {
-                                if let Some(message) = messages.pop() {
-                                    info!("🧹 Server {} popped one msg from GUI", self.id);
-
-                                    if let Some(stripped) = message.strip_prefix("[MediaBroadcast]::") {
-                                        info!("Server {} received message from GUI: {:?}", self.id, stripped);
-                                        let parts: Vec<&str> = stripped.splitn(2, "::").collect();
-                                        if parts.len() == 2 {
-                                            let media_name = parts[0].to_string();
-                                            let base64_data = parts[1].to_string();
-                                            self.media_storage.insert(media_name.clone(), (self.id, base64_data.clone()));
-                                            if let Some((owner, full_data)) = self.media_storage.get(&media_name) {
-                                                let preview = full_data
-                                                    .chars()
-                                                    .take(10)
-                                                    .collect::<String>();
-                                                info!(
-                                                    "Media stored in server '{}' is: ({}, \"{}…\")",
-                                                    media_name,
-                                                    owner,
-                                                    preview
-                                                );
-                                                self.log(format!("Media stored in server '{}' is: ({}, \"{}…\")",
-                                                    media_name,
-                                                    owner,
-                                                    preview
-                                                ));
-                                            }
-                                            /*
-                                             if let Err(e) = Self::display_media(media_name.as_str(), base64_data.as_str() ) {
-                                                info!("Failed to display image: {}", e);
-                                            }*/
-                                            info!("Registered clients to server: {:?}", self.registered_clients);
-                                            let clients= self.registered_clients.clone();
-
-                                            for target_id in clients {
-                                                info!("Registered clients in {} are {:?}", self.id, self.registered_clients);
-                                                let forward = format!("[MediaDownloadResponse]::{}::{}", media_name, base64_data);
-                                                info!("Broadcasting the MediaDownloadResponse");
-                                                self.send_chat_message(0, target_id, forward.clone());
-                                            }
-                                            //info!("Broadcasted media '{}' from GUI for server {}", media_name, self.id);
-
-
-
-                                        }
-                                    }
-
-                                    ///IN TEORIA THIS IS WHAT SERVER SHOULD DO:
-                                    if let Some(stripped) = message.strip_prefix("[FloodRequired]::") {
-                                        info!("Server {} received message from GUI: FloodRequired::{:?}", self.id, stripped);
-                                        match stripped {
-                                            "AddSender" => {
-                                                info!("--> FloodRequired: AddSender detected. Triggering rediscovery.");
-                                                self.initiate_network_discovery();
-                                            },
-                                            "SpawnDrone" => {
-                                                info!("--> FloodRequired: SpawnDrone detected. Triggering rediscovery.");
-                                                self.initiate_network_discovery();
-                                            },
-                                            "RemoveSender" => {
-                                                info!("--> FloodRequired: RemoveSender detected. Triggering rediscovery.");
-                                                self.initiate_network_discovery();
-                                            },
-                                            other => {
-                                                warn!("⚠ Unknown FloodRequired action: {}", other);
-                                            }
-                                        }
-                                    }
+                                for message in messages.drain(..) {
+                                    info!("🧹🧹🧹 Server {} popped one msg from GUI 🧹🧹🧹", self.id);
+                                    self.process_gui_message(message);
                                 }
                             }
                         }
                     },
 
-                // 📡 Incoming network packet
+                //receive packets from neighbors
                      recv(self.packet_receiver) -> packet_result => {
                         match packet_result {
                             Ok(mut packet) => {
-                                info!("Server {} received packet :{:?}", self.id, packet);
+                               println!("Server {} received packet :{:?}", self.id, packet);
                                 match &packet.pack_type {
                                     PacketType::MsgFragment(fragment) => {
                                         info!("SERVER RECEIVED MESSAGE FRAGMENT");
@@ -342,7 +375,7 @@ impl server {
                                         self.handle_flood_request(packet.session_id, flood_request, packet.routing_header);
                                     }
                                     PacketType::FloodResponse(flood_response) => {
-                                        info!("server {} received FloodResponse {:?}", self.id, flood_response.path_trace);
+                                       println!("server {} received FloodResponse {:?}", self.id, flood_response.path_trace);
                                         self.handle_flood_response(packet.session_id, flood_response, packet.routing_header);
                                     }
                                     _ => {
@@ -355,18 +388,260 @@ impl server {
                             }
                         }
                     }
+                    recv(self.shortcut_receiver.as_ref().unwrap()) -> shortcut_packet => {
+                        match shortcut_packet {
+                            Ok(packet) => {
+                                 info!("📡📡📡📡📡 Shortcut packet received in host {}: {:?} 📡📡📡📡📡", self.id, packet);
+                                match packet.pack_type {
+                                    PacketType::Ack(_) => {}
+                                    PacketType::Nack(ref nack) => {
+                                        self.handle_nack(packet.session_id, nack, &packet, packet.routing_header.clone())
+                                    }
+                                    PacketType::FloodResponse(fresp) => {
+                                        self.handle_flood_response(packet.session_id, &fresp, packet.routing_header.clone())
+                                    }
+                                    _ => warn!("Host {} got unexpected shortcut type", self.id),
+                                }
+                            }
+                            Err(e) => {
+                                warn!("❌❌❌ Failed to receive shortcut packet: {} ❌❌❌",e);
+                            }
+
+                        }
+                    }
                 }
         }
+    }
+
+    fn process_gui_message(&mut self, message: String) {
+        //MEDIABROADCAST
+        if let Some(stripped) = message.strip_prefix("[MediaBroadcast]::") {
+            info!("Server {} received message from GUI: {:?}", self.id, stripped);
+            let parts: Vec<&str> = stripped.splitn(2, "::").collect();
+            if parts.len() == 2 {
+                let media_name = parts[0].to_string();
+                let base64_data = parts[1].to_string();
+                self.media_storage.insert(media_name.clone(), (self.id, base64_data.clone()));
+                if let Some((owner, full_data)) = self.media_storage.get(&media_name) {
+                    let preview = full_data
+                        .chars()
+                        .take(10)
+                        .collect::<String>();
+                    info!(
+                        "Media stored in server '{}' is: ({}, \"{}…\")",
+                        media_name,
+                        owner,
+                        preview
+                    );
+                    self.log(format!("Media stored in server '{}' is: ({}, \"{}…\")",
+                                     media_name,
+                                     owner,
+                                     preview
+                    ));
+                }
+                info!("Registered clients to server: {:?}", self.registered_clients);
+                let clients= self.registered_clients.clone();
+
+                for target_id in clients {
+                    info!("Registered clients in {} are {:?}", self.id, self.registered_clients);
+                    let forward = format!("[MediaDownloadResponse]::{}::{}", media_name, base64_data);
+                    info!("Broadcasting the MediaDownloadResponse");
+                    self.send_chat_message(0, target_id, forward.clone());
+                }
+                //info!("Broadcasted media '{}' from GUI for server {}", media_name, self.id);
+            }
+        }
+        //FLOODREQUIRED
+        if let Some(stripped) = message.strip_prefix("[FloodRequired]::") {
+            info!(" 🌊🌊🌊🌊 Server {} received message from GUI: FloodRequired::{:?} 🌊🌊🌊🌊", self.id, stripped);
+            match stripped {
+                _ if stripped.starts_with("RemoveSender::") => {
+                    let parts: Vec<&str> = stripped.split("::").collect();
+                    if parts.len() == 3 {
+                        if let (Ok(a), Ok(b)) = (parts[1].parse::<NodeId>(), parts[2].parse::<NodeId>()) {
+                            // Only act if the server is involved
+                            if self.id == a || self.id == b {
+                                let peer = if self.id == a { b } else { a };
+                                // Remove sender to peer if we hold it
+                                if self.packet_sender.remove(&peer).is_some() {
+                                    info!("⚙️⚙️⚙️ Removed sender to {} from packet_sender ⚙️⚙️⚙️", peer);
+                                } else {
+                                    warn!("⚠ No sender to {} found in packet_sender", peer);
+                                }
+                                // Optionally: clean up shared_senders (both directions)
+                                if let Some(shared) = &self.shared_senders {
+                                    if let Ok(mut map) = shared.lock() {
+                                        map.remove(&(self.id, peer));
+                                        map.remove(&(peer, self.id));
+                                        info!("🧹 Removed ({}, {}) and ({}, {}) from shared_senders", self.id, peer, peer, self.id);
+                                    }
+                                }
+                            } else {
+                                info!("Server {} not involved in link between {} and {}", self.id, a, b);
+                            }
+                            self.network_graph.remove_link(a, b);
+                            self.initiate_network_discovery();
+                        } else {
+                            warn!("Could not parse node IDs in RemoveSender message: {:?}", parts);
+                        }
+                    } else {
+                        warn!("Malformed RemoveSender message. Expected format: RemoveSender::<a>::<b>");
+                    }
+                }
+
+                _ if stripped.starts_with("AddSender::") => {
+                    let parts: Vec<&str> = stripped.split("::").collect();
+                    if parts.len() == 3 {
+                        if let (Ok(a), Ok(b)) = (parts[1].parse::<NodeId>(), parts[2].parse::<NodeId>()) {
+                            // Always update shared_senders
+                            if let Some(shared) = &self.shared_senders {
+                                if let Ok(mut map) = shared.lock() {
+                                    if let Some(sender) = self.packet_sender.get(&b) {
+                                        map.entry((a, b)).or_insert_with(|| sender.clone());
+                                    }
+                                    if let Some(sender) = self.packet_sender.get(&a) {
+                                        map.entry((b, a)).or_insert_with(|| sender.clone());
+                                    }
+                                }
+                            }
+                            //let peer = if self.id == a { b } else { a };
+                            let my_type = self.network_graph.node_types.get(&a).copied().unwrap_or(NodeType::Drone);
+                            let peer_type = self.network_graph.node_types.get(&b).copied().unwrap_or(NodeType::Drone);
+                            self.network_graph.add_link(a, my_type, b, peer_type);
+                            if self.id == a || self.id == b {
+                                let peer = if self.id == a { b } else { a };
+                                if self.packet_sender.contains_key(&peer) {
+                                    info!("✅ Peer {} already exists in packet_sender.", peer);
+                                } else if let Some(shared) = &self.shared_senders {
+                                    if let Ok(map) = shared.lock() {
+                                        if let Some(sender_to_peer) = map.get(&(self.id, peer)) {
+                                            self.packet_sender.insert(peer, sender_to_peer.clone());
+                                            info!("⚙️⚙️⚙️ Inserted sender from {} to {} into packet_sender ⚙️⚙️⚙️", self.id, peer);
+                                        } else {
+                                            warn!("❌❌❌ shared_senders has no sender for ({}, {})", self.id, peer);
+                                        }
+                                    }
+                                }
+                            }
+                            self.initiate_network_discovery();
+                            self.network_graph.print_graph();
+                        } else {
+                            warn!("⚠ Could not parse node IDs in AddSender message: {:?}", parts);
+                        }
+                    } else {
+                        warn!("⚠ Malformed AddSender message. Expected format: AddSender::<a>::<b>");
+                    }
+                }
+                _ if stripped.starts_with("SpawnDrone::") => { //format is SpawnDrone::NodeId::NeighboursNodedIds
+                    let parts: Vec<&str> = stripped.split("::").collect();
+                    if parts.len() == 3 {
+                        if let Ok(drone_id) = parts[1].parse::<NodeId>() {
+                            let peers_result: Result<Vec<NodeId>, _> = serde_json::from_str(parts[2]);
+                            match peers_result {
+                                Ok(peer_list) => {
+                                    //Update shared_senders
+                                    if let Some(shared) = &self.shared_senders {
+                                        if let Ok(mut map) = shared.lock() {
+                                            for &peer in &peer_list {
+                                                if let Some(sender) = self.packet_sender.get(&peer) {
+                                                    map.entry((drone_id, peer)).or_insert_with(|| sender.clone());
+                                                    map.entry((peer, drone_id)).or_insert_with(|| sender.clone());
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if !peer_list.contains(&self.id) {
+                                        info!("Server {} not involved in SpawnDrone({}, {:?})", self.id, drone_id, peer_list);
+                                    }
+                                    self.network_graph.node_types.entry(drone_id).or_insert(NodeType::Drone);
+                                    // Insert the sender into packet_sender only if not already present
+                                    if !self.packet_sender.contains_key(&drone_id) {
+                                        if let Some(shared) = &self.shared_senders {
+                                            if let Ok(map) = shared.lock() {
+                                                let key = (self.id, drone_id);
+                                                if let Some(sender_to_drone) = map.get(&key) {
+                                                    self.packet_sender.insert(drone_id, sender_to_drone.clone());
+                                                    info!("✅ Inserted new drone {} into packet_sender", drone_id);
+                                                } else {
+                                                    warn!("❌❌❌ shared_senders has no entry for ({}, {}) ❌❌❌", self.id, drone_id);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // Update network graph links
+                                    for &peer in &peer_list {
+                                        if self.network_graph.node_types.contains_key(&peer) {
+                                            let peer_type = self.network_graph.node_types[&peer];
+                                            self.network_graph.add_link(drone_id, NodeType::Drone, peer, peer_type);
+                                        } else {
+                                            warn!("⚠️ Peer {} does not exist in node_types. Skipping link to drone {}", peer, drone_id);
+                                        }
+                                    }
+                                    self.initiate_network_discovery();
+                                    self.network_graph.print_graph();
+                                }
+                                Err(e) => {
+                                    warn!("❌❌❌❌ Failed to parse peer list in SpawnDrone: {} ❌❌❌❌", e);
+                                }
+                            }
+                        } else {
+                            warn!("⚠ Could not parse drone ID in SpawnDrone message: {:?}", parts[1]);
+                        }
+                    } else {
+                        warn!("⚠ Malformed SpawnDrone message. Expected format: SpawnDrone::<drone_id>::<[peer1, peer2]>");
+                    }
+                    println!("👿👿👿👿👿👿PACKET SENDER OF SERVER {:?}", self.packet_sender);
+                }
+
+                _ if stripped.starts_with("Crash") => {
+                    let parts: Vec<&str> = stripped.split("::").collect();
+                    info!("Received crash command!");
+                    if parts.len() == 2 {
+                        if let Ok(drone_id) = parts[1].parse::<NodeId>() {
+                            info!("Detected crash node {}! 💥💥💥💥💥", drone_id);
+                            self.log(format!("Drone {} crashed!", drone_id));
+
+                            if !self.network_graph.node_indices.contains_key(&drone_id) {
+                                warn!("🚫 Node {} not found in graph — cannot remove", drone_id);
+                            } else {
+                                self.network_graph.remove_node(drone_id);
+                                info!("------ Removed drone {} from network graph -------", drone_id);
+                            }
+
+                            if self.packet_sender.remove(&drone_id).is_some() {
+                                info!("💥💥 Removed drone {} from packet_sender 💥💥", drone_id);
+                            } else {
+                                warn!("⚠️ Drone {} not found in packet_sender", drone_id);
+                            }
+
+                            // Refresh topology via flood
+                            self.initiate_network_discovery();
+                            self.network_graph.print_graph();
+                        } else {
+                            warn!("🚫 Could not parse crashed node ID from: {}", parts[1]);
+                        }
+                    } else {
+                        warn!("❓ Malformed crash message: {}", stripped);
+                    }
+                    self.initiate_network_discovery();
+                }
+                other => {
+                    warn!("⚠ Unknown FloodRequired action: {}", other);
+                }
+            }
+
+
+
+        }
+
     }
 
 
     /// Handle fragment processing
     fn handle_fragment(&mut self, session_id: u64, fragment: &Fragment, routing_header: SourceRoutingHeader) {
         let key = (session_id, routing_header.hops[0]);
-
         // Initialize storage for fragments if not already present
         let entry = self.received_fragments.entry(key).or_insert_with(|| vec![None; fragment.total_n_fragments as usize]);
-
         // Check if the fragment is already received --> if already received return and do nothing
         if entry[fragment.fragment_index as usize].is_some() { //check if the option in the vec is Some(...)
             warn!("Duplicate fragment {} received for session {:?}", fragment.fragment_index, key);
@@ -406,7 +681,7 @@ impl server {
         info!("Handling complete message");
         match tokens.as_slice() {
             ["[Login]", server_id_str] => {
-                info!(" --------------------------- Received login -----------------------------");
+                info!(" -------------- 🔔🔔🔔 Received login 🔔🔔🔔 ---------------");
                 if server_id_str.parse::<NodeId>() == Ok(self.id) {
                     if !self.registered_clients.contains(&client_id) {
                         self.registered_clients.push(client_id);
@@ -450,17 +725,13 @@ impl server {
                         let response = format!("[MessageFrom]::{}::{}", client_id, msg);
                         self.send_chat_message(session_id, target_id, response);
 
-                        let entry = self //possible problems here!
+                        let entry = self
                             .chat_history
                             .entry((client_id.min(target_id), client_id.max(target_id)))
                             .or_insert_with(VecDeque::new);
-                        //let chat_entry = format!("{}: {}", client_id, msg);
-                        /*if entry.back().map_or(true, |last| last != &chat_entry) {
-                            entry.push_back(chat_entry);
-                        }*/
+
                         let chat_entry = format!("{}:\n {}", client_id, msg);
                         entry.push_back(chat_entry);
-
                         if entry.len() > MAX_CHAT_HISTORY {
                             entry.pop_front();
                         }
@@ -473,7 +744,6 @@ impl server {
                 info!(" ----------------------- Received HistoryRequest ----------------------------");
                 self.log(format!("Server received CHAT-HISTORY request from {} with {}", source_id, target_id_str));
                 if let Ok(target_id) = target_id_str.parse::<NodeId>() {
-                    // chiave canonica ordina i due ID
                     let c1 = source_id.parse::<NodeId>().unwrap_or(client_id);
                     let c2 = target_id;
                     let key = (c1.min(c2), c1.max(c2));
@@ -485,7 +755,7 @@ impl server {
                     self.send_chat_message(session_id, client_id, format!("[HistoryResponse]::{}", response));
                 }
             },
-            //chat_history: HashMap<(NodeId,NodeId), VecDeque<String>>,
+
             ["[ChatHistoryUpdate]", source_server, serialized_entry] => {
                 if let Ok(((id1, id2), history)) = serde_json::from_str::<((NodeId, NodeId), VecDeque<String>)>(serialized_entry) {
                     self.chat_history.insert((id1, id2), history);
@@ -495,7 +765,7 @@ impl server {
                 }
             },
 
-            ["[MediaUpload]", media_name, base64_data] => { // da modificare
+            ["[MediaUpload]", media_name, base64_data] => {
                 info!(" ------------------------ Received MediaUpload ---------------------------");
                 self.log(format!("Server received MediaUpload from {} of the media: {}", client_id, media_name));
                 // Save the image media in the hashmap
@@ -524,10 +794,9 @@ impl server {
                 };
                 self.send_chat_message(session_id, client_id, response);
             },
-            // da chi lo ricevo??? La richiesta dovrebbe mandarmela un client. Oppure il simulationController dalla GUI???
             //MEDIABROADCAST --> sending to all registered clients
             ["[MediaBroadcast]", media_name, base64_data] => {
-                info!(" ------------------------ Received MediaBroadcast message by client: {} --------------------", client_id);
+                info!(" ------------------------ Received MediaBroadcast message by client: {} ----------------------", client_id);
                 self.log(format!("Server received MediaBroadcast from {} of the media; {}", client_id, media_name));
                 self.media_storage.insert(media_name.to_string(), (client_id, base64_data.to_string()));
 
@@ -549,10 +818,8 @@ impl server {
                 if let Ok(target_client_id) = target_client_str.parse::<NodeId>() {
                     let key = (client_id.min(target_client_id), client_id.max(target_client_id));
                     info!("🚨 Step 1: Looking up chat history for key {:?}", key);
-
                     if let Some(history) = self.chat_history.get(&key) {
                         info!("🚨 Step 2: History found, preparing to serialize and broadcast...");
-
                         let full_entry = (key, history.clone());
                         if let Ok(serialized) = serde_json::to_string(&full_entry) {
                             let server_node_ids: Vec<NodeId> = self.network_graph
@@ -568,7 +835,6 @@ impl server {
                                 .collect();
 
                             info!("🚨 Step 3: Sending chat history update to servers: {:?}", server_node_ids);
-
                             for node_id in server_node_ids {
                                 if let Some(route) = self.compute_best_path(self.id, node_id) {
                                     let msg = format!("[ChatHistoryUpdate]::{}::{}", self.id, serialized);
@@ -580,7 +846,7 @@ impl server {
                                 }
                             }
                         } else {
-                            error!("❌ Failed to serialize chat history for {:?}", key);
+                            error!("❌❌❌ Failed to serialize chat history for {:?}", key);
                         }
                     } else {
                         warn!("⚠ No chat history found for key {:?}", key);
@@ -600,16 +866,11 @@ impl server {
         }
     }
 
-
-
-
-    //fn process_nack(&mut self, nack: &Nack, packet: &mut Packet)
     fn handle_nack(&mut self, session_id: u64, nack: &Nack, packet: &Packet, routing_header: SourceRoutingHeader) {
         info!("Recieved NACK for fragment {} with type {:?} in session {}", nack.fragment_index, nack.nack_type, session_id);
 
         match nack.nack_type {
-            NackType::Dropped => { // the only case i recieve nack Dropped is when i am forwarding the fragments to the second client
-                // grafo fatto con pet_graph.
+            NackType::Dropped => {
                 warn!("Server {}: Received Nack::Dropped", self.id);
                 //ricevo nack::Dropped --> modifico il costo nel grafo
                 if routing_header.hop_index >= 1 {
@@ -622,13 +883,11 @@ impl server {
                     }
                 }
                 warn!("Received Nack::Dropped, modifying the costs in the graph");
-
-                ///TO DO: DEVO RIMANDARE IL PACCHETTO CHE VIENE PERSO
+                //server must resend dropped packet
                 let session_id = packet.session_id.clone();
                 let fragment_index = nack.fragment_index;
                 if let Some(fragment) = self.sent_fragments.get(&(session_id, fragment_index)).cloned() {
                     let target_id = fragment.1;
-
                     // Recompute best path
                     if let Some(hops) = self.network_graph.best_path(self.id, target_id) {
                         let new_packet = Packet {
@@ -648,46 +907,55 @@ impl server {
                                     Err(e) => error!("❌ Failed to retransmit dropped fragment: {:?}", e),
                                 }
                             } else {
-                                error!("❌ No sender available for node {}", next_hop_id);
+                                error!("❌❌❌ No sender available for node {}", next_hop_id);
                             }
                         } else {
-                            error!("❌ Routing header missing next hop — cannot retransmit dropped fragment");
+                            error!("❌❌❌ Routing header missing next hop — cannot retransmit dropped fragment");
                         }
                     } else {
-                        error!("❌ No valid path to {} — cannot retransmit dropped fragment", target_id);
+                        error!("❌❌❌ No valid path to {} — cannot retransmit dropped fragment", target_id);
                     }
                 } else {
-                    error!("❌ Fragment with session {} and index {} not found in sent_fragments — cannot retransmit", session_id, fragment_index);
+                    error!("❌❌❌ Fragment with session {} and index {} not found in sent_fragments — cannot retransmit", session_id, fragment_index);
                 }
             },
+            NackType::ErrorInRouting(node_id) => {
+                info!("Handling ErrorInRouting({}) — checking shared_senders", node_id);
+                let hops = &routing_header.hops;
+                let from = hops.get(routing_header.hop_index.saturating_sub(1)).copied();
 
-            NackType::ErrorInRouting(crashed_node_id) => {
-                warn!("Server detected a crashed node {} due to ErrorInRouting.", crashed_node_id);
+                if let Some(shared) = &self.shared_senders {
+                    if let Ok(map) = shared.lock() {
+                        let involved = map.keys().any(|(a, b)| *a == node_id || *b == node_id);
 
-                let node_type = self.network_graph.node_types.get(&crashed_node_id);
-
-                match node_type {
-                    // ????? review protocol nack behaviour
-                    Some(NodeType::Server) => {
-                        warn!("Attempted to remove Server node {} — action skipped.", crashed_node_id);
+                        if let Some(from) = from {
+                            if !involved {
+                                warn!("💥 Node {} not found in shared_senders — assuming crash", node_id);
+                                self.network_graph.remove_node(node_id);
+                                self.packet_sender.remove(&node_id);
+                                self.log(format!("Node {} crashed (removed from graph)", node_id));
+                            } else {
+                                warn!("🧹 Link failure: removing link between {} and {} (node still alive)", from, node_id);
+                                self.network_graph.remove_link(from, node_id);
+                                if self.id == from {
+                                    self.packet_sender.remove(&node_id);
+                                } else if self.id == node_id {
+                                    self.packet_sender.remove(&from);
+                                }
+                                self.log(format!("Link removed between {} and {}", from, node_id));
+                            }
+                        } else {
+                            warn!("❓ Could not determine sender before node {} — hop_index too small or invalid", node_id);
+                        }
+                    } else {
+                        warn!("❌❌❌ Failed to lock shared_senders — skipping ErrorInRouting handling for {}", node_id);
                     }
-                    Some(NodeType::Client) => {
-                        warn!("Attempted to remove client node {} — action skipped.", crashed_node_id);
-                    }
-                    //the crashed node is a Drone
-                    Some(drone_type) => {
-                        warn!("Detected crashed {:?} node {} due to ErrorInRouting.", drone_type, crashed_node_id);
-                        // REMOVE the crashed node from the network graph
-                        self.network_graph.remove_node(crashed_node_id);
-                        info!("Updated graph after removing {:?}", crashed_node_id);
-                        self.network_graph.print_graph();
-                    }
-                    None => {
-                        warn!("Node type for {} not found — skipping removal.", crashed_node_id);
-                    }
+                } else {
+                    warn!("❌❌❌ shared_senders is None — cannot analyze ErrorInRouting({})", node_id);
                 }
-            },
 
+                self.network_graph.print_graph();
+            }
             _ => {
                 warn!("Received DestinationIsDrone/UnexpectedRecipient NACK type, sending flood request");
                 let flood_request = FloodRequest {
@@ -705,7 +973,6 @@ impl server {
                     session_id,
                     flood_request
                 );
-
                 if let Some(next_hop) = flood_packet.routing_header.hops.get(1) {
                     if let Some(sender) = self.packet_sender.get(next_hop) {
                         match sender.try_send(flood_packet.clone()) {
@@ -723,12 +990,9 @@ impl server {
                     error!("No next hop available in routing header");
                 }
             }
-            //di conseguenza successivamente il server riceverà delle floodResponse. Queste dovranno essere analizzate
-            //ed interpretate per poi andare a modificare il grafo.
         }
     }
 
-    // modifica cosi che ogni volta che ricevo un frammento mando un ack, con il proprio index number.
     fn send_ack(&mut self, packet: &Packet, fragment: &Fragment) {
         let ack_packet = Packet {
             pack_type: PacketType::Ack(Ack {
@@ -759,23 +1023,18 @@ impl server {
 
     fn handle_flood_request(&mut self, session_id: u64, flood_request: &FloodRequest, _source_routing_header: SourceRoutingHeader) {
         info!(
-            "📨 Received FloodRequest from {} with ID {}",
+            "📨📨📨 Received FloodRequest from {} with ID {} 📨📨📨",
             flood_request.initiator_id, flood_request.flood_id
-            );
-
+        );
         let flood_req = (flood_request.flood_id, flood_request.initiator_id);
-
-        // 🚫 Already seen → generate response
+        // ALREADY SEEN -> GENERATE RESPONSE
         if self.seen_floods.contains(&flood_req) {
-            // Clone and extend the trace to include this server
             let mut response = flood_request.clone();
             response.path_trace.push((self.id, NodeType::Server));
-
-            // Now build the FloodResponse packet
+            // build the FloodResponse packet
             let mut packet = response.generate_response(session_id);
             packet.routing_header.hop_index += 1;
 
-            // ✅ Logging correct path
             info!(
                 "📤 Sending FloodResponse from {} to {} | path: {:?}",
                 self.id,
@@ -787,16 +1046,16 @@ impl server {
             if let Some(&next_hop) = packet.routing_header.hops.get(packet.routing_header.hop_index) {
                 if let Some(sender) = self.packet_sender.get(&next_hop) {
                     if let Err(e) = sender.send(packet) {
-                        error!("❌ Failed to send FloodResponse to {}: {:?}", next_hop, e);
+                        error!("❌❌❌ Failed to send FloodResponse to {}: {:?}", next_hop, e);
                     } else {
                         info!("✅ Sent FloodResponse to node {}", next_hop);
                     }
                 } else {
-                    error!("❌ No sender found for node {} in packet_sender", next_hop);
+                    error!("❌❌❌ No sender found for node {} in packet_sender", next_hop);
                 }
             } else {
                 error!(
-                    "⚠ hop_index {} out of bounds in hops {:?}",
+                    "hop_index {} out of bounds in hops {:?}",
                     packet.routing_header.hop_index,
                     packet.routing_header.hops
                 );
@@ -804,9 +1063,8 @@ impl server {
             return;
         }
 
-        // ✅ First time → record + extend path
+        // FIRST TIME → RECORD + EXTEND PATH
         self.seen_floods.insert(flood_req);
-
         let mut updated_request = flood_request.clone();
         updated_request.path_trace.push((self.id, NodeType::Server));
 
@@ -817,15 +1075,13 @@ impl server {
                     continue; // Don’t send back where it came from
                 }
             }
-
             let packet = Packet::new_flood_request(
                 SourceRoutingHeader::empty_route(),
                 session_id,
                 updated_request.clone(),
             );
-
             if let Err(e) = sender_channel.send(packet) {
-                error!("❌ Failed to forward FloodRequest to {}: {}", neighbor, e);
+                error!("❌❌❌ Failed to forward FloodRequest to {}: {}", neighbor, e);
             } else {
                 info!("🔁 Forwarded FloodRequest to {}", neighbor);
             }
@@ -833,9 +1089,7 @@ impl server {
     }
 
     fn handle_flood_response(&mut self, session_id: u64, flood_response: &FloodResponse, routing_header: SourceRoutingHeader) {
-        info!("Received FloodResponse for flood_id {} in session {}", flood_response.flood_id, session_id);
-        //obiettivo: fare tutta quella roba strana con il grafo.
-        //
+        println!("Received FloodResponse for flood_id {} in session {}", flood_response.flood_id, session_id);
         // let nodes: Vec<NodeId> = flood_response.path_trace.iter().map(|(id, _)| *id).collect();
         let path = &flood_response.path_trace;
         for pair in path.windows(2) {
@@ -847,13 +1101,11 @@ impl server {
     fn send_chat_message(&mut self, session_id: u64, target_id: NodeId, msg: String) {
         let data = msg.as_bytes();
         let total_fragments = ((data.len() + 127) / 128) as u64;
-
         let source = self.id;
-        let destination = target_id;
         let hops = match self.network_graph.best_path(source, target_id) {
             Some(path) => path,
             None => {
-                error!("No path found from server {} to client {}", source, destination);
+                error!("No path found from server {} to client {}", source, target_id);
                 return;
             }
         };
@@ -873,7 +1125,7 @@ impl server {
                 session_id,
                 routing_header: SourceRoutingHeader {
                     hop_index: 1,
-                    hops: hops.clone(), // clone needed for multiple fragments
+                    hops: hops.clone(), // includes source
                 },
                 pack_type: PacketType::MsgFragment(fragment.clone()),
             };
@@ -881,24 +1133,23 @@ impl server {
             // Save for possible NACK-based resend
             self.sent_fragments.insert((session_id, i as u64), (fragment.clone(), target_id));
 
-            let next_hop = packet.routing_header.hops.get(1)
-                .or_else(|| packet.routing_header.hops.get(0));
-            if let Some(&next_hop_id) = next_hop {
+            let next_hop_id_opt = packet.routing_header.hops.get(1); // first node after server
+            if let Some(&next_hop_id) = next_hop_id_opt {
                 if let Some(sender) = self.packet_sender.get(&next_hop_id) {
-                    info!("✈✈✈✈✈✈✈✈   Sending fragment {} of {} to {}     ✈✈✈✈✈✈✈✈", i + 1, total_fragments, next_hop_id);
-                    if let Err(e) = sender.send(packet) {
-                        error!("Failed to send fragment {} to {}: {:?}", i, target_id, e);
+                    info!("✈✈✈✈✈ Sending fragment {} to {}", i + 1, next_hop_id);
+                    if let Err(e) = sender.send(packet.clone()) {
+                        error!("❌ Failed to send fragment to {}: {:?}", next_hop_id, e);
                     }
                 } else {
-                    error!("No sender available for node {}", next_hop_id);
+                    warn!("⚠ Packet sender missing for next hop {} — possible outdated link", next_hop_id);
                 }
             } else {
-                error!("No valid next hop from {} to {} — route: {:?}", source, destination, hops);
+                error!("❌ No next hop available for fragment {}", i);
             }
         }
     }
 
-    pub fn compute_best_path(&self, from: NodeId, to: NodeId) -> Option<Vec<NodeId>> {
+    pub fn compute_best_path(&mut self, from: NodeId, to: NodeId) -> Option<Vec<NodeId>> {
         self.network_graph.best_path(from,to)
-       }
+    }
 }
