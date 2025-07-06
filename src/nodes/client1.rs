@@ -541,82 +541,85 @@ impl MyClient {
                 //format: [MediaUploadAck]::media_name
                 if tokens.len() >= 2 {
                     let media_name = media;
-                    info!("Client {} received MEDIA UPLOAD ACK for media '{}'", self.id, media_name);
+                    info!("Client {} received MEDIA UPLOAD ACK for media '{}'.", self.id, media_name);
                 } else {
-                    warn!("Client {} received invalid MEDIA UPLOAD ACK format: {}", self.id, message_string);
+                    warn!("Client {} received invalid MEDIA UPLOAD ACK format: {}.", self.id, message_string);
                 }
             },
             ["[MediaDownloadResponse]", media, base64] => {
                 if tokens.len() >= 3 {
                     let media_name = media;
                     let base64_data = base64;
+
                     if media_name.to_string() == "ERROR" && base64_data.to_string() == "NotFound" {
-                        info!("Client {} received MEDIA DOWNLOAD RESPONSE: Media not found", self.id)
+                        info!("Client {} received MEDIA DOWNLOAD RESPONSE: Media not found.", self.id)
                     } else {
-                        info!("Client {} received MEDIA DOWNLOAD RESPONSE for media '{}'", self.id, media_name);
-                        //- - - - logic for showing the image - - - -
+                        info!("Client {} received MEDIA DOWNLOAD RESPONSE for media '{}'.", self.id, media_name);
+
                         match STANDARD.decode(&base64_data) {
                             Ok(image_bytes) => {
-                                info!("Client {} successfully decoded base64 data for media '{}'", self.id, media_name);
-                                //load_from_memory detects common image formats
                                 match load_from_memory(&image_bytes) {
                                     Ok(img) => {
-                                        info!("Client {} successfully loaded image data for media '{}'", self.id, media_name);
-                                        let mut temp_file_path = temp_dir();
-                                        //guessing the extension format
+                                        info!("Client {} successfully loaded image data for media '{}'.", self.id, media_name);
+
                                         let extension = match img.color() {
-                                            image::ColorType::Rgb8 => "png",
-                                            image::ColorType::Rgba8 => "png",
-                                            image::ColorType::L8 => "png",
-                                            image::ColorType::La8 => "png",
-                                            image::ColorType::Rgb16 => "png",
-                                            image::ColorType::Rgba16 => "png",
-                                            image::ColorType::L16 => "png",
-                                            image::ColorType::La16 => "png",
+                                            image::ColorType::Rgb8
+                                            | image::ColorType::Rgba8
+                                            | image::ColorType::L8
+                                            | image::ColorType::La8
+                                            | image::ColorType::Rgb16
+                                            | image::ColorType::Rgba16
+                                            | image::ColorType::L16
+                                            | image::ColorType::La16 => "png",
                                             _ => "bin",
                                         };
-                                        let cleaned_media_name = media_name.replace(|c : char| !c.is_ascii_alphanumeric() && c != ' ' && c != '-', "");
-                                        let filename = format!("media_{}.{}", cleaned_media_name, extension);
+
+                                        // Create a temp file with a proper extension
+                                        let mut temp_file_path = temp_dir();
+                                        let filename = format!("media_preview_{}.{}", self.id, extension);
                                         temp_file_path.push(filename);
-                                        match img.save(&temp_file_path) {
-                                            Ok(_) => {
-                                                let open_command = if cfg!(target_os = "windows") {
-                                                    "cmd"
-                                                } else if cfg!(target_os = "macos") {
-                                                    "open"
-                                                } else {
-                                                    "xdg-open"
-                                                };
 
-                                                let path_str = temp_file_path.to_string_lossy().into_owned();
-                                                let args = if cfg!(target_os = "windows") {
-                                                    vec!["/C", "start", "", path_str.as_str()] // "" prevents issues with filenames with spaces
-                                                } else {
-                                                    vec![path_str.as_str()]
-                                                };
+                                        // Save temporarily
+                                        if let Err(e) = img.save(&temp_file_path) {
+                                            warn!("Client {} failed to temporarily save image: {}", self.id, e);
+                                            return;
+                                        }
 
-                                                match Command::new(open_command).args(args.clone()).spawn() {
-                                                    Ok(_) => info!("🖼️ 🖼️ 🖼️  Client {} successfully opened media '{}' with command '{} {:?}'", self.id, media_name, open_command, args),
-                                                    Err(e) => error!("Client {} failed to open media '{}' using command '{} {:?}': {}", self.id, media_name, open_command, args, e),
-                                                }
+                                        // Open with system viewer
+                                        let open_command = if cfg!(target_os = "windows") {
+                                            "cmd"
+                                        } else if cfg!(target_os = "macos") {
+                                            "open"
+                                        } else {
+                                            "xdg-open"
+                                        };
 
-                                            },
-                                            Err(e) => error!("Client {} failed to save image data for media '{}' to file: {}", self.id, media_name, e),
+                                        let path_str = temp_file_path.to_string_lossy().into_owned();
+                                        let args = if cfg!(target_os = "windows") {
+                                            vec!["/C", "start", "", &path_str]
+                                        } else {
+                                            vec![path_str.as_str()]
+                                        };
+
+                                        match Command::new(open_command).args(args.clone()).spawn() {
+                                            Ok(_) => info!("🖼️ 🖼️ 🖼️ Opened media '{}' for client {}", media_name, self.id),
+                                            Err(e) => error!("Failed to open image: {}", e),
                                         }
                                     },
-                                    Err(e) => error!("Client {} failed to load image from bytes for media '{}': {}", self.id, media_name, e),
+                                    Err(e) => error!("Client {} failed to load image from memory: {}", self.id, e),
                                 }
                             },
-                            Err(e) => error!("Client {} failed to decode base64 data for media '{}': {}", self.id, media_name, e),
+                            Err(e) => error!("Client {} failed to decode base64 data: {}", self.id, e),
                         }
                     }
                 }
             },
             ["[MediaListResponse]", list_str] => {
-                info!("Client {} received MEDIA LIST: {}", self.id, list_str);
+                info!("Client {} received MEDIA LIST: {}.", self.id, list_str);
                 let media_list : Vec<String> = list_str.split(',').filter(|s| !s.trim().is_empty()).map(|s| s.trim().to_string()).collect();
                 info!("Available media files: {:?}", media_list);
             },
+
             ["[LoginAck]", session_id] => {
                 //format: [LoginAck]::session_id
                 if let Ok(parsed_session_id) = session_id.parse::<u64>() {
@@ -1040,24 +1043,25 @@ impl MyClient {
             },
             ["[MediaUpload]", media_name, base64_data] => {
                 if let Some(mem_server_id) = self.connected_server_id {
-                    info!("Client {} processing MEDIA UPLOAD command for media '{}' via server {}", self.id, media_name, mem_server_id);
+                    info!("Client {} processing MEDIA UPLOAD command for media '{}' via server {}.", self.id, media_name, mem_server_id);
                     self.log(format!("Client {} uploaded the '{media_name}' to the server", self.id));
                     Some(format!("[MediaUpload]::{media_name}::{base64_data}"))
                 } else {
-                    info!("Client {} received MEDIA UPLOAD command while not logged in. Ignoring", self.id);
+                    info!("Client {} received MEDIA UPLOAD command while not logged in. Ignoring.", self.id);
                     None
                 }
             },
             ["[MediaDownloadRequest]", media_name] => {
                 if let Some(mem_server_id) = self.connected_server_id {
-                    info!("Client {} processing MEDIA DOWNLOAD REQUEST command for media '{}' via server {}", self.id, media_name, mem_server_id);
+                    info!("Client {} processing MEDIA DOWNLOAD REQUEST command for media '{}' via server {}.", self.id, media_name, mem_server_id);
                     self.log(format!("Client {} downloaded the '{media_name}'", self.id));
                     Some(format!("[MediaDownloadRequest]::{media_name}"))
                 } else {
-                    info!("Client {} received MEDIA DOWNLOAD REQUEST command while not logged in. Ignoring", self.id);
+                    info!("Client {} received MEDIA DOWNLOAD REQUEST command while not logged in. Ignoring.", self.id);
                     None
                 }
             },
+
             ["[HistoryRequest]", client_id, target_id] => {
                 if let (Some(_client_id), Some(_target_id)) = (client_id.parse::<NodeId>().ok(), target_id.parse::<NodeId>().ok()) {
                     if let Some(mem_server_id) = self.connected_server_id {
@@ -1075,24 +1079,25 @@ impl MyClient {
             },
             ["[MediaListRequest]"] => {
                 if let Some(mem_server_id) = self.connected_server_id {
-                    info!("Client {} processing MEDIA LIST REQUEST command via server {}", self.id, mem_server_id);
+                    info!("Client {} processing MEDIA LIST REQUEST command via server {}.", self.id, mem_server_id);
                     self.log(format!("MediaListRequest command from client: {}", self.id));
                     Some("[MediaListRequest]".to_string())
                 } else {
-                    info!("Client {} received MEDIA LIST REQUEST command while not logged in. Ignoring", self.id);
+                    info!("Client {} received MEDIA LIST REQUEST command while not logged in. Ignoring.", self.id);
                     None
                 }
             },
             ["[MediaBroadcast]", media_name, base64_data] => {
                 if let Some(mem_server_id) = self.connected_server_id {
-                    info!("Client {} processing MEDIA BROADCAST command for media '{}' via server {}", self.id, media_name, mem_server_id);
+                    info!("Client {} processing MEDIA BROADCAST command for media '{}' via server {}.", self.id, media_name, mem_server_id);
                     self.log(format!("Client {} did a Media Broadcast of '{media_name}'", self.id));
                     Some(format!("[MediaBroadcast]::{media_name}::{base64_data}"))
                 } else {
-                    info!("Client {} received MEDIA BROADCAST command while not logged in. Ignoring", self.id);
+                    info!("Client {} received MEDIA BROADCAST command while not logged in. Ignoring.", self.id);
                     None
                 }
             },
+
             _ => {
                 warn!("Client {} received unrecognized GUI command: {}", self.id, command_string);
                 None
@@ -1391,24 +1396,23 @@ mod tests {
             return String::new();
         }
 
-
         packets.sort_by_key(|p| match &p.pack_type {
             PacketType::MsgFragment(f) => f.fragment_index,
             _ => 0,
         });
 
-
         let mut reassembled_data = Vec::new();
-        const MAX_FRAGMENT_SIZE: usize = 128;
+        let mut total_fragments_expected = 0;
+        let mut last_fragment_len = None;
 
-
-        for pkt in packets {
-            if let PacketType::MsgFragment(fragment) = pkt.pack_type {
-                let start_index = (fragment.fragment_index * MAX_FRAGMENT_SIZE as u64) as usize;
+        for p in packets {
+            if let PacketType::MsgFragment(fragment) = p.pack_type {
+                total_fragments_expected = fragment.total_n_fragments;
+                if fragment.fragment_index == total_fragments_expected - 1 {
+                    last_fragment_len = Some(fragment.length);
+                }
+                let start_index = fragment.fragment_index as usize * 128;
                 let end_index = start_index + fragment.length as usize;
-
-
-
 
                 if reassembled_data.len() < end_index {
                     reassembled_data.resize(end_index, 0);
@@ -1416,7 +1420,45 @@ mod tests {
                 reassembled_data[start_index..end_index].copy_from_slice(&fragment.data[..fragment.length as usize]);
             }
         }
-        String::from_utf8_lossy(&reassembled_data).trim_end_matches('\0').to_string()
+
+        if let Some(last_len) = last_fragment_len {
+            let expected_total_len = (total_fragments_expected as usize - 1) * 128 + last_len as usize;
+            reassembled_data.truncate(expected_total_len);
+        }
+        String::from_utf8_lossy(&reassembled_data).trim().to_string()
+    }
+
+    fn setup_client_with_custom_shared_senders(
+        client_id: NodeId,
+        neighbor_ids: Vec<NodeId>,
+        initial_shared_senders: HashMap<(NodeId, NodeId), Sender<Packet>>
+    ) -> (MyClient, Sender<Packet>, HashMap<NodeId, Receiver<Packet>>, SharedGuiInput, Sender<Packet>) {
+        let (_packet_recv_tx, packet_recv_rx) = unbounded::<Packet>();
+        let mut packet_send_map = HashMap::new();
+        let mut neighbor_receivers = HashMap::new();
+
+        for &id in &neighbor_ids {
+            let (tx, rx) = unbounded::<Packet>();
+            packet_send_map.insert(id, tx);
+            neighbor_receivers.insert(id, rx);
+        }
+
+        let (shortcut_tx, shortcut_rx) = unbounded::<Packet>();
+        let gui_input_queue = new_gui_input_queue();
+        let shared_senders_arc = Arc::new(Mutex::new(initial_shared_senders));
+
+        let client = MyClient::new(
+            client_id,
+            packet_recv_rx,
+            packet_send_map,
+            HashMap::new(), // sent_messages
+            None, // connected_server_id
+            HashSet::new(), // seen_flood_ids
+            Some(shared_senders_arc), // shared_senders
+            Some(shortcut_rx), // shortcut_receiver
+        );
+
+        (client, _packet_recv_tx, neighbor_receivers, gui_input_queue, shortcut_tx)
     }
 
     fn setup_client (client_id: NodeId, neighbor_ids: Vec<NodeId>) -> (MyClient, Sender<Packet>, HashMap<NodeId, Receiver<Packet>>, SharedGuiInput, Sender<Packet>) {
@@ -1990,15 +2032,15 @@ mod tests {
 
        let path = client.best_path(client_id, server_id);
 
-       assert!(path.is_none(), "Non dovrebbe essere trovato un percorso tra nodi disconnessi");
+       assert!(path.is_none(), "a path should not be found between disconnected nodes");
 
        let target_id_for_non_existent_source = 200;
        let path_source_not_in_graph = client.best_path(250, target_id_for_non_existent_source);
-       assert!(path_source_not_in_graph.is_none(), "best_path() dovrebbe restituire None se il nodo sorgente non è nel grafo");
+       assert!(path_source_not_in_graph.is_none(), "best_path() should return None is the source node is not in the graph");
 
        let source_id_for_non_existent_target = client_id;
        let path_target_not_in_graph = client.best_path(source_id_for_non_existent_target, 251);
-       assert!(path_target_not_in_graph.is_none(), "best_path() dovrebbe restituire None se il nodo destinazione non è nel grafo");
+       assert!(path_target_not_in_graph.is_none(), "best_path() should return None if the destination node is not in the graph");
    }
 
    #[test]
@@ -2051,150 +2093,37 @@ mod tests {
        assert_eq!(flood_state.initiator_id, client_id, "client itself (id: {}) should be the initializer of the flood discovery", client_id);
        assert_eq!(initiated_flood_id, 1, "flood_id should be 1 after the first flood discovery");
    }
-/*
-   #[test]
-   fn test_send_ack_and_client_ack_handling() {
-       let client_id_sender = 101;
-       let server_id = 200;
-       let drone1_id = 1;
-       let drone2_id = 2;
-
-       {
-           let mut counter = SESSION_COUNTER.lock().unwrap();
-           *counter = 0;
-       }
-
-       let (mut sender_client, sender_incoming_packet_tx, mut sender_outbound_receivers, _gui_input, _shortcut_tx) =
-           setup_client(client_id_sender, vec![drone1_id]);
-
-       let (mut mock_server_client, mock_server_incoming_packet_tx, mut mock_server_outbound_receivers, _gui_input_server, _shortcut_tx_server) =
-           setup_client(server_id, vec![drone2_id]);
-
-       {
-           let (tx_d1_to_d2, rx_d1_from_d2) = unbounded::<Packet>();
-           let (tx_d2_to_d1, rx_d2_from_d1) = unbounded::<Packet>();
-
-           let shared_senders_for_sender_arc = sender_client.shared_senders.as_ref().unwrap();
-           let mut shared_sender_map = shared_senders_for_sender_arc.lock().unwrap();
-           shared_sender_map.insert((drone1_id, drone2_id), tx_d1_to_d2.clone());
-           shared_sender_map.insert((drone2_id, drone1_id), tx_d2_to_d1.clone());
-
-           let shared_senders_for_server_arc = mock_server_client.shared_senders.as_ref().unwrap();
-           let mut shared_server_map = shared_senders_for_server_arc.lock().unwrap();
-           shared_server_map.insert((drone1_id, drone2_id), tx_d1_to_d2);
-           shared_server_map.insert((drone2_id, drone1_id), tx_d2_to_d1);
-       }
-
-       let client_idx = sender_client.network_graph.add_node(NodeInfo { id: client_id_sender, node_type: PktNodeType::Client });
-       sender_client.node_id_to_index.insert(client_id_sender, client_idx);
-       let drone1_idx = sender_client.network_graph.add_node(NodeInfo { id: drone1_id, node_type: PktNodeType::Drone });
-       sender_client.node_id_to_index.insert(drone1_id, drone1_idx);
-       let drone2_idx = sender_client.network_graph.add_node(NodeInfo { id: drone2_id, node_type: PktNodeType::Drone });
-       sender_client.node_id_to_index.insert(drone2_id, drone2_idx);
-       let server_idx = sender_client.network_graph.add_node(NodeInfo { id: server_id, node_type: PktNodeType::Server });
-       sender_client.node_id_to_index.insert(server_id, server_idx);
-
-       sender_client.network_graph.add_edge(client_idx, drone1_idx, 0);
-       sender_client.network_graph.add_edge(drone1_idx, client_idx, 0);
-       sender_client.network_graph.add_edge(drone1_idx, drone2_idx, 0);
-       sender_client.network_graph.add_edge(drone2_idx, drone1_idx, 0);
-       sender_client.network_graph.add_edge(drone2_idx, server_idx, 0);
-       sender_client.network_graph.add_edge(server_idx, drone2_idx, 0);
-
-       sender_client.connected_server_id = Some(server_id);
-
-       {
-           let mut counter = SESSION_COUNTER.lock().unwrap();
-           *counter = 0;
-       }
-
-       let original_message = "This is a test message, which should be fragmented to correctly test the handling of ACKs. It has to be sufficiently long to generate more fragments to let the test work.";
-       let message_command = format!("[MessageTo]::{}::{}", server_id, original_message);
-       sender_client.process_gui_command(server_id, message_command.clone());
-
-       let sent_session_id = *SESSION_COUNTER.lock().unwrap();
-       assert!(sender_client.sent_messages.contains_key(&sent_session_id), "il client mittente dovrebbe aver memorizzato le informazioni del messaggio inviato");
-
-       let sent_message_info = sender_client.sent_messages.get(&sent_session_id).unwrap();
-       let total_fragments_expected = sent_message_info.fragments.len() as u64;
-       assert!(total_fragments_expected > 1, "il messaggio deve essere frammentato per questo test (previsto > 1 frammenti)");
-       assert_eq!(sent_message_info.received_ack_indices.len(), 0, "inizialmente, nessun ACK dovrebbe essere ricevuto dal client mittente");
-
-       let drone1_receiver_from_sender = sender_outbound_receivers.remove(&drone1_id)
-           .expect("il client mittente dovrebbe avere un canale in uscita verso drone1");
-       let mut sent_fragments_from_sender: Vec<Packet> = Vec::new();
-       for _ in 0..total_fragments_expected {
-           sent_fragments_from_sender.push(drone1_receiver_from_sender.recv_timeout(Duration::from_millis(100)).expect("non tutti i frammenti sono stati ricevuti dal client mittente"));
-       }
-
-       let drone2_idx_server = mock_server_client.network_graph.add_node(NodeInfo { id: drone2_id, node_type: PktNodeType::Drone });
-       mock_server_client.node_id_to_index.insert(drone2_id, drone2_idx_server);
-       let server_idx_server = mock_server_client.network_graph.add_node(NodeInfo { id: server_id, node_type: PktNodeType::Server });
-       mock_server_client.node_id_to_index.insert(server_id, server_idx_server);
-       mock_server_client.network_graph.add_edge(server_idx_server, drone2_idx_server, 0);
-       mock_server_client.network_graph.add_edge(drone2_idx_server, server_idx_server, 0);
-
-       let drone2_receiver_from_mock_server = mock_server_outbound_receivers.remove(&drone2_id)
-           .expect("il mock server dovrebbe avere un canale in uscita verso drone2");
-
-       let mut ack_packets_to_send_back_to_sender: Vec<Packet> = Vec::new();
-       for i in 0..total_fragments_expected {
-           let original_fragment_packet = sent_fragments_from_sender[i as usize].clone();
-           let mut packet_at_server = original_fragment_packet.clone();
-           packet_at_server.routing_header.hop_index = packet_at_server.routing_header.hops.len();
-           mock_server_client.process_packet(packet_at_server);
-
-           let ack_packet_from_mock_server_to_drone2 = drone2_receiver_from_mock_server.recv_timeout(Duration::from_millis(100))
-               .expect(&format!("il mock server dovrebbe inviare ACK per il frammento {}", i));
-           match ack_packet_from_mock_server_to_drone2.clone().pack_type {
-               PacketType::Ack(ack) => {
-                   assert_eq!(ack.fragment_index, i, "l'indice del frammento ACK non corrisponde");
-                   let expected_reversed_hops: Vec<NodeId> = original_fragment_packet.routing_header.hops
-                       .iter()
-                       .rev()
-                       .copied()
-                       .collect();
-                   assert_eq!(ack_packet_from_mock_server_to_drone2.routing_header.hops, expected_reversed_hops, "gli hop dell'ACK dovrebbero essere il percorso inverso del messaggio originale");
-               },
-               _ => panic!("previsto pacchetto ACK, ma ricevuto tipo di pacchetto diverso: {:?}", ack_packet_from_mock_server_to_drone2.pack_type),
-           }
-           ack_packets_to_send_back_to_sender.push(ack_packet_from_mock_server_to_drone2);
-       }
-
-       for ack_packet_original_from_mock_server in ack_packets_to_send_back_to_sender {
-           let mut ack_packet_at_sender_client = ack_packet_original_from_mock_server.clone();
-           ack_packet_at_sender_client.routing_header.hop_index = ack_packet_at_sender_client.routing_header.hops.len();
-           sender_incoming_packet_tx.send(ack_packet_at_sender_client.clone()).unwrap();
-           sender_client.process_packet(ack_packet_at_sender_client.clone());
-       }
-
-       let final_sent_message_info = sender_client.sent_messages.get(&sent_session_id).unwrap();
-       assert_eq!(final_sent_message_info.received_ack_indices.len() as u64, total_fragments_expected, "tutti i frammenti dovrebbero essere contrassegnati come ACKed");
-   }
 
    #[test]
-   fn test_process_nack_error_in_routing() {
+   fn test_process_nack_error_in_routing_node_crash() {
        let client_id = 101;
        let drone1_id = 1;
        let drone2_id = 2;
        let server_id = 200;
-       let (mut client, _client_incoming_packet_tx, _neighbor_outbound_receivers, _gui_input, _shortcut_tx) = setup_client(client_id, vec![drone1_id]);
+
+       let (mut client, _client_incoming_packet_tx, _neighbor_outbound_receivers, _gui_input, _shortcut_tx) =
+           setup_client(client_id, vec![drone1_id]);
 
        //- - - - preparing the environment for the test - - - -
        let client_idx = client.network_graph.add_node(NodeInfo { id: client_id, node_type: PktNodeType::Client });
        client.node_id_to_index.insert(client_id, client_idx);
+
        let drone1_idx = client.network_graph.add_node(NodeInfo { id: drone1_id, node_type: PktNodeType::Drone });
        client.node_id_to_index.insert(drone1_id, drone1_idx);
-       let drone2_idx = client.network_graph.add_node(NodeInfo { id: drone2_id, node_type: PktNodeType::Drone }); //crashed node
+
+       let drone2_idx = client.network_graph.add_node(NodeInfo { id: drone2_id, node_type: PktNodeType::Drone }); //problematic node
        client.node_id_to_index.insert(drone2_id, drone2_idx);
+
        let server_idx = client.network_graph.add_node(NodeInfo { id: server_id, node_type: PktNodeType::Server });
        client.node_id_to_index.insert(server_id, server_idx);
+
        client.network_graph.add_edge(client_idx, drone1_idx, 0);
        client.network_graph.add_edge(drone1_idx, client_idx, 0);
-       client.network_graph.add_edge(drone1_idx, drone2_idx, 0); //link of crashed drone
+       client.network_graph.add_edge(drone1_idx, drone2_idx, 0);
        client.network_graph.add_edge(drone2_idx, drone1_idx, 0);
        client.network_graph.add_edge(drone2_idx, server_idx, 0);
        client.network_graph.add_edge(server_idx, drone2_idx, 0);
+
        let session_id = 456;
        let nack_packet_id = 0;
        let problem_node_id = drone2_id;
@@ -2203,9 +2132,11 @@ mod tests {
            hops: vec![client_id, drone1_id, problem_node_id, server_id],
            hop_index: 2,
        };
+
        let nack_type = NackType::ErrorInRouting(problem_node_id);
        let nack = Nack { fragment_index: nack_packet_id, nack_type: nack_type.clone() };
        let mut packet = Packet { pack_type: PacketType::Nack(nack.clone()), routing_header: original_rh.clone(), session_id };
+
        client.sent_messages.insert(session_id, SentMessageInfo {
            fragments: vec![],
            original_routing_header: original_rh.clone(),
@@ -2213,22 +2144,137 @@ mod tests {
            route_needs_recalculation: false,
        });
        client.route_cache.insert(server_id, vec![client_id, drone1_id, problem_node_id, server_id]);
-       assert!(client.route_cache.contains_key(&server_id), "route towards server should be initially in cache");
-       assert!(client.node_id_to_index.contains_key(&problem_node_id), "the problematic node should exist in the graph before the NACK");
 
-       client.process_nack(&nack, &mut packet); // [5]
+       assert!(client.route_cache.contains_key(&server_id), "The route to the server should initially be in the cache");
+       assert!(client.node_id_to_index.contains_key(&problem_node_id), "The problematic node should exist in the graph before the NACK");
+       assert!(client.network_graph.node_weights().any(|ni| ni.id == problem_node_id), "The node should be present in the graph's weights before the NACK");
+       assert!(client.packet_send.contains_key(&drone1_id), "The client should have a sender for drone1_id (direct neighbor)");
+       assert!(!client.packet_send.contains_key(&problem_node_id), "The client should NOT have a sender for problem_node_id (not a direct neighbor)");
+
+       client.process_nack(&nack, &mut packet);
 
        //- - - - verifying - - - -
-       //1.that the problematic node is removed from graph
-       assert!(!client.node_id_to_index.contains_key(&problem_node_id), "the problematic node should be removed from graph");
-       assert!(!client.network_graph.node_weights().any(|ni| ni.id == problem_node_id), "the node shouldn't be present in the weights of the graph");
+       //1.that the problematic node has been removed from the graph and from map
+       assert!(!client.node_id_to_index.contains_key(&problem_node_id), "The problematic node should be removed from the graph's index map");
+       assert!(!client.network_graph.node_weights().any(|ni| ni.id == problem_node_id), "The node should not be present in the node weights of the graph after the NACK");
 
-       //2.that the route for this session has been marked for the recalculation
-       assert!(client.sent_messages.get(&session_id).unwrap().route_needs_recalculation, "route for the session should be marked for the recalculation");
+       //2.that the route for this session has been marked for recalculation
+       assert!(client.sent_messages.get(&session_id).unwrap().route_needs_recalculation, "The route for the session should be marked for recalculation");
 
-       //3.that the route in cache for the destination (server_id) is invalidated
-       assert!(!client.route_cache.contains_key(&server_id), "route in cache for the destination should be removed");
+       //3.that the route_cache for the destination (server_id) has been invalidated
+       assert!(!client.route_cache.contains_key(&server_id), "The cached route for the destination should be removed");
+
+       //4.`packet_send` shouldn't be influenced because problem_node_id wasn't a direct neighbor of the client
+       assert!(client.packet_send.contains_key(&drone1_id), "The client should still have a sender for drone1_id");
    }
+
+    #[test]
+    fn test_process_nack_error_in_routing_link_failure() {
+        let client_id = 101;
+        let drone1_id = 1;
+        let drone2_id = 2;
+        let drone3_id = 3;
+        let server_id = 200;
+
+        //- - - - setup of `shared_senders` to simulate that `drone2_id` is still active - - - -
+        let (d1_tx_to_d2, _) = unbounded::<Packet>();
+        let (d2_tx_to_d1, _) = unbounded::<Packet>();
+        let (d2_tx_to_d3, _) = unbounded::<Packet>();
+        let (d3_tx_to_d2, _) = unbounded::<Packet>();
+        let (d3_tx_to_s, _) = unbounded::<Packet>();
+        let (s_tx_to_d3, _) = unbounded::<Packet>();
+
+        let mut shared_senders_map = HashMap::new();
+        shared_senders_map.insert((drone1_id, drone2_id), d1_tx_to_d2.clone());
+        shared_senders_map.insert((drone2_id, drone1_id), d2_tx_to_d1.clone());
+        shared_senders_map.insert((drone2_id, drone3_id), d2_tx_to_d3.clone());
+        shared_senders_map.insert((drone3_id, drone2_id), d3_tx_to_d2.clone());
+        shared_senders_map.insert((drone3_id, server_id), d3_tx_to_s.clone());
+        shared_senders_map.insert((server_id, drone3_id), s_tx_to_d3.clone());
+
+        let (mut client, _client_incoming_packet_tx, _neighbor_outbound_receivers, _gui_input, _shortcut_tx) =
+            setup_client_with_custom_shared_senders(client_id, vec![drone1_id], shared_senders_map);
+
+        //- - - - preparing the graph - - - -
+        let client_idx = client.network_graph.add_node(NodeInfo { id: client_id, node_type: PktNodeType::Client });
+        client.node_id_to_index.insert(client_id, client_idx);
+        let drone1_idx = client.network_graph.add_node(NodeInfo { id: drone1_id, node_type: PktNodeType::Drone });
+        client.node_id_to_index.insert(drone1_id, drone1_idx);
+        let drone2_idx = client.network_graph.add_node(NodeInfo { id: drone2_id, node_type: PktNodeType::Drone }); // Nodo problematico
+        client.node_id_to_index.insert(drone2_id, drone2_idx);
+        let drone3_idx = client.network_graph.add_node(NodeInfo { id: drone3_id, node_type: PktNodeType::Drone });
+        client.node_id_to_index.insert(drone3_id, drone3_idx);
+        let server_idx = client.network_graph.add_node(NodeInfo { id: server_id, node_type: PktNodeType::Server });
+        client.node_id_to_index.insert(server_id, server_idx);
+
+        client.network_graph.add_edge(client_idx, drone1_idx, 0);
+        client.network_graph.add_edge(drone1_idx, client_idx, 0);
+        client.network_graph.add_edge(drone1_idx, drone2_idx, 0);
+        client.network_graph.add_edge(drone2_idx, drone1_idx, 0);
+        client.network_graph.add_edge(drone2_idx, drone3_idx, 0);
+        client.network_graph.add_edge(drone3_idx, drone2_idx, 0);
+        client.network_graph.add_edge(drone3_idx, server_idx, 0);
+        client.network_graph.add_edge(server_idx, drone3_idx, 0);
+
+        let session_id = 789;
+        let nack_packet_id = 0;
+        let problem_node_id = drone2_id;
+
+        let original_rh = SourceRoutingHeader {
+            hops: vec![client_id, drone1_id, problem_node_id, drone3_id, server_id],
+            hop_index: 2,
+        };
+
+        let nack_type = NackType::ErrorInRouting(problem_node_id);
+        let nack = Nack { fragment_index: nack_packet_id, nack_type: nack_type.clone() };
+        let mut packet = Packet { pack_type: PacketType::Nack(nack.clone()), routing_header: original_rh.clone(), session_id };
+
+        client.sent_messages.insert(session_id, SentMessageInfo {
+            fragments: vec![],
+            original_routing_header: original_rh.clone(),
+            received_ack_indices: HashSet::new(),
+            route_needs_recalculation: false,
+        });
+        client.route_cache.insert(server_id, vec![client_id, drone1_id, problem_node_id, drone3_id, server_id]);
+
+        assert!(client.route_cache.contains_key(&server_id), "The route to the server should initially be in the cache");
+        assert!(client.node_id_to_index.contains_key(&problem_node_id), "The problematic node should exist in the graph before the NACK");
+        assert!(client.network_graph.node_weights().any(|ni| ni.id == problem_node_id), "The node should be present in the graph weights before the NACK");
+        assert!(client.network_graph.contains_edge(drone1_idx, drone2_idx), "The link from drone1 to drone2 should initially exist");
+        assert!(client.network_graph.contains_edge(drone2_idx, drone1_idx), "The link from drone2 to drone1 should initially exist");
+        assert!(client.network_graph.contains_edge(drone2_idx, drone3_idx), "The link from drone2 to drone3 should initially exist (to confirm it stays alive)");
+        assert!(client.network_graph.contains_edge(drone3_idx, drone2_idx), "The link from drone3 to drone2 should initially exist (to confirm it stays alive)");
+        assert!(client.packet_send.contains_key(&drone1_id), "The client should have a sender for drone1_id (direct neighbor)");
+        assert!(!client.packet_send.contains_key(&problem_node_id), "The client should NOT have a sender for problem_node_id (not a direct neighbor)");
+
+        client.process_nack(&nack, &mut packet);
+
+        //- - - - verifying - - - -
+        //1.that the problematic node hasn't been removed from graph or from the map
+        assert!(client.node_id_to_index.contains_key(&problem_node_id), "The problematic node should NOT be removed from the graph's index map");
+        assert!(client.network_graph.node_weights().any(|ni| ni.id == problem_node_id), "The node SHOULD STILL be present in the graph's node weights after the NACK");
+
+        //2.that the specific link (`drone1_id <-> drone2_id`) has been removed from graph
+        let from_node_id = original_rh.hops[original_rh.hop_index.saturating_sub(1)];
+        let from_idx = *client.node_id_to_index.get(&from_node_id).unwrap();
+        let to_idx = *client.node_id_to_index.get(&problem_node_id).unwrap();
+        assert!(!client.network_graph.contains_edge(from_idx, to_idx), "The link from drone1 to drone2 should be removed");
+        assert!(!client.network_graph.contains_edge(to_idx, from_idx), "The link from drone2 to drone1 should be removed");
+
+        //3.that other links that deal with `problem_node_id` are still present
+        let drone3_idx = *client.node_id_to_index.get(&drone3_id).unwrap();
+        assert!(client.network_graph.contains_edge(to_idx, drone3_idx), "The link from drone2 to drone3 should still exist");
+        assert!(client.network_graph.contains_edge(drone3_idx, to_idx), "The link from drone3 to drone2 should still exist");
+
+        //4.that the route for this session has been marked for recalculation
+        assert!(client.sent_messages.get(&session_id).unwrap().route_needs_recalculation, "The route for the session should be marked for recalculation");
+
+        //5.that the route_cache for destination (server_id) has been invalidated
+        assert!(!client.route_cache.contains_key(&server_id), "The cached route for the destination should be removed");
+
+        //6.`packet_send` shouldn't be influenced because problem_node_id wasn't a direct neighbor of the client
+        assert!(client.packet_send.contains_key(&drone1_id), "The client should still have a sender for drone1_id");
+    }
 
    #[test]
    fn test_process_nack_destination_is_drone() {
@@ -2300,50 +2346,65 @@ mod tests {
        client.node_id_to_index.insert(drone_actual_recipient, drone_actual_idx);
        let server_idx = client.network_graph.add_node(NodeInfo { id: server_id, node_type: PktNodeType::Server });
        client.node_id_to_index.insert(server_id, server_idx);
+
        client.network_graph.add_edge(client_idx, drone1_idx, 0);
        client.network_graph.add_edge(drone1_idx, client_idx, 0);
-       client.network_graph.add_edge(drone1_idx, drone_actual_idx, 0); //penalized drone
+       client.network_graph.add_edge(drone1_idx, drone_actual_idx, 0);
        client.network_graph.add_edge(drone_actual_idx, drone1_idx, 0);
        client.network_graph.add_edge(drone_expected_idx, server_idx, 0);
        client.network_graph.add_edge(server_idx, drone_expected_idx, 0);
+
        let session_id = 910;
        let nack_packet_id = 0;
        let received_at_node_id = drone_actual_recipient;
 
-       let original_rh = SourceRoutingHeader {
-           hops: vec![client_id, drone1_id, drone_expected_recipient, server_id],
-           hop_index: 2,
+       let nack_return_rh = SourceRoutingHeader {
+           hops: vec![drone_actual_recipient, drone1_id, client_id],
+           hop_index: 1,
        };
+
        let nack_type = NackType::UnexpectedRecipient(received_at_node_id);
        let nack = Nack { fragment_index: nack_packet_id, nack_type: nack_type.clone() };
-       let mut packet = Packet { pack_type: PacketType::Nack(nack.clone()), routing_header: original_rh.clone(), session_id };
+
+       let mut packet = Packet { pack_type: PacketType::Nack(nack.clone()), routing_header: nack_return_rh.clone(), session_id };
+
        client.sent_messages.insert(session_id, SentMessageInfo {
            fragments: vec![],
-           original_routing_header: original_rh.clone(),
+           original_routing_header: SourceRoutingHeader {
+               hops: vec![client_id, drone1_id, drone_expected_recipient, server_id],
+               hop_index: 2,
+           },
            received_ack_indices: HashSet::new(),
            route_needs_recalculation: false,
        });
 
        client.route_cache.insert(server_id, vec![client_id, drone1_id, drone_expected_recipient, server_id]);
+
        assert!(client.route_cache.contains_key(&server_id), "route towards server should be initially in cache");
 
-       let problem_link_from_idx = *client.node_id_to_index.get(&drone1_id).unwrap();
-       let problem_link_to_idx = *client.node_id_to_index.get(&drone_actual_recipient).unwrap();
+       let problem_link_from_id = drone1_id;
+       let problem_link_to_id = drone_actual_recipient;
+
+       let problem_link_from_idx = *client.node_id_to_index.get(&problem_link_from_id).unwrap();
+       let problem_link_to_idx = *client.node_id_to_index.get(&problem_link_to_id).unwrap();
+
        let initial_weight_forward = *client.network_graph.edge_weight(client.network_graph.find_edge(problem_link_from_idx, problem_link_to_idx).unwrap()).unwrap();
        let initial_weight_backward = *client.network_graph.edge_weight(client.network_graph.find_edge(problem_link_to_idx, problem_link_from_idx).unwrap()).unwrap();
+
        assert_eq!(initial_weight_forward, 0);
        assert_eq!(initial_weight_backward, 0);
 
-       client.process_nack(&nack, &mut packet); // [9]
+       client.process_nack(&nack, &mut packet);
 
        //- - - - verifying - - - -
        //1.that the number of "drop" for the problematic link is incremented in both directions
        let new_weight_forward = *client.network_graph.edge_weight(client.network_graph.find_edge(problem_link_from_idx, problem_link_to_idx).unwrap()).unwrap();
        let new_weight_backward = *client.network_graph.edge_weight(client.network_graph.find_edge(problem_link_to_idx, problem_link_from_idx).unwrap()).unwrap();
+
        assert_eq!(new_weight_forward, initial_weight_forward.saturating_add(1), "weight of the forward link should be incremented");
        assert_eq!(new_weight_backward, initial_weight_backward.saturating_add(1), "weight of the backward link should be incremented");
 
-       //2.thet the route for this session has been marked for the recalculation
+       //2.that the route for this session has been marked for the recalculation
        assert!(client.sent_messages.get(&session_id).unwrap().route_needs_recalculation, "the route for the session should be marked for the recalculation");
 
        //3.that the route in cache for the destination (server_id) has been invalidated
@@ -2542,13 +2603,29 @@ mod tests {
        let drone1_id = 1;
        let drone2_id = 2;
 
-       //- - - - preparing the environment for the test - - - -
        {
            let mut counter = SESSION_COUNTER.lock().unwrap();
            *counter = 0;
        }
+
+       let (client_to_d1_tx, d1_from_client_rx) = unbounded::<Packet>();
+       let (d1_to_client_tx, client_from_d1_rx) = unbounded::<Packet>();
+       let (d1_to_d2_tx, d2_from_d1_rx) = unbounded::<Packet>();
+       let (d2_to_d1_tx, d1_from_d2_rx) = unbounded::<Packet>();
+       let (d2_to_server_tx, server_from_d2_rx) = unbounded::<Packet>();
+       let (server_to_d2_tx, d2_from_server_rx) = unbounded::<Packet>();
+
+       let mut initial_shared_senders_map = HashMap::new();
+       initial_shared_senders_map.insert((client_id, drone1_id), client_to_d1_tx.clone());
+       initial_shared_senders_map.insert((drone1_id, client_id), d1_to_client_tx.clone());
+       initial_shared_senders_map.insert((drone1_id, drone2_id), d1_to_d2_tx.clone());
+       initial_shared_senders_map.insert((drone2_id, drone1_id), d2_to_d1_tx.clone());
+       initial_shared_senders_map.insert((drone2_id, server_id), d2_to_server_tx.clone());
+       initial_shared_senders_map.insert((server_id, drone2_id), server_to_d2_tx.clone());
+
        let (mut client, _client_incoming_packet_tx, mut neighbor_outbound_receivers, _gui_input, _shortcut_tx) =
-           setup_client(client_id, vec![drone1_id]);
+           setup_client_with_custom_shared_senders(client_id, vec![drone1_id], initial_shared_senders_map);
+
        let client_idx = client.network_graph.add_node(NodeInfo { id: client_id, node_type: PktNodeType::Client });
        client.node_id_to_index.insert(client_id, client_idx);
        let drone1_idx = client.network_graph.add_node(NodeInfo { id: drone1_id, node_type: PktNodeType::Drone });
@@ -2557,6 +2634,7 @@ mod tests {
        client.node_id_to_index.insert(drone2_id, drone2_idx);
        let server_idx = client.network_graph.add_node(NodeInfo { id: server_id, node_type: PktNodeType::Server });
        client.node_id_to_index.insert(server_id, server_idx);
+
        client.network_graph.add_edge(client_idx, drone1_idx, 0);
        client.network_graph.add_edge(drone1_idx, client_idx, 0);
        client.network_graph.add_edge(drone1_idx, drone2_idx, 0);
@@ -2564,19 +2642,21 @@ mod tests {
        client.network_graph.add_edge(drone2_idx, server_idx, 0);
        client.network_graph.add_edge(server_idx, drone2_idx, 0);
 
-       // - - - - testing Login command - - - -
        assert_eq!(client.connected_server_id, None, "client shouldn't be connected to a server initially");
+
        let login_command_string = format!("[Login]::{}", server_id);
        let initial_session_counter = *SESSION_COUNTER.lock().unwrap();
-
        client.process_gui_command(client_id, login_command_string);
 
        assert_eq!(client.connected_server_id, Some(server_id), "id of the connected server should be updated after the Login command");
+
        let expected_session_id_login = initial_session_counter + 1;
        let drone1_receiver = neighbor_outbound_receivers.get_mut(&drone1_id).unwrap();
+
        let expected_login_message_content = format!("[Login]::{}", server_id);
        let expected_login_fragments = (expected_login_message_content.as_bytes().len() + 128 - 1) / 128;
        assert_eq!(expected_login_fragments, 1, "the Login message should be 1 fragment long");
+
        let received_login_packet = drone1_receiver.recv_timeout(Duration::from_millis(100))
            .expect("should receive a fragment for the Login command");
 
@@ -2592,11 +2672,10 @@ mod tests {
            _ => panic!("expected MsgFragment for the Login, but received different packet type: {:?}", received_login_packet.pack_type),
        }
 
-       //- - - - testing Logout command - - - -
        assert_eq!(client.connected_server_id, Some(server_id), "client should be still connected before the Logout test");
+
        let logout_command_string = "[Logout]".to_string();
        let initial_session_counter_logout = *SESSION_COUNTER.lock().unwrap();
-
        client.process_gui_command(client_id, logout_command_string);
 
        assert_eq!(client.connected_server_id, None, "id of the connected server should be None after the Logout command");
@@ -2604,7 +2683,6 @@ mod tests {
        let expected_session_id_logout = initial_session_counter_logout + 1;
        let expected_logout_message_content = "[Logout]".to_string();
        let expected_logout_fragments = (expected_logout_message_content.as_bytes().len() + 128 - 1) / 128;
-
        assert_eq!(expected_logout_fragments, 1, "the Logout message should be 1 fragment long");
 
        let received_logout_packet = drone1_receiver.recv_timeout(Duration::from_millis(100))
@@ -2615,7 +2693,6 @@ mod tests {
                assert_eq!(received_logout_packet.session_id, expected_session_id_logout, "wrong session_id for the Logout fragment");
                assert_eq!(received_logout_packet.routing_header.hops, vec![client_id, drone1_id, drone2_id, server_id], "wrong hops path for the Logout fragment");
                assert_eq!(received_logout_packet.routing_header.hop_index, 1, "hop_index for the Logout fragment should be equal to 1");
-
                let reassembled_data = fragment.data[..fragment.length as usize].to_vec();
                let reassembled_message = String::from_utf8_lossy(&reassembled_data);
                assert_eq!(reassembled_message, expected_logout_message_content, "content of the reassembled Logout message doesn't correspond");
@@ -2623,9 +2700,8 @@ mod tests {
            _ => panic!("expected MsgFragment for the Logout, but received different packet type: {:?}", received_logout_packet.pack_type),
        }
 
-       //- - - - testing Logout command while not logged in - - - -
        assert_eq!(client.connected_server_id, None, "client should be disconnected for this part of the test");
-       while drone1_receiver.try_recv().is_ok() {}
+       while drone1_receiver.try_recv().is_ok() {} // Svuota il canale
        let initial_session_counter_no_logout = *SESSION_COUNTER.lock().unwrap();
        client.process_gui_command(client_id, "[Logout]".to_string());
        assert_eq!(client.connected_server_id, None, "id of the connected server should remain None if client not logged in");
@@ -2633,163 +2709,68 @@ mod tests {
        assert_eq!(*SESSION_COUNTER.lock().unwrap(), initial_session_counter_no_logout, "session counter shouldn't increment if the Logout command is ignored");
    }
 
-   #[test]
-   fn test_client_gui_commands_to_high_level_messages() {
-       let client_id = 101;
-       let drone_id = 1;
-       let server_id = 200;
-       let neighbor_ids = vec![drone_id];
+    #[test]
+    fn test_send_ack_sends_correct_packet_to_next_hop() {
+        let client_id = 101;
+        let drone1_id = 1;
+        let drone2_id = 2;
+        let server_id = 200;
 
-       //- - - - preparing the environment for the test - - - -
-       let (mut client, _client_incoming_packet_tx, mut neighbor_outbound_receivers, _gui_input, _shortcut_tx) =
-           setup_client(client_id, neighbor_ids.clone());
-       {
-           let mut counter = SESSION_COUNTER.lock().unwrap();
-           *counter = 0;
-       }
-       let client_idx = client.network_graph.add_node(NodeInfo { id: client_id, node_type: PktNodeType::Client });
-       client.node_id_to_index.insert(client_id, client_idx);
-       let drone_idx = client.network_graph.add_node(NodeInfo { id: drone_id, node_type: PktNodeType::Drone });
-       client.node_id_to_index.insert(drone_id, drone_idx);
-       let server_idx = client.network_graph.add_node(NodeInfo { id: server_id, node_type: PktNodeType::Server });
-       client.node_id_to_index.insert(server_id, server_idx);
-       client.network_graph.add_edge(client_idx, drone_idx, 0);
-       client.network_graph.add_edge(drone_idx, client_idx, 0);
-       client.network_graph.add_edge(drone_idx, server_idx, 0);
-       client.network_graph.add_edge(server_idx, drone_idx, 0);
-       client.connected_server_id = Some(server_id);
-       let drone_receiver = neighbor_outbound_receivers.remove(&drone_id)
-           .expect("receiving channel for neighboring drone not found");
-       const FRAGMENT_SIZE: usize = 128;
+        {
+            let mut counter = SESSION_COUNTER.lock().unwrap();
+            *counter = 0;
+        }
 
-       //- - - - test 1: [MediaUpload] - - - -
-       let media_name_upload = "test_image.png";
-       let base64_data_upload = "SGVsbG8gV29ybGQgZnJvbSBJbWFnZSBVcGxvYWQh"; // "Hello World from Image Upload!" in Base64
-       let command_upload = format!("[MediaUpload]::{media_name_upload}::{base64_data_upload}");
-       let expected_high_level_upload = format!("[MediaUpload]::{media_name_upload}::{base64_data_upload}");
-       let initial_session_counter_upload = *SESSION_COUNTER.lock().unwrap();
+        let (mut client, _client_incoming_packet_tx, mut neighbor_outbound_receivers, _gui_input, _shortcut_tx) =
+            setup_client(client_id, vec![drone1_id]);
 
-       client.process_gui_command(client_id, command_upload.clone());
+        let session_id = 12345;
+        let fragment_index = 0;
+        let total_fragments = 1;
+        let fragment_data = [0u8; 128];
+        let fragment_len = 10;
 
-       let expected_session_id_upload = initial_session_counter_upload + 1;
-       let mut received_packets_upload = Vec::new();
-       let expected_total_fragments_upload = (expected_high_level_upload.as_bytes().len() + FRAGMENT_SIZE - 1) / FRAGMENT_SIZE;
-       for _ in 0..expected_total_fragments_upload {
-           received_packets_upload.push(drone_receiver.recv_timeout(Duration::from_millis(100))
-               .expect(&format!("expecting to receive a fragment for MediaUpload, fragment {}", received_packets_upload.len())));
-       }
-       let reassembled_upload = reassemble_fragments(received_packets_upload.clone());
-       assert_eq!(reassembled_upload, expected_high_level_upload, "no reassembling for the MediaUpload message");
-       assert_eq!(*SESSION_COUNTER.lock().unwrap(), expected_session_id_upload, "session counter not incremented correctly for MediaUpload");
-       if let Some(pkt) = received_packets_upload.first() {
-           assert_eq!(pkt.routing_header.hops, vec![client_id, drone_id, server_id], "wrong hops for MediaUpload");
-           assert_eq!(pkt.routing_header.hop_index, 1, "wrong hop_index for MediaUpload");
-       } else {
-           panic!("no packet received for MediaUpload.");
-       }
+        let received_fragment = Fragment {
+            fragment_index,
+            total_n_fragments: total_fragments,
+            length: fragment_len as u8,
+            data: fragment_data,
+        };
 
-       //- - - - test 2: [MediaDownloadRequest] - - - -
-       let media_name_download = "requested_media.jpg";
-       let command_download = format!("[MediaDownloadRequest]::{media_name_download}");
-       let expected_high_level_download = format!("[MediaDownloadRequest]::{media_name_download}");
-       let initial_session_counter_download = *SESSION_COUNTER.lock().unwrap();
+        let received_packet_routing_header = SourceRoutingHeader {
+            hops: vec![server_id, drone2_id, drone1_id, client_id],
+            hop_index: 3,
+        };
 
-       client.process_gui_command(client_id, command_download.clone());
+        let mut received_packet = Packet {
+            pack_type: PacketType::MsgFragment(received_fragment.clone()),
+            routing_header: received_packet_routing_header.clone(),
+            session_id,
+        };
 
-       let expected_session_id_download = initial_session_counter_download + 1;
-       let mut received_packets_download = Vec::new();
-       let expected_total_fragments_download = (expected_high_level_download.as_bytes().len() + FRAGMENT_SIZE - 1) / FRAGMENT_SIZE;
-       for _ in 0..expected_total_fragments_download {
-           received_packets_download.push(drone_receiver.recv_timeout(Duration::from_millis(100))
-               .expect(&format!("expecting to receive a fragment for MediaDownloadRequest, fragment {}", received_packets_download.len())));
-       }
-       let reassembled_download = reassemble_fragments(received_packets_download.clone());
-       assert_eq!(reassembled_download, expected_high_level_download, "missing message reassembling for MediaDownloadRequest");
-       assert_eq!(*SESSION_COUNTER.lock().unwrap(), expected_session_id_download, "session counter not incremented correctly for MediaDownloadRequest");
-       if let Some(pkt) = received_packets_download.first() {
-           assert_eq!(pkt.routing_header.hops, vec![client_id, drone_id, server_id], "wrong hops for MediaDownloadRequest");
-           assert_eq!(pkt.routing_header.hop_index, 1, "wrong hop_index for MediaDownloadRequest");
-       } else {
-           panic!("no packet received for MediaDownloadRequest.");
-       }
+        client.send_ack(&mut received_packet, &received_fragment);
 
-       //- - - - test 3: [MediaListRequest] - - - -
-       let command_list = "[MediaListRequest]".to_string();
-       let expected_high_level_list = "[MediaListRequest]".to_string();
-       let initial_session_counter_list = *SESSION_COUNTER.lock().unwrap();
+        let drone1_receiver = neighbor_outbound_receivers
+            .get_mut(&drone1_id)
+            .expect("The client should have a sender toward drone1_id");
 
-       client.process_gui_command(client_id, command_list.clone());
+        let sent_ack_packet = drone1_receiver
+            .recv_timeout(Duration::from_millis(100))
+            .expect("The ACK packet should have been sent to drone1_id");
 
-       let expected_session_id_list = initial_session_counter_list + 1;
-       let mut received_packets_list = Vec::new();
-       let expected_total_fragments_list = (expected_high_level_list.as_bytes().len() + FRAGMENT_SIZE - 1) / FRAGMENT_SIZE;
-       for _ in 0..expected_total_fragments_list {
-           received_packets_list.push(drone_receiver.recv_timeout(Duration::from_millis(100))
-               .expect(&format!("expecting to receive a fragment for MediaListRequest, fragment {}", received_packets_list.len())));
-       }
-       let reassembled_list = reassemble_fragments(received_packets_list.clone());
-       assert_eq!(reassembled_list, expected_high_level_list, "missing reassembly of the message for MediaListRequest");
-       assert_eq!(*SESSION_COUNTER.lock().unwrap(), expected_session_id_list, "session counter not incremented correctly for MediaListRequest");
-       if let Some(pkt) = received_packets_list.first() {
-           assert_eq!(pkt.routing_header.hops, vec![client_id, drone_id, server_id], "wrong hops for MediaListRequest");
-           assert_eq!(pkt.routing_header.hop_index, 1, "wrong hop_index for MediaListRequest");
-       } else {
-           panic!("no packet received for MediaListRequest");
-       }
+        match sent_ack_packet.pack_type {
+            PacketType::Ack(ack) => {
+                assert_eq!(ack.fragment_index, fragment_index, "The ACK fragment index does not match");
+                assert_eq!(sent_ack_packet.session_id, session_id, "The session_id of the ACK does not match");
 
-       //- - - - test 4: [MediaBroadcast] - - - -
-       let media_name_broadcast = "broadcast_video.mp4";
-       let base64_data_broadcast = "SGVsbG8gQnJvYWRjYXN0IFdvcmxkIQ=="; // "Hello Broadcast World!" in Base64
-       let command_broadcast = format!("[MediaBroadcast]::{media_name_broadcast}::{base64_data_broadcast}");
-       let expected_high_level_broadcast = format!("[MediaBroadcast]::{media_name_broadcast}::{base64_data_broadcast}");
-       let initial_session_counter_broadcast = *SESSION_COUNTER.lock().unwrap();
+                let mut expected_ack_hops = received_packet_routing_header.hops.clone();
+                expected_ack_hops.reverse();
+                assert_eq!(sent_ack_packet.routing_header.hops, expected_ack_hops, "The hops in the ACK's routing header do not match the reverse path");
+                assert_eq!(sent_ack_packet.routing_header.hop_index, 1, "The hop_index in the ACK's routing header should be 1");
+            }
+            _ => panic!("An ACK packet was expected, but a different packet type was received: {:?}", sent_ack_packet.pack_type),
+        }
 
-       client.process_gui_command(client_id, command_broadcast.clone());
-
-       let expected_session_id_broadcast = initial_session_counter_broadcast + 1;
-       let mut received_packets_broadcast = Vec::new();
-       let expected_total_fragments_broadcast = (expected_high_level_broadcast.as_bytes().len() + FRAGMENT_SIZE - 1) / FRAGMENT_SIZE;
-       for _ in 0..expected_total_fragments_broadcast {
-           received_packets_broadcast.push(drone_receiver.recv_timeout(Duration::from_millis(100))
-               .expect(&format!("expecting to receive a fragment for MediaBroadcast, fragment {}", received_packets_broadcast.len())));
-       }
-       let reassembled_broadcast = reassemble_fragments(received_packets_broadcast.clone());
-       assert_eq!(reassembled_broadcast, expected_high_level_broadcast, "missing reassembly of the message for MediaBroadcast");
-       assert_eq!(*SESSION_COUNTER.lock().unwrap(), expected_session_id_broadcast, "session counter not incremented correctly for MediaBroadcast");
-       if let Some(pkt) = received_packets_broadcast.first() {
-           assert_eq!(pkt.routing_header.hops, vec![client_id, drone_id, server_id], "wrong hops for MediaBroadcast");
-           assert_eq!(pkt.routing_header.hop_index, 1, "wrong hop_index for MediaBroadcast");
-       } else {
-           panic!("no packet received for MediaBroadcast.");
-       }
-
-       //- - - - test 5: [HistoryRequest] - - - -
-       let target_client_history = 102;
-       let command_history = format!("[HistoryRequest]::{client_id}::{target_client_history}");
-       let expected_high_level_history = format!("[HistoryRequest]::{client_id}::{target_client_history}");
-       let initial_session_counter_history = *SESSION_COUNTER.lock().unwrap();
-
-       client.process_gui_command(client_id, command_history.clone());
-
-       let expected_session_id_history = initial_session_counter_history + 1;
-       let mut received_packets_history = Vec::new();
-       let expected_total_fragments_history = (expected_high_level_history.as_bytes().len() + FRAGMENT_SIZE - 1) / FRAGMENT_SIZE;
-       for _ in 0..expected_total_fragments_history {
-           received_packets_history.push(drone_receiver.recv_timeout(Duration::from_millis(100))
-               .expect(&format!("expecting to receive a fragment for HistoryRequest, fragment {}", received_packets_history.len())));
-       }
-       let reassembled_history = reassemble_fragments(received_packets_history.clone());
-       assert_eq!(reassembled_history, expected_high_level_history, "missing reassembling of the message for HistoryRequest");
-       assert_eq!(*SESSION_COUNTER.lock().unwrap(), expected_session_id_history, "session counter not incremented correctly for HistoryRequest");
-       if let Some(pkt) = received_packets_history.first() {
-           assert_eq!(pkt.routing_header.hops, vec![client_id, drone_id, server_id], "wrong hops for HistoryRequest");
-           assert_eq!(pkt.routing_header.hop_index, 1, "wrong hop_index for HistoryRequest");
-       } else {
-           panic!("no packet received for HistoryRequest");
-       }
-
-       assert!(client.packet_send.contains_key(&drone_id), "map packet_send of the client should still contain id of the drone");
-   }
-   //AGGIUNGERE FUNZIONE PER TESTARE process_received_high_level_message
- */
+        assert!(drone1_receiver.try_recv().is_err(), "Only one ACK packet was expected for the neighbor");
+    }
 }
