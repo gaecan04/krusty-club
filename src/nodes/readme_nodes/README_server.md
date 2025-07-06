@@ -89,14 +89,14 @@ First thing done: analyze the network. --> self.initiate_network_discovery()
       "[FloodRequired]::"
      ```
   
-For which the server performs a Broadcast of the media passed to all the clients registered in the server.
+- For which the server performs a Broadcast of the media passed to all the clients registered in the server.
     
      2. ```  
      "[FloodRequired]::"
      ```
-This is the message which alarms the server that there were some changes in the topology of the network. <br>
+- This is the message which alarms the server that there were some changes in the topology of the network. <br>
        There are 4 sub-cases : <br>
-       ```  
+       ``` rust 
        "[FloodRequired]::RemoveSender::{NodeId}::{NodeId}" --> removes sender channels between these 2 nodes
        "[FloodRequired]::AddSender::{NodeId}::{NodeId}" --> adds sender channels between these 2 nodes
        "[FloodRequired]::SpawnDrone::{NodeId}::{SpawnedDroneIdneighbors}" --> adds the connections to the newly spawned drone
