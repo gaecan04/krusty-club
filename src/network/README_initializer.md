@@ -118,14 +118,19 @@ Main orchestrator for launching the simulation. Reads configuration, validates i
 
 ```rust
 pub struct NetworkInitializer {
-    config: Config, // full parsed network topology (clients, drones, servers)
-    pub(crate) drone_impls: Vec<DroneWithId>, //vector of drones used to spawn threads dynamically
-    pub(crate) packet_senders: HashMap<NodeId, HashMap<NodeId, Sender<Packet>>>, //maps each node to its neighbor-specific sending channels. [All drones --> (each drone's neighbor - sender channel )]
-    pub(crate) packet_receivers: HashMap<NodeId, Receiver<Packet>>, //Maps each node to its packet receiving channel.
-    controller_tx: Sender<DroneEvent>, //Channel to send drone events to the simulation controller
-    controller_rx: Receiver<DroneCommand>, //Channel to receive commands from the simulation controller.
-    simulation_controller: Arc<Mutex<SimulationController>>, //reference to SimulationController wrapped in a Arc<Mutex<...>> so it can safely accessed between threads
-   
+    config: Config,
+    pub(crate) drone_impls: Vec<DroneWithId>,
+    pub(crate) packet_senders: Arc<Mutex<HashMap<NodeId, HashMap<NodeId, Sender<Packet>>>>>,
+    pub(crate) packet_receivers: Arc<Mutex<HashMap<NodeId, Receiver<Packet>>>>,
+    pub(crate) command_senders: Arc<Mutex<HashMap<NodeId, Sender<DroneCommand>>>>,
+    pub(crate) command_receivers: HashMap<NodeId, Receiver<DroneCommand>>, // ✅ Add this
+    pub(crate) controller_event_receiver: Option<Receiver<DroneEvent>>,
+    pub(crate) event_sender: Option<Sender<DroneEvent>>, // ✅ Also added previously
+    controller_tx: Sender<DroneEvent>,
+    controller_rx: Receiver<DroneCommand>,
+    simulation_controller: Option<Arc<Mutex<SimulationController>>>,
+    simulation_log: Arc<Mutex<Vec<String>>>,
+    pub(crate) shared_senders: Option<Arc<Mutex<HashMap<(NodeId, NodeId), Sender<Packet>>>>>,
 }
 ```
 ### `NetworkInitializer` Methods
@@ -160,6 +165,8 @@ Bootstraps the simulation:
 - Servers:
     - Must connect to at least 2 drones
     - Must not connect to themselves
+- Each client could be connected to all servers in the network
+- Each server could be connected to all clients in the network
 - Connections must be bidirectional
 - The graph must be connected
 - Clients and servers must sit at the edges of the graph
@@ -236,7 +243,7 @@ Used drones come from the `drone_impls` vector.
        
 ---
 
-### 👥 `initialize_clients(gui_input)`
+### 👥 `initialize_clients(gui_input,log,host_receivers)`
 
 #### Purpose:
 Start threads dedicated to each client in the simulation.
@@ -246,7 +253,7 @@ Start threads dedicated to each client in the simulation.
 
    ---
 
-### 🖥 `initialize_servers(gui_input)`
+### 🖥 `initialize_servers(gui_input,log,host_receivers)`
 
 #### Purpose:
 Start threads dedicated to each server in the simulation.
@@ -311,48 +318,6 @@ Each time a GroupImplFactory is created we insert it in an HashMap as the value 
 ```rust
 fn load_group_implementations() -> HashMap<String, GroupImplFactory>
 ```
-
----
-
-### 🕸 `configure_drone_connections()`
-
-#### Purpose:
-Finds and creates all the connections of the network based on the drones. First the conncetions are set up among the drones:
-```rust
-for drone_config in &self.config.drone {
-            let drone_id = drone_config.id;
-
-            // Find the drone implementation
-            if let Some(drone_impl) = self.drone_impls.iter_mut().find(|d| d.id == drone_id) {
-                // Configure connections to other drones
-                for &connected_id in &drone_config.connected_node_ids {
-                    println!("Drone {} connected to node {}", drone_id, connected_id);
-                }
-            }
-        }
-```
-then we look for the drones connected to clients and establish the connections:
-```rust
-for client in &self.config.client {
-            for &drone_id in &client.connected_drone_ids {
-                if let Some(drone_impl) = self.drone_impls.iter_mut().find(|d| d.id == drone_id) {
-                    println!("Client {} connected to drone {}", client.id, drone_id);
-                }
-            }
-        }
-```
-the servers are the last to be checked and set up:
-```rust
-for server in &self.config.server {
-            for &drone_id in &server.connected_drone_ids {
-                if let Some(drone_impl) = self.drone_impls.iter_mut().find(|d| d.id == drone_id) {
-                    println!("Server {} connected to drone {}", server.id, drone_id);
-                }
-            }
-        }
-```
-In each cycle the connections are found and established based on the HashMap of connected drones each element possesses, each of which is initialized based on the configuration file we are using.
-
 
 ---
 ---
