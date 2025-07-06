@@ -29,6 +29,14 @@ The  `MyClient` struct encapsulates the state and capabilities of a client in th
 
 -   `route_cache`: an HashMap to store routes calculated for destinations, to avoid costly recalculations and repeated flood discovery processes
 
+-   `simualtion_log`: allows the client to record information messages, warnings and errors that occur during its execution. Messages are added to a Vec<String> protected by a Mutex and Arc, allowing secure access and editing by multiple threads, ensuring detailed tracking of the client’s operations
+
+-   `shared_senders`: this `Option<Arc<Mutex<HashMap<(NodeId, NodeId), Sender<Packet>>>>>` contains a reference (shared and mutually exclusive) to a global map of Senders. Each sender in this map represents an active communication channel between 2 specific nodes `(NodeId, NodeId)` in the network. It permits the client to determine if a node is crashed
+
+-   `shortcut_receiver`: a dedicated receiving channel for shortcut packets coming directly from the Simulation Controller
+
+-   `pending_messages_after_flood`: stores high-level messages (in the form of GUI commands) that the client failed to send immediately
+
 ### 🆕`new` function
 
 The `new` function is the constructor for `MyClient`. It initializes all fields of the struct, including communication channels, maps for messages and network graph. This is where the initial state of the client is established before its operation begins.
@@ -36,6 +44,12 @@ The `new` function is the constructor for `MyClient`. It initializes all fields 
 ### 🏃🏻‍♀`️run` function
 
 The `run` method is the heart of the client, containing its operational life cycle.
+
+Processes GUI commands: Handles external inputs, such as user requests (e.g. Login, Logout, send messages, upload/download media) or commands from the simulation (e.g. AddSender, RemoveSender, SpawnDrone, Crash).
+
+Check network discovery timeout: Periodically check if flood discovery operations have expired and, if so, finalize the topology construction and attempt to send waiting messages.
+
+Process incoming packages: Use select_biased! to prioritise the packets of the shortcut_receiver (used by the Simulation Controller for non-droppable packets) and then handles the other packets received from nearby nodes.
 
 **Discovery start**: at startup, if the client's `network_graph` is empty (that is, it does not yet have a knowledge of the topology), the client immediately starts a flood discovery process to populate its network graph. This is critical because clients and servers use Source Routing, which means they need to know the entire path to destination since drones do not maintain routing tables.
 
@@ -46,6 +60,20 @@ The `run` method is the heart of the client, containing its operational life cyc
 2.  **incoming packets**: listen to incoming packages on the `packet_recv` channel
 
 `Flood discovery timeout`: each iteration of the loop also checks for active flood discoveries. If a timeout expires (2000 ms), the responses collected for that flood are processed to finalize the topology update.
+
+* * * * *
+
+### 📝Logging functions
+
+The `attach_log` and `log` functions within the `MyClient` structure are dedicated to the management and recording of client events and operational status, based on the `simulation_log` property.
+
+### `attach_log` function
+
+This feature allows you to connect an external instance of a shared logger.
+
+### `log` function
+
+This function is the main method used by the client to write messages into its internal log (`simulation_log`).
 
 * * * * *
 
@@ -115,9 +143,11 @@ This function handles the different types of NACK.
 
 -   indicates that a drone could not forward a packet because the next hop in the route was not its neighbor
 
--   the client interprets this as a crash of the problem node and removes it from its `network_graph` using `remove_node_from_graph`
+-   if the node is crashed: The client removes the problematic node from its internal map node_id_to_index and its network_graph (the representation of the network topology)
 
--   the route for that session is marked for recalculation (`route_needs_recalculation = true`) and the route stored in the `route_cache` for the destination is invalidated
+-   if the node is still active (connection failure): The client removes the link (arc) from its network_graph that connects the previous node in the route to the problem_node_id, in both directions. It also removes any senders directed to that node from its packet_send map
+
+In both cases, the route for the session involved is marked for recalculation (route_needs_recalculation = true), and any cache route to the final destination is invalidated, making it necessary to find a new route in the future.
 
 **`NackType::DestinationIsDrone`**:
 
@@ -148,6 +178,10 @@ This function increases the "drop" count (`weight`) of a specific edge in the `n
 ### `remove_node_from_graph` function
 
 This function removes a node and all its associated edges from the client `network_graph`. This is called in the case of `NackType::ErrorInRouting`.
+
+### `remove_link_from_graph` function
+
+This function is specifically designed to remove links (edges) between two specific nodes within the client `network_graph`.
 
 ### ✅ACK management
 
@@ -207,17 +241,15 @@ This function analyzes the reassembled high-level messages and implements their 
 
 The function is critical for network routing and the client's ability to find the most efficient path for packets.
 
-**Cache search**: before calculating a new route, the client checks the `route_cache` to see if there is already a valid and recent route for the specified destination. If found, the route is returned immediately.
+**Path search algorithm**: best_path implements a cost-based shortest path algorithm (similar to Dijkstra). This algorithm explores the graph by assigning a cumulative "cost" or "weight" to each path and selecting the one with the lowest total cost.
 
-**Astar algorithm**: if the route is not cached or has been disabled, the function implements the Astar algorithm (which with a heuristic of 0 becomes equivalent to Dijkstra) to find the path at minimum cost.
+**Dynamic graph synchronization**: before starting the route calculation, the function ensures that the client’s internal `network_graph` is synchronized with the current state of shared communication channels (`shared_senders`). This process is essential to ensure that the calculated paths are valid compared to the real network connectivity, removing any connections from the graph if the corresponding sending channels are no longer active or do not exist.
 
-**Temporary graph construction**: a DiGraph temporary graph is constructed for the path calculation, copying nodes and edges from the client network_graph. Edge weights are based on "drop" counts, which means that links with multiple errors or bounces are considered more "expensive".
+**Cost and drop management**: the weights of the arcs in the graph (initially 0) can be increased by the `increment_drop` function. This happens, for example, when a package is dropped or arrives at an unexpected recipient. Increasing the weight of a problematic connection discourages the router from using it in future routes, favouring more reliable routes.
 
-**Route reconstruction**: once Dijkstra has calculated the minimum costs, the route is reconstructed backwards from destination to origin using predecessors.
+**Intermediate node restrictions**: when calculating the route, it is important to note that only drones can act as intermediate nodes. Clients and servers can only be the starting or finishing nodes of the path, they cannot be part of the intermediate path.
 
-**Validation and error handling**: checks are performed to make sure that the starting and arrival nodes are present in the graph and that the calculated path is valid (not empty, starts and ends correctly).
-
-**Trigger Flood Discovery**: if `best_path` fails to find a route (for example, if the graph is empty or the destination is unreachable), the client starts a new Flood Discovery process to update its knowledge of the network.
+**Output**: the function returns an `Option<Vec<NodeId>>`. If a path is found, returns `Some(path)` where path is an ordered list of `NodeId` that represents the path from the source node to the destination node. If no valid path is found, returns `None`.
 
 * * * * *
 
@@ -225,17 +257,35 @@ The function is critical for network routing and the client's ability to find th
 
 This function is the entry point for commands sent from the GUI to the client. It analyzes the received `command_string`, which represents a high-level message, and activates the appropriate logic:
 
--   **parsing commands**: the command string is divided into tokens to identify the type of command and its parameters
+-   `[FloodRequired]`: this command is indicator of a change in the simulated network topology and require an update of client knowledge
+    `AddSender`: adds a new send channel to a node and updates the client's `network_graph` to include the new bidirectional link
+    `RemoveSender`: removes a send channel to a node and invokes `remove_link_from_graph` to update the internal graph, reflecting the disconnection
+    `SpawnDrone`: if the client is connected (or can connect) to the new drone, this operation adds the drone to the `network_graph` of the client and establishes the appropriate communication channles
+    `Crash`: indicates the crash of a specific node. The client removes the node and all its links from the `network_graph` and `packet_send_map`, reflecting the unavailability state
 
--   **Login/Logout**: manages login requests to a server, updating `connected_server_id` and logout requests
+-   `[Login]`: tries to authenticate the client with the specified server, updating the `connected_server_id` variable of the client
 
--   **service requests**: triggers various types of requests to servers, such as `ClientListRequest`, `MediaDownloadRequest`, `MediaListRequest`, `HistoryRequest` and `MediaBroadcast`
+-   `[Logout]`: disconnects the client from the connected server, setting `connected_server_id` to `None`
 
--   **chat communications**: manages the sending of specific messages (`MessageTo`, `ChatRequest`, `ChatFinish`)
+-   `ClientListRequest`: requests to the server a list of the connected clients
 
--   **trigger flood**: command is received (often in response to topology changes from the Simulation Controller), the function calls `start_flood_discovery`
+-   `[MessageTo]`: sends a chat message to a specific client through server
 
--   **sending high_level messages**: after determining the GUI command type, the route (`best_path`) to `connected_server_id` is attempted. If a route is found, the message is fragmented and sent to the first hop of the route. If the route fails, a Flood Discovery is initiated
+-   `[ChatRequest]`: sends a request to chat to a specific client through server
+
+-   `[ChatFinish]`: flags the ending of a chat session with a specific peer
+
+-   `[MediaUpload]`: uploads a multimedia file (encoded in `Base64`) on server
+
+-   `[MediaDownloadRequest]`: request the download of a multimedia file to a server
+
+-   `[HistoryRequest]`: request to the server the chronology of the chat between 2 specific clients
+
+-   `[MediaListRequest]`: request to the server a list of the available multimedia file
+
+-   `[MediaBroadcast]`: sends a multimedia file to all the connected clients through a server
+
+If the `best_path` function is not able to find a valid route, the client queue the message in `pending_messages_after_flood`. Then, the client start a flood discovery.
 
 * * * * *
 
