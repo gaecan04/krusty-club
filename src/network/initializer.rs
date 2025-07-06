@@ -384,7 +384,7 @@ impl_drone_adapter!(CppEnjoyersDrone);
 pub struct DroneWithId {
     pub id: NodeId,
     pub instance: Box<dyn DroneImplementation>,
-    pub group_name: Option<String>, // ← if this exists
+    pub group_name: Option<String>,
 
 }
 

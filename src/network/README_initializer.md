@@ -78,7 +78,6 @@ The trait "DroneImplementation" is implemented for MyDrone.
       fn run(&mut self) {
          <Self as DroneTrait>::run(self);
       }
-      //The DroneImplementation trait (your internal abstraction for launching drones) requires a run() method. This implementation simply delegates to the existing logic in the Drone trait’s run() function.
    }
 
    macro_rules! impl_drone_adapter {
@@ -88,7 +87,6 @@ The trait "DroneImplementation" is implemented for MyDrone.
                      <Self as wg_2024::drone::Drone>::run(self);
 
                   }
-                  //It generates a DroneImplementation implementation for any drone type ($name) that already implements the wg_2024::drone::Drone trait.
          }
       };
    }
@@ -123,9 +121,9 @@ pub struct NetworkInitializer {
     pub(crate) packet_senders: Arc<Mutex<HashMap<NodeId, HashMap<NodeId, Sender<Packet>>>>>,
     pub(crate) packet_receivers: Arc<Mutex<HashMap<NodeId, Receiver<Packet>>>>,
     pub(crate) command_senders: Arc<Mutex<HashMap<NodeId, Sender<DroneCommand>>>>,
-    pub(crate) command_receivers: HashMap<NodeId, Receiver<DroneCommand>>, // ✅ Add this
+    pub(crate) command_receivers: HashMap<NodeId, Receiver<DroneCommand>>, // 
     pub(crate) controller_event_receiver: Option<Receiver<DroneEvent>>,
-    pub(crate) event_sender: Option<Sender<DroneEvent>>, // ✅ Also added previously
+    pub(crate) event_sender: Option<Sender<DroneEvent>>, // 
     controller_tx: Sender<DroneEvent>,
     controller_rx: Receiver<DroneCommand>,
     simulation_controller: Option<Arc<Mutex<SimulationController>>>,
@@ -223,10 +221,8 @@ Used drones come from the `drone_impls` vector.
 
 ```rust
  for DroneWithId { id, mut instance } in self.drone_impls.drain(..) {
-            //let mut drone = drone_impl; // Box<dyn DroneImplementation>
-            //let id = drone.get_id();
 
-            // Spawn a thread that just runs the drone's run() method
+            // we spawn a thread that just runs the drone's run() method
             thread::spawn(move || {
                 instance.run(); // <- Each group's own logic
             });
