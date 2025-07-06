@@ -154,7 +154,7 @@ Parses command-based messages:
 - `[MediaUpload]::media_name::base64`: insert in media_storage a media --> sends format!("[MediaUploadAck]::{}", media_name)
 - `[MediaListRequest]`: sends format("[MediaListResponse]::{}", list)  where list contains all medias available on server.
    ![img_7.png](imgs_terminal_server%2Fimg_7.png)
-- 
+ 
 - `[MediaDownloadRequest]::media_name`:  sends format!("[MediaDownloadResponse]::{}::{}", media_name, base64_data)
 
 - `[MediaBroadcast]::media_name::base64_data`: sends to all clients in self.registered_clients a format!("[MediaDownloadResponse]::{}::{}", media_name, base64_data),
