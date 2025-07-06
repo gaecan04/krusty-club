@@ -84,8 +84,9 @@ First thing done: analyze the network. --> self.initiate_network_discovery()
   All of them are treated with the logic od when they are received normally form the network.
 - `process_gui_messages(...)`: this function takes the message passed by the GUI and strips it.<br>
   There are 2 main cases:
-    1. ``` rust 
-     "[MediaBroadcast]::"
+
+      1. ``` rust 
+      "[FloodRequired]::"
      ```
   
        For which the server performs a Broadcast of the media passed to all the clients registered in the server.
