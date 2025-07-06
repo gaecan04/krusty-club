@@ -97,7 +97,11 @@ First thing done: analyze the network. --> self.initiate_network_discovery()
 - This is the message which alarms the server that there were some changes in the topology of the network. <br>
        There are 4 sub-cases : <br>
        
-       
+       "[FloodRequired]::RemoveSender::{NodeId}::{NodeId}" --> removes sender channels between these 2 nodes
+       "[FloodRequired]::AddSender::{NodeId}::{NodeId}" --> adds sender channels between these 2 nodes
+       "[FloodRequired]::SpawnDrone::{NodeId}::{SpawnedDroneIdneighbors}" --> adds the connections to the newly spawned drone
+       "[FloodRequired]::Crash::{NodeId}" --> detects the crashed node and removes it 
+
 ---
 ### Connection thread on Log Gui:
 #### `fn attach_log()`
